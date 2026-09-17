@@ -1,0 +1,10 @@
+node_modules/
+dist/
+test-results/
+artifacts/
+.firebase/
+.DS_Store
+.env
+.env.*
+!.env.example
+**/*firebase-adminsdk*.json

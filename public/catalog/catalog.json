@@ -1,0 +1,96 @@
+{
+  "generatedAt": "2026-09-17T08:13:47.358Z",
+  "sourceProductPath": "artifacts/products/polihome/vancouver/product.json",
+  "products": [
+    {
+      "id": "polihome-vancouver-162638009",
+      "retailerId": "polihome",
+      "retailerName": "Polihome",
+      "retailer": "Polihome",
+      "sourceUrl": "https://www.polihome.gr/el/products/Goniakos-kanapes-Vancouver-Gkri-Skouro",
+      "sku": "162638009",
+      "name": "Vancouver corner sofa",
+      "localizedNames": {
+        "el": "Γωνιακός Καναπές Vancouver",
+        "en": "Vancouver corner sofa"
+      },
+      "brand": "Huizhou Qianyi Furniture",
+      "group": "Seating",
+      "category": "Corner sofa",
+      "width": 223,
+      "depth": 146,
+      "height": 83,
+      "cornerDepth": 146,
+      "seatHeight": 46,
+      "feetHeight": 5,
+      "price": 479,
+      "currency": "EUR",
+      "tone": "#b8b7b3",
+      "accent": "#85837d",
+      "status": "Source extracted · 6 review warnings",
+      "thumbnailPath": "/catalog/polihome/vancouver/thumbnail.png?v=3b17181fb68a",
+      "modelPath": "/catalog/polihome/vancouver/shared.glb?v=3b17181fb68a",
+      "variants": [
+        {
+          "id": "grey-light",
+          "name": "Grey Light",
+          "sourceVariantName": "Γκρι Ανοιχτό",
+          "colorName": "light grey",
+          "tone": "#b8b7b3",
+          "accent": "#85837d",
+          "modelPath": "/catalog/polihome/vancouver/shared.glb?v=3b17181fb68a",
+          "thumbnailPath": "/catalog/polihome/vancouver/thumbnail.png?v=3b17181fb68a",
+          "materialReference": "generated tileable nap/weave maps with photo-sampled colour; not measured physical fabric",
+          "sourceAvailability": "Διαθέσιμο"
+        },
+        {
+          "id": "grey-dark",
+          "name": "Grey Dark",
+          "sourceVariantName": "Γκρι Σκούρο",
+          "colorName": "dark grey",
+          "tone": "#505256",
+          "accent": "#292b2e",
+          "modelPath": "/catalog/polihome/vancouver/shared.glb?v=3b17181fb68a",
+          "thumbnailPath": "/catalog/polihome/vancouver/thumbnail.png?v=3b17181fb68a",
+          "materialReference": "generated tileable nap/weave maps with photo-sampled colour; not measured physical fabric",
+          "sourceAvailability": "Διαθέσιμο"
+        }
+      ],
+      "sourceImages": [
+        "source/images/source-image-1.webp",
+        "source/images/source-image-2.webp",
+        "source/images/source-image-3.webp",
+        "source/images/source-image-4.webp",
+        "source/images/source-image-5.webp",
+        "source/images/source-image-6.webp",
+        "source/images/source-image-7.webp",
+        "source/images/source-image-8.webp",
+        "source/images/source-image-9.webp",
+        "source/images/source-image-11.webp",
+        "source/images/source-image-12.webp",
+        "source/images/source-image-15.webp",
+        "source/images/source-image-16.webp",
+        "source/images/source-image-17.webp",
+        "source/images/source-image-18.webp",
+        "source/images/source-image-19.webp",
+        "source/images/source-image-20.webp",
+        "source/images/source-image-21.webp"
+      ],
+      "verification": {
+        "productData": "partial",
+        "model": "generated",
+        "dimensions": "validated",
+        "generatedAsset": "approximate",
+        "humanReview": "pending",
+        "warnings": [
+          "Generic depth and corner depth are preserved as separate fields.",
+          "Component sizes, fabric weave, seams and wrinkles are inferred from photographs.",
+          "Closed sofa only; sleeping and storage mechanisms are not animated.",
+          "Rear and hidden construction are not manufacturer-verified.",
+          "This product-specific recipe is not an automatic reconstruction algorithm for arbitrary furniture.",
+          "Visual likeness and generated fabric await human review; dimension validation does not verify appearance."
+        ]
+      }
+    }
+  ]
+}

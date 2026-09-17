@@ -1,0 +1,12 @@
+.gcloudignore
+.git
+.gitignore
+node_modules/
+dist/
+artifacts/
+test-results/
+.env
+.env.*
+!.env.example
+*.blend
+.DS_Store

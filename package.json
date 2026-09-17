@@ -1,0 +1,41 @@
+{
+  "name": "forma-room-planner",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "playwright test --workers=1",
+    "product:ingest": "tsx scripts/product-ingest.ts",
+    "product:scrape": "tsx scripts/scrape-product.ts",
+    "product:model": "tsx scripts/generate-sofa.ts",
+    "product:validate": "tsx scripts/validate-model.ts",
+    "product:register": "tsx scripts/register-catalog.ts",
+    "product:check": "tsc --noEmit --module esnext --moduleResolution bundler --target es2022 --esModuleInterop --skipLibCheck scripts/admin-server.ts scripts/catalog-workflow.ts scripts/product-ingest.ts",
+    "admin:server": "tsx scripts/admin-server.ts"
+  },
+  "dependencies": {
+    "@google-cloud/tasks": "7.1.1",
+    "@react-three/drei": "10.7.6",
+    "@react-three/fiber": "9.3.0",
+    "firebase": "12.19.0",
+    "firebase-admin": "14.4.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "three": "0.180.0",
+    "three-gpu-pathtracer": "0.0.24"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "@types/node": "22.15.30",
+    "@types/react": "19.1.10",
+    "@types/react-dom": "19.1.7",
+    "@types/three": "0.180.0",
+    "@vitejs/plugin-react": "5.0.2",
+    "tsx": "^4.20.3",
+    "typescript": "5.8.3",
+    "vite": "7.3.6"
+  }
+}
