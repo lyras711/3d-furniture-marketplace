@@ -108,8 +108,8 @@ export async function runModelGeneration(options: ModelGenerationOptions): Promi
   let publicPath = localPublicPath
   let publicThumbnail = localThumbnail
   try {
-    publicPath = await uploadFile(glbPath, `catalog/${product.id}/shared.glb`)
-    if (existsSync(thumbnailPath)) publicThumbnail = await uploadFile(thumbnailPath, `catalog/${product.id}/thumbnail.png`)
+    publicPath = await uploadFile(glbPath, `catalog/${product.id}/shared.glb`, { public: true })
+    if (existsSync(thumbnailPath)) publicThumbnail = await uploadFile(thumbnailPath, `catalog/${product.id}/thumbnail.png`, { public: true })
   } catch (error) {
     if (process.env.K_SERVICE) throw new Error(`Firebase Storage upload failed: ${error instanceof Error ? error.message : String(error)}`)
     console.warn(`Firebase Storage unavailable; using local public paths: ${error instanceof Error ? error.message : String(error)}`)

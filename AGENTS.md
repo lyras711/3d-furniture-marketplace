@@ -58,3 +58,12 @@
 - Editor regression captures for the detailed sofa: `/tmp/forma-vancouver-detailed-desktop.png` and `/tmp/forma-vancouver-detailed-mobile.png`. Asset generation and validation replace normalized JSON atomically; `product:model --recover-from <snapshot.json>` restores only an empty or missing product file before regenerating.
 - Start the controlled catalog API with `npm run admin:server` and open `/admin` through Vite. The API persists jobs under ignored `artifacts/jobs/`, caps jobs at 100 products by default, checks robots/sitemaps, delays requests, deduplicates by existing SKU, and only runs the current Vancouver model recipe. Unsupported products stop as `needs-model-recipe` instead of receiving generic geometry.
 - One SKU owns one shared GLB. Colour variants reuse that geometry and provide material colour overrides; do not regenerate identical meshes per colour.
+
+# Deployment (2026-09-17)
+
+- Catalog GLBs/thumbnails are uploaded to the `forma-furniture-marketplace.firebasestorage.app` bucket as public objects (`uploadFile` `{ public: true }` → `publicUrl()`); signed URLs are the fallback. The bucket has a CORS config allowing GET/HEAD from the hosting domains and local dev ports — GLTFLoader fetches cross-origin and fails without it.
+- `register-catalog` appends `?v=`/`&v=` content hashes without stripping existing query params, preserving signed URLs.
+- `GOOGLE_APPLICATION_CREDENTIALS` points at a firebase-adminsdk key outside the repo. `.env.local` is only auto-loaded by `scripts/admin-server.ts`; CLI pipeline runs need the variable exported in the shell.
+- `firebase.json` rewrites both `/api/admin/**` and `/api/worker/**` to Cloud Run `forma-admin-worker`. Cloud Tasks worker delivery requires WORKER_URL/WORKER_TASK_SECRET on the service; a failed enqueue falls back to in-process execution, which Cloud Run CPU throttling can still freeze after the response. A trailing newline in `WORKER_TASK_SECRET` silently 401s every delivery (HTTP headers strip it) — the env var is trimmed in `admin-server`, and the stored secret version must be clean.
+- `ImportedProductModel` recolouring must preserve the mesh's material shape: assigning a material array to a single-material mesh (no geometry groups) makes Three.js draw nothing. Clone the scalar material for scalar sources, array for arrays.
+- Scanning a product-page URL seeds that URL into discovery (`discoverProductUrls`); a bare domain scan still walks sitemaps/categories only.

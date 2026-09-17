@@ -38,11 +38,14 @@ function contentType(file: string) {
   return ({ '.json': 'application/json', '.html': 'text/html; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.glb': 'model/gltf-binary' } as Record<string, string>)[ext] || 'application/octet-stream'
 }
 
-export async function uploadFile(localPath: string, storageKey: string) {
+export async function uploadFile(localPath: string, storageKey: string, options: { public?: boolean } = {}) {
   const buffer = await readFile(localPath)
   const bucket = firebaseStore().storage.bucket()
   const file = bucket.file(storageKey)
   await file.save(buffer, { resumable: false, metadata: { contentType: contentType(localPath), cacheControl: 'public,max-age=31536000,immutable' } })
+  if (options.public) {
+    try { await file.makePublic(); return file.publicUrl() } catch {}
+  }
   const [url] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 365 * 24 * 60 * 60 * 1000 })
   return url
 }

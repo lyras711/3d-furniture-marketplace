@@ -185,11 +185,12 @@ function ImportedProductModel({ path, product, variantId }: { path: string; prod
       const mesh = object as unknown as { isMesh?: boolean; material?: unknown }
       if (!mesh.isMesh || !mesh.material) return
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-      mesh.material = materials.map((material) => {
+      const cloned = materials.map((material) => {
         const next = (material as { clone: () => { name?: string; color?: { set: (value: string) => void } } }).clone()
         if (next.color && /upholstery|cushion|fabric/i.test(next.name || '')) next.color.set(tone)
         return next
       })
+      mesh.material = Array.isArray(mesh.material) ? cloned : cloned[0]
     })
     return clone
   }, [scene, path, tone])

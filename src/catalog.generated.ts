@@ -27,8 +27,8 @@ export const generatedProducts: Product[] = [
     "tone": "#b8b7b3",
     "accent": "#85837d",
     "status": "Source extracted · 6 review warnings",
-    "thumbnailPath": "/catalog/polihome/vancouver/thumbnail.png?v=3b17181fb68a",
-    "modelPath": "/catalog/polihome/vancouver/shared.glb?v=3b17181fb68a",
+    "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fthumbnail.png?v=3b17181fb68a",
+    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a",
     "variants": [
       {
         "id": "grey-light",
@@ -37,8 +37,8 @@ export const generatedProducts: Product[] = [
         "colorName": "light grey",
         "tone": "#b8b7b3",
         "accent": "#85837d",
-        "modelPath": "/catalog/polihome/vancouver/shared.glb?v=3b17181fb68a",
-        "thumbnailPath": "/catalog/polihome/vancouver/thumbnail.png?v=3b17181fb68a",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a",
+        "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fthumbnail.png?v=3b17181fb68a",
         "materialReference": "generated tileable nap/weave maps with photo-sampled colour; not measured physical fabric",
         "sourceAvailability": "Διαθέσιμο"
       },
@@ -49,8 +49,8 @@ export const generatedProducts: Product[] = [
         "colorName": "dark grey",
         "tone": "#505256",
         "accent": "#292b2e",
-        "modelPath": "/catalog/polihome/vancouver/shared.glb?v=3b17181fb68a",
-        "thumbnailPath": "/catalog/polihome/vancouver/thumbnail.png?v=3b17181fb68a",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a",
+        "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fthumbnail.png?v=3b17181fb68a",
         "materialReference": "generated tileable nap/weave maps with photo-sampled colour; not measured physical fabric",
         "sourceAvailability": "Διαθέσιμο"
       }

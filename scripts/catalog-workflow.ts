@@ -120,6 +120,8 @@ export async function discoverProductUrls(siteUrl: string, maxProducts = DEFAULT
   const sitemapQueue = [...new Set([...policy.sitemaps, `${base.origin}/sitemap.xml`, `${base.origin}/sitemap_index.xml`])]
   const seenSitemaps = new Set<string>()
   const products = new Set<string>()
+  const submitted = normalizeUrl(siteUrl)
+  if (/\/products?\//i.test(base.pathname) && allowed(submitted, disallowed)) products.add(submitted)
   while (sitemapQueue.length && products.size < maxProducts && seenSitemaps.size < 50) {
     const sitemap = sitemapQueue.shift()!
     if (seenSitemaps.has(sitemap)) continue

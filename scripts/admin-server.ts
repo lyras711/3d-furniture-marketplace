@@ -94,7 +94,7 @@ async function catalogView() {
 
 async function enqueueJob(jobId: string) {
   const workerUrl = process.env.WORKER_URL
-  const workerSecret = process.env.WORKER_TASK_SECRET
+  const workerSecret = process.env.WORKER_TASK_SECRET?.trim()
   if (!workerUrl || !workerSecret) return false
   const project = process.env.GCLOUD_PROJECT || 'forma-furniture-marketplace'
   const region = process.env.CLOUD_TASKS_REGION || 'europe-west1'
@@ -106,7 +106,13 @@ async function enqueueJob(jobId: string) {
 
 async function runJob(job: Awaited<ReturnType<typeof createCrawlJob>>, actor: Awaited<ReturnType<typeof context>>) {
   await audit(actor, 'crawl.started', job.id, { siteUrl: job.siteUrl, maxProducts: job.maxProducts })
-  if (await enqueueJob(job.id)) { await audit(actor, 'crawl.enqueued', job.id); return }
+  try {
+    if (await enqueueJob(job.id)) { await audit(actor, 'crawl.enqueued', job.id); return }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`Cloud Tasks enqueue failed; running job in-process: ${message}`)
+    await audit(actor, 'crawl.enqueue_failed', job.id, { error: message })
+  }
   if (!workers.has(job.id)) { workers.add(job.id); void runCrawlJob(job.id).finally(() => workers.delete(job.id)) }
 }
 
@@ -115,7 +121,7 @@ const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', `http://${request.headers.host || host}`)
     if (request.method === 'OPTIONS') { response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type' }); response.end(); return }
     if (request.method === 'POST' && url.pathname === '/api/worker/jobs') {
-      if (!process.env.WORKER_TASK_SECRET || request.headers['x-forma-worker-secret'] !== process.env.WORKER_TASK_SECRET) throw new ApiError(401, 'Worker task authentication is required.')
+      if (!process.env.WORKER_TASK_SECRET?.trim() || request.headers['x-forma-worker-secret'] !== process.env.WORKER_TASK_SECRET.trim()) throw new ApiError(401, 'Worker task authentication is required.')
       const input = await body(request)
       if (typeof input.jobId !== 'string') throw new ApiError(400, 'jobId is required.')
       const job = await runCrawlJob(input.jobId)

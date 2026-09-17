@@ -4,6 +4,7 @@
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
       { "source": "/api/admin/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
+      { "source": "/api/worker/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/admin{,/**}", "destination": "/index.html" },
       { "source": "/planner{,/**}", "destination": "/index.html" }
     ]
