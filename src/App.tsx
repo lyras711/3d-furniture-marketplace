@@ -49,7 +49,7 @@ const EURO = new Intl.NumberFormat('en-IE', {
   maximumFractionDigits: 0,
 })
 
-const categories: CategoryFilter[] = ['All', 'Seating', 'Tables', 'Lighting', 'Decor', 'Storage']
+const categories: CategoryFilter[] = ['All', 'Seating', 'Tables', 'Lighting', 'Decor', 'Storage', 'Bedroom']
 
 function loadProject(): ProjectState {
   if (typeof window === 'undefined') return emptyProject()

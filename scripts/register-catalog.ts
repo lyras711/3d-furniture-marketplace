@@ -49,18 +49,19 @@ function toCatalogRecord(product: NormalizedProduct): CatalogProductRecord {
   if (!product.modelAssets.length || product.modelAssets.some((asset) => asset.generationStatus !== 'generated')) warnings.push('One or more generated model assets are unavailable.')
   const modelComplete = product.modelAssets.some((asset) => asset.variantId === null && asset.generationStatus === 'generated')
   const dimensionsValidated = modelComplete && product.modelAssets.some((asset) => asset.variantId === null && asset.validationStatus === 'validated')
+  const meta = product.catalog
   return {
     id: product.id,
     retailerId: product.retailerId,
-    retailerName: 'Polihome',
-    retailer: 'Polihome',
+    retailerName: meta?.retailerName || 'Polihome',
+    retailer: meta?.retailerName || 'Polihome',
     sourceUrl: product.sourceUrl,
     sku: product.sourceProductCode,
-    name: product.localizedNames.en || product.name || 'Vancouver corner sofa',
+    name: product.localizedNames.en || product.name || 'Catalog product',
     localizedNames: product.localizedNames,
-    brand: product.brand || 'Unknown brand',
-    group: 'Seating',
-    category: 'Corner sofa',
+    brand: product.brand || meta?.retailerName || 'Unknown brand',
+    group: meta?.group || 'Seating',
+    category: meta?.category || 'Corner sofa',
     width: length ?? 0,
     depth: depth ?? 0,
     height: height ?? 0,
@@ -107,7 +108,7 @@ export async function registerCatalog(options: CatalogRegistrationOptions): Prom
     const parsed = JSON.parse(await readFile(registryPath, 'utf8')) as { products?: CatalogProductRecord[] }
     existing = Array.isArray(parsed.products) ? parsed.products : []
   } catch {}
-  const products = [...existing.filter((item) => item.id !== record.id && item.sku !== record.sku), record]
+  const products = [...existing.filter((item) => item.id !== record.id && !(record.sku && item.sku === record.sku)), record]
   const registry = { generatedAt: new Date().toISOString(), sourceProductPath: path.relative(process.cwd(), path.resolve(options.productPath)), products }
   await writeFile(registryPath, JSON.stringify(registry, null, 2), 'utf8')
   const source = `import type { Product } from './catalog'\n\nexport const generatedProducts: Product[] = ${JSON.stringify(products, null, 2)}\n`

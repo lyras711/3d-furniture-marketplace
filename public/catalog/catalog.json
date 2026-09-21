@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-09-17T12:08:57.146Z",
-  "sourceProductPath": "artifacts/products/polihome/vancouver/product.json",
+  "generatedAt": "2026-09-17T14:15:37.594Z",
+  "sourceProductPath": "artifacts/products/grecostrom/hermes/product.json",
   "products": [
     {
       "id": "polihome-vancouver-162638009",
@@ -88,6 +88,177 @@
           "Closed sofa only; sleeping and storage mechanisms are not animated.",
           "Rear and hidden construction are not manufacturer-verified.",
           "This product-specific recipe is not an automatic reconstruction algorithm for arbitrary furniture.",
+          "Visual likeness and generated fabric await human review; dimension validation does not verify appearance."
+        ]
+      }
+    },
+    {
+      "id": "homad-canova",
+      "retailerId": "homad",
+      "retailerName": "HOMAD",
+      "retailer": "HOMAD",
+      "sourceUrl": "https://www.homad.eu/product/canova/",
+      "sku": null,
+      "name": "Canova",
+      "localizedNames": {
+        "el": "Canova"
+      },
+      "brand": "HOMAD",
+      "group": "Seating",
+      "category": "Modular sofa",
+      "width": 369,
+      "depth": 183,
+      "height": 92,
+      "cornerDepth": null,
+      "seatHeight": null,
+      "feetHeight": null,
+      "price": null,
+      "currency": "EUR",
+      "tone": "#505256",
+      "accent": "#292b2e",
+      "status": "Source extracted · 5 review warnings",
+      "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fthumbnail.jpg?v=6931fa76a2d7",
+      "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fshared.glb?v=6931fa76a2d7",
+      "variants": [
+        {
+          "id": "canova-default",
+          "name": "Default",
+          "sourceVariantName": "Default",
+          "colorName": null,
+          "tone": "#505256",
+          "accent": "#292b2e",
+          "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fshared.glb?v=6931fa76a2d7",
+          "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fthumbnail.jpg?v=6931fa76a2d7",
+          "materialReference": "",
+          "sourceAvailability": "available"
+        }
+      ],
+      "sourceImages": [],
+      "verification": {
+        "productData": "partial",
+        "model": "generated",
+        "dimensions": "validated",
+        "generatedAsset": "approximate",
+        "humanReview": "pending",
+        "warnings": [
+          "Product dimensions were incomplete on the source page; catalog footprint may be approximate.",
+          "No public price found on the source page.",
+          "Product dimensions were measured from the retailer 3D model, not product specifications.",
+          "Retailer configurator export; visual fidelity is the retailer's own approximation, not verified against the physical product.",
+          "Visual likeness and generated fabric await human review; dimension validation does not verify appearance."
+        ]
+      }
+    },
+    {
+      "id": "al2-prism-dining-table",
+      "retailerId": "al2",
+      "retailerName": "al2",
+      "retailer": "al2",
+      "sourceUrl": "https://www.al2.gr/product/prism-dining-table/",
+      "sku": null,
+      "name": "Prism C 001 Dining Table",
+      "localizedNames": {
+        "en": "Prism C 001 Dining Table"
+      },
+      "brand": "al2",
+      "group": "Tables",
+      "category": "Dining table",
+      "width": 240,
+      "depth": 124,
+      "height": 74,
+      "cornerDepth": null,
+      "seatHeight": null,
+      "feetHeight": null,
+      "price": null,
+      "currency": "EUR",
+      "tone": "#505256",
+      "accent": "#292b2e",
+      "status": "Source extracted · 5 review warnings",
+      "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fthumbnail.jpg?v=c55301140599",
+      "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fshared.glb?v=c55301140599",
+      "variants": [
+        {
+          "id": "prism-dining-table-default",
+          "name": "Default",
+          "sourceVariantName": "Default",
+          "colorName": null,
+          "tone": "#505256",
+          "accent": "#292b2e",
+          "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fshared.glb?v=c55301140599",
+          "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fthumbnail.jpg?v=c55301140599",
+          "materialReference": "",
+          "sourceAvailability": "available"
+        }
+      ],
+      "sourceImages": [],
+      "verification": {
+        "productData": "partial",
+        "model": "generated",
+        "dimensions": "validated",
+        "generatedAsset": "approximate",
+        "humanReview": "pending",
+        "warnings": [
+          "Product dimensions were incomplete on the source page; catalog footprint may be approximate.",
+          "No public price found on the source page.",
+          "Product dimensions were measured from the retailer 3D model, not product specifications.",
+          "Retailer configurator export; visual fidelity is the retailer's own approximation, not verified against the physical product.",
+          "Visual likeness and generated fabric await human review; dimension validation does not verify appearance."
+        ]
+      }
+    },
+    {
+      "id": "grecostrom-krevati-ermis",
+      "retailerId": "grecostrom",
+      "retailerName": "GrecoStrom",
+      "retailer": "GrecoStrom",
+      "sourceUrl": "https://grecostrom.gr/product/krevati-ermis/",
+      "sku": null,
+      "name": "Κρεβάτι Ερμής",
+      "localizedNames": {
+        "el": "Κρεβάτι Ερμής"
+      },
+      "brand": "GrecoStrom",
+      "group": "Bedroom",
+      "category": "Bed",
+      "width": 159,
+      "depth": 185,
+      "height": 102,
+      "cornerDepth": null,
+      "seatHeight": null,
+      "feetHeight": null,
+      "price": null,
+      "currency": "EUR",
+      "tone": "#505256",
+      "accent": "#292b2e",
+      "status": "Source extracted · 5 review warnings",
+      "thumbnailPath": null,
+      "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fgrecostrom-krevati-ermis%2Fshared.glb?v=55e4984db983",
+      "variants": [
+        {
+          "id": "krevati-ermis-default",
+          "name": "Default",
+          "sourceVariantName": "Default",
+          "colorName": null,
+          "tone": "#505256",
+          "accent": "#292b2e",
+          "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fgrecostrom-krevati-ermis%2Fshared.glb?v=55e4984db983",
+          "thumbnailPath": null,
+          "materialReference": "",
+          "sourceAvailability": "available"
+        }
+      ],
+      "sourceImages": [],
+      "verification": {
+        "productData": "partial",
+        "model": "generated",
+        "dimensions": "validated",
+        "generatedAsset": "approximate",
+        "humanReview": "pending",
+        "warnings": [
+          "Product dimensions were incomplete on the source page; catalog footprint may be approximate.",
+          "No public price found on the source page.",
+          "Product dimensions were measured from the retailer 3D model, not product specifications.",
+          "Retailer configurator export; visual fidelity is the retailer's own approximation, not verified against the physical product.",
           "Visual likeness and generated fabric await human review; dimension validation does not verify appearance."
         ]
       }

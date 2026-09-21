@@ -6,7 +6,9 @@
       { "source": "/api/admin/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/api/worker/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/admin{,/**}", "destination": "/index.html" },
-      { "source": "/planner{,/**}", "destination": "/index.html" }
+      { "source": "/planner{,/**}", "destination": "/index.html" },
+      { "source": "/for-business{,/**}", "destination": "/index.html" },
+      { "source": "/b2b{,/**}", "destination": "/index.html" }
     ]
   },
   "firestore": {

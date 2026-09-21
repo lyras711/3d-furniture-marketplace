@@ -35,7 +35,7 @@ export async function upsertCatalogProduct(record: CatalogProductRecord) {
 
 function contentType(file: string) {
   const ext = path.extname(file).toLowerCase()
-  return ({ '.json': 'application/json', '.html': 'text/html; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.glb': 'model/gltf-binary' } as Record<string, string>)[ext] || 'application/octet-stream'
+  return ({ '.json': 'application/json', '.html': 'text/html; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.avif': 'image/avif', '.glb': 'model/gltf-binary' } as Record<string, string>)[ext] || 'application/octet-stream'
 }
 
 export async function uploadFile(localPath: string, storageKey: string, options: { public?: boolean } = {}) {
@@ -46,8 +46,12 @@ export async function uploadFile(localPath: string, storageKey: string, options:
   if (options.public) {
     try { await file.makePublic(); return file.publicUrl() } catch {}
   }
-  const [url] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 365 * 24 * 60 * 60 * 1000 })
-  return url
+  try {
+    const [url] = await file.getSignedUrl({ action: 'read', expires: Date.now() + 365 * 24 * 60 * 60 * 1000 })
+    return url
+  } catch {
+    return file.cloudStorageURI.href
+  }
 }
 
 export async function uploadArtifactTree(localRoot: string, storagePrefix: string) {

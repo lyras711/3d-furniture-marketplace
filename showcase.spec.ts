@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import { emptyProject, fitsFloor, getFloorRegions, isProject } from './src/editor'
 
-test.use({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce', launchOptions: { executablePath: process.env.CHROMIUM_PATH, channel: process.platform === 'darwin' ? 'chromium' : undefined, args: process.platform === 'darwin' ? ['--use-angle=metal'] : [] }, screenshot: 'only-on-failure', trace: 'retain-on-failure' })
+test.use({ viewport: { width: 1440, height: 1000 }, contextOptions: { reducedMotion: 'reduce' }, launchOptions: { executablePath: process.env.CHROMIUM_PATH, channel: process.platform === 'darwin' ? 'chromium' : undefined, args: process.platform === 'darwin' ? ['--use-angle=metal'] : [] }, screenshot: 'only-on-failure', trace: 'retain-on-failure' })
 const url = (process.env.TEST_URL || 'http://127.0.0.1:5174').replace(/\/$/, '')
 const saved = JSON.stringify(emptyProject('My existing project'))
 async function start(page: Page) {
@@ -120,7 +120,7 @@ test('showcase 3D demo uses real furniture and returns to a usable plan', async 
 test('showcase keeps the guided demo usable when WebGL is unavailable', async ({ page }) => {
   await page.addInitScript(() => {
     const original = HTMLCanvasElement.prototype.getContext
-    HTMLCanvasElement.prototype.getContext = function (contextId: string, ...options: unknown[]) {
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, contextId: string, ...options: unknown[]) {
       if (contextId === 'webgl' || contextId === 'webgl2' || contextId === 'experimental-webgl') return null
       return original.apply(this, [contextId, ...options] as Parameters<typeof original>)
     } as typeof original

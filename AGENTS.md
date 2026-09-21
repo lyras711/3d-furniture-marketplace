@@ -37,7 +37,7 @@
 
 # Brand showcase (2026-09-16)
 
-- `/` serves `src/Showcase.tsx`; `/planner` serves the existing editor. Root `#project=` links still open the editor. Hosting must rewrite `/planner` to `index.html`. `TEST_URL` is the server origin, not the planner path.
+- `/` serves `src/Showcase.tsx`; `/planner` serves the existing editor. `/for-business` (with `/b2b` as an alias) serves the B2B retailer landing page. Root `#project=` links still open the editor. Hosting must rewrite `/planner`, `/for-business` and `/b2b` to `index.html`. `TEST_URL` is the server origin, not the planner path.
 - The showcase is lazy-separated from the editor. Its SVG guided demo does not touch localStorage. Opt-in 3D reuses `ProductModel`; quote drafts use catalogue prices and valid project geometry. Drafts and partnership briefs are local downloads, not purchases or lead submissions.
 - Original local showcase JPGs are path-traced from the project's sample models and CC0 surfaces, not retailer photography. Regenerate with the dev server running using `node showcase-assets.mjs`; `/?art=room` and product IDs expose the asset-rendering views. No image-generation service is required.
 - `npm test -- showcase.spec.ts` checks the guided journey, totals, downloads, saved-project preservation, shared-link routing, 3D, dialogs and responsive layouts. Full-page captures: `/tmp/forma-showcase-1440.png` and `/tmp/forma-showcase-375.png`.
@@ -67,3 +67,19 @@
 - `firebase.json` rewrites both `/api/admin/**` and `/api/worker/**` to Cloud Run `forma-admin-worker`. Cloud Tasks worker delivery requires WORKER_URL/WORKER_TASK_SECRET on the service; a failed enqueue falls back to in-process execution, which Cloud Run CPU throttling can still freeze after the response. A trailing newline in `WORKER_TASK_SECRET` silently 401s every delivery (HTTP headers strip it) — the env var is trimmed in `admin-server`, and the stored secret version must be clean.
 - `ImportedProductModel` recolouring must preserve the mesh's material shape: assigning a material array to a single-material mesh (no geometry groups) makes Three.js draw nothing. Clone the scalar material for scalar sources, array for arrays.
 - Scanning a product-page URL seeds that URL into discovery (`discoverProductUrls`); a bare domain scan still walks sitemaps/categories only.
+
+# Catalog sources (2026-09-17)
+
+- `scripts/catalog-sources.ts` registers verified retailer/manufacturer sources for existing 3D assets (pivot away from AI generation). Statuses: `exportable-configurator`, `partnership-required`, `materials-source`.
+- al2 (`configurator.al2.gr`), HOMAD (`configurator.homad.eu`) and GrecoStrom (`configurator.grecostrom.gr`) all run Unity WebGL configurators by the same vendor (Exact3D/ExactADV Player) with a built-in client-side GLB export: Unity `SendMessage("GameAssetsHandler","SimpleExport")` + `downloadGL(B).js`. Model ids are public `?model=` parameters.
+- IKEA, AlfaWood, Xylokat and HIT Fabrics are partnership or materials-only leads — no downloadable furniture GLBs verified. HIT Fabrics' real domain is hitfabrics.com, not hit-fabrics.gr. Never scrape protected planner assets or invent product data for unverified sources.
+
+# Configurator product ingestion (2026-09-17)
+
+- `scripts/ingest-configurator-product.ts` runs the full Exact3D-player product flow: WooCommerce scrape → Unity GLB export → postprocess → Storage upload → validation → registration. Requires `GOOGLE_APPLICATION_CREDENTIALS` exported; `--skip-upload` keeps local paths.
+- `scripts/scrape-woocommerce-product.ts` is the generic product-page scraper. Pass the browser-capture function to `page.evaluate` as a **string** — esbuild's `keepNames` transform injects `__name` into function callbacks, which crashes in the page context. Pages without `.product_title`/`h1` (e.g. GrecoStrom) fall back to `og:title`/`document.title` with the site suffix stripped.
+- `scripts/postprocess-configurator-glb.ts` inserts a `forma-normalize` root node in the glTF JSON (no re-export): auto unit scale (10×/0.1× when maxDim is implausible), floor snap to Y=0 and X/Z footprint centering via node translation.
+- B2B catalog pages (HOMAD, al2, GrecoStrom) expose no public price/dims/SKU — fields stay `null`, measured GLB dims fill `dimensionsCm` (rounded to cm) with a "measured from retailer 3D model" warning; `modelAsset.generationMethod` records the configurator host and `visualAccuracy` stays `pending-human-review`.
+- `register-catalog` dedupe bug: `sku: null` records collided (`item.sku !== record.sku` dropped previous null-SKU products). Filter by SKU only when non-null.
+- `validate-model` Vancouver material names are gated to that product id; other products just require ≥1 material. The shared-GLB check still requires `generationStatus: 'generated'` + `validationStatus: 'validated'`.
+- Verified pilots: `homad-canova` (369×183×92, 155k tris), `al2-prism-dining-table` (240×124×74, 7k tris), `grecostrom-krevati-ermis` (159×185×102 — mm-as-m export fixed by 0.1 scale). All render on-floor centered in the editor.

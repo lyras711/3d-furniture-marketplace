@@ -1,6 +1,6 @@
 import { generatedProducts } from './catalog.generated'
 
-export type CategoryFilter = 'All' | 'Seating' | 'Tables' | 'Lighting' | 'Decor' | 'Storage'
+export type CategoryFilter = 'All' | 'Seating' | 'Tables' | 'Lighting' | 'Decor' | 'Storage' | 'Bedroom'
 
 export interface ProductVariant {
   id: string

@@ -113,6 +113,12 @@ export interface NormalizedProduct {
     sourceStrategies: string[]
   }
   validationStatus: 'source-extracted' | 'warnings' | 'invalid'
+  /** Optional catalog display overrides; defaults in register-catalog preserve Polihome/Vancouver records. */
+  catalog?: {
+    retailerName?: string
+    group?: 'Seating' | 'Tables' | 'Lighting' | 'Decor' | 'Storage' | 'Bedroom'
+    category?: string
+  }
   createdAt: string
   updatedAt: string
 }
@@ -175,8 +181,8 @@ export interface CatalogProductRecord {
   name: string
   localizedNames: Record<string, string>
   brand: string
-  group: 'Seating'
-  category: 'Corner sofa'
+  group: 'Seating' | 'Tables' | 'Lighting' | 'Decor' | 'Storage' | 'Bedroom'
+  category: string
   width: number
   depth: number
   height: number

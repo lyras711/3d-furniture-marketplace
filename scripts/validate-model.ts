@@ -113,7 +113,9 @@ export async function runModelValidation(options: ModelValidationOptions): Promi
     result.polygonCount = measured.polygonCount
     result.materials = materials
     result.visualAccuracy = model?.visualAccuracy || 'pending-human-review'
-    result.requiredMaterialsPresent = ['Vancouver_Upholstery', 'Vancouver_Cushion_Fabric', 'Vancouver_Plastic_Feet'].every((name) => materials.some((material) => material.includes(name)))
+    result.requiredMaterialsPresent = product.id === 'polihome-vancouver-162638009'
+      ? ['Vancouver_Upholstery', 'Vancouver_Cushion_Fabric', 'Vancouver_Plastic_Feet'].every((name) => materials.some((material) => material.includes(name)))
+      : materials.length > 0
     if (!result.requiredMaterialsPresent) (result.warnings as string[]).push('One or more named material groups are missing from the exported GLB.')
     ;(result.warnings as string[]).push(...failedDimensions)
     if (model) {
