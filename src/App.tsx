@@ -3,15 +3,17 @@ import SurfaceMaterial from './SurfaceMaterial'
 
 const RenderStudio = lazy(() => import('./RenderStudio'))
 import { Canvas, useThree } from '@react-three/fiber'
-import { Edges, Html, Line, OrbitControls, RoundedBox, useGLTF } from '@react-three/drei'
-import SceneEnvironment, { Architecture } from './SceneEnvironment'
-import { CatmullRomCurve3, DoubleSide, MOUSE, Plane, Vector3, OrthographicCamera } from 'three'
+import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF } from '@react-three/drei'
+import SceneEnvironment, { Architecture, type EditorLightingMode } from './SceneEnvironment'
+import { analyzePlanFile, createProjectFromPlan, type PlanAnalysis, type PixelPoint, type PixelWall, type PixelOpening } from './planImport'
+import { ACESFilmicToneMapping, CatmullRomCurve3, DoubleSide, MOUSE, OrthographicCamera, PerspectiveCamera as ThreePerspectiveCamera, Plane, Vector3 } from 'three'
 import type { ThreeEvent } from '@react-three/fiber'
 import type { FormEvent, InputHTMLAttributes } from 'react'
 import { products, type CategoryFilter, type Product } from './catalog'
-import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, productById, refreshOpenings, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
+import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, productById, refreshOpenings, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 type ViewMode = '3d' | '2d'
+type LightingMode = EditorLightingMode
 type Tool = 'select' | 'wall' | 'door' | 'window'
 type FeatureType = Exclude<Tool, 'select'>
 
@@ -33,8 +35,10 @@ type IconName =
   | 'search'
   | 'share'
   | 'shopping'
+  | 'sun'
   | 'trash'
   | 'undo'
+  | 'upload'
   | 'wall'
   | 'window'
 
@@ -49,7 +53,7 @@ const EURO = new Intl.NumberFormat('en-IE', {
   maximumFractionDigits: 0,
 })
 
-const categories: CategoryFilter[] = ['All', 'Seating', 'Tables', 'Lighting', 'Decor', 'Storage', 'Bedroom']
+const categories: CategoryFilter[] = ['All', 'Seating', 'Tables', 'Lighting', 'Decor', 'Storage', 'Bedroom', 'Kitchen', 'Bathroom']
 
 function loadProject(): ProjectState {
   if (typeof window === 'undefined') return emptyProject()
@@ -104,8 +108,10 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
     search: 'm20 20-4.5-4.5M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13Z',
     share: 'M15 8l-6 4 6 4M15 8V5l5 3-5 3M9 12H4m5 0v7l-5-3 5-3',
     shopping: 'M5 7h14l-1 13H6L5 7Zm3 0a4 4 0 0 1 8 0M9 11v2m6-2v2',
+    sun: 'M12 3v2m0 14v2M3 12h2m14 0h2m-3.36-6.36-1.42 1.42m-8.44 8.44-1.42 1.42m0-11.28 1.42 1.42m8.44 8.44 1.42 1.42M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z',
     trash: 'M5 7h14m-9 4v5m4-5v5M9 7V4h6v3m-9 0 1 13h10l1-13',
     undo: 'M5 12a7 7 0 0 1 12-5l2 2m0 0h-5m5 0V4',
+    upload: 'M12 16V3m-5 5 5-5 5 5M5 20h14',
     wall: 'M4 5h16v14H4zM9 5v14m6-14v14M4 10h5m6 0h5M4 15h5m6 0h5',
     window: 'M4 4h16v16H4zM4 12h16M12 4v16',
   }
@@ -130,7 +136,7 @@ function ProductThumb({ product, compact = false }: { product: Product; compact?
           <path d={(product.category === 'Sofa' || product.category === 'Corner sofa') ? 'M28 55 Q28 43 40 45 L135 35 Q145 35 145 48 L145 84 L30 94Z' : 'M64 30 L116 25 L119 76 L67 84Z'} fill={product.tone} />
           <path d={(product.category === 'Sofa' || product.category === 'Corner sofa') ? 'M31 78 L125 65 L150 80 L56 99 L31 91Z' : 'M64 77 L113 68 L133 82 L84 95 L64 85Z'} fill={product.tone} />
           {(product.category === 'Sofa' || product.category === 'Corner sofa') && <><path d="M29 68 Q21 64 22 74 L23 92 L40 99 L40 77Z M132 55 L147 53 L156 61 L155 83 L139 88 L138 65Z" fill={product.accent} /><path d="M61 53v23m35-26v22M42 80l94-14" fill="none" opacity="0.5" /></>}
-        </g> : table ? <g><path d="M44 64v39m89-50v37M63 80v31m85-45v39" strokeWidth="6" /><path d="M27 59 L115 36 L159 62 L69 91 L27 68Z" fill={product.accent} /><path d="M27 59 L115 36 L159 62 L69 84Z" fill={product.tone} /><path d="M42 60l72-18M54 67l71-19" opacity="0.35" /></g> : product.category === 'Rug' ? <g><path d="M23 79 L116 43 L163 78 L65 113Z" fill={product.tone} /><path d="M33 80l83-31 36 28-85 29Z" fill="none" /><path d="M43 81l70-26m-60 34 72-27m-60 34 71-28" opacity="0.3" /></g> : product.category === 'Floor lamp' ? <g><ellipse cx="91" cy="107" rx="24" ry="5" fill={product.accent} /><path d="M91 104V38" strokeWidth="3" /><path d="M75 23h31l19 34Q92 68 57 57Z" fill={product.tone} /><ellipse cx="91" cy="23" rx="16" ry="4" fill="#eee5d2" /></g> : product.category === 'Plant' ? <g><path d="M71 86h41l-7 26H78Z" fill="#b3a28c" stroke="#8b7964" /><path d="M92 90V30m0 34L68 47m24 32 22-23" fill="none" strokeWidth="3" /><ellipse cx="69" cy="41" rx="14" ry="23" transform="rotate(-35 69 41)" fill={product.tone} /><ellipse cx="112" cy="48" rx="15" ry="24" transform="rotate(25 112 48)" fill={product.accent} /><ellipse cx="91" cy="28" rx="13" ry="23" fill={product.tone} /></g> : <g><path d="M36 49 L123 31 L148 46 L61 66Z" fill={product.tone} /><path d="M36 49v44l25 16V66Z" fill={product.accent} /><path d="M61 66l87-20v44l-87 19Z" fill={product.tone} /><path d="M89 60v42m31-49v42M38 96v10m105-13v10" fill="none" strokeWidth="2" />{product.category === 'Shelving' && <path d="M64 80l82-19M64 95l82-19" strokeWidth="5" />}</g>}
+        </g> : table ? <g><path d="M44 64v39m89-50v37M63 80v31m85-45v39" strokeWidth="6" /><path d="M27 59 L115 36 L159 62 L69 91 L27 68Z" fill={product.accent} /><path d="M27 59 L115 36 L159 62 L69 84Z" fill={product.tone} /><path d="M42 60l72-18M54 67l71-19" opacity="0.35" /></g> : product.category === 'Rug' ? <g><path d="M23 79 L116 43 L163 78 L65 113Z" fill={product.tone} /><path d="M33 80l83-31 36 28-85 29Z" fill="none" /><path d="M43 81l70-26m-60 34 72-27m-60 34 71-28" opacity="0.3" /></g> : product.category === 'Floor lamp' ? <g><ellipse cx="91" cy="107" rx="24" ry="5" fill={product.accent} /><path d="M91 104V38" strokeWidth="3" /><path d="M75 23h31l19 34Q92 68 57 57Z" fill={product.tone} /><ellipse cx="91" cy="23" rx="16" ry="4" fill="#eee5d2" /></g> : product.category === 'Plant' ? <g><path d="M71 86h41l-7 26H78Z" fill="#b3a28c" stroke="#8b7964" /><path d="M92 90V30m0 34L68 47m24 32 22-23" fill="none" strokeWidth="3" /><ellipse cx="69" cy="41" rx="14" ry="23" transform="rotate(-35 69 41)" fill={product.tone} /><ellipse cx="112" cy="48" rx="15" ry="24" transform="rotate(25 112 48)" fill={product.accent} /><ellipse cx="91" cy="28" rx="13" ry="23" fill={product.tone} /></g> : product.group === 'Bedroom' ? <g><path d="M37 82h108v20H37Z" fill={product.accent} /><path d="M45 61h92v28H45Z" fill={product.tone} /><path d="M51 43h80v22H51Z" fill={product.accent} /><path d="M55 65h27v20H55Z" fill="#ece7dc" /><path d="M98 65h34v20H98Z" fill="#ece7dc" /></g> : product.group === 'Bathroom' ? product.category === 'Shower' ? <g><rect x="47" y="25" width="88" height="78" rx="4" fill={product.tone} opacity=".3" /><path d="M47 25h88v78H47M54 96h74M91 25v78" fill="none" /><circle cx="91" cy="42" r="11" fill="none" /></g> : product.category === 'Bathtub' ? <g><path d="M36 68h112v25H36Z" fill={product.tone} /><path d="M47 68V53q0-12 12-12h61q13 0 13 12v15" fill="none" strokeWidth="4" /><path d="M52 80h80" opacity=".4" /></g> : <g><path d="M52 43h76v45q0 18-38 18T52 88Z" fill={product.tone} /><path d="M60 42h60V27H60Z" fill={product.accent} /><ellipse cx="90" cy="80" rx="25" ry="7" fill="#f8f8f3" /></g> : product.group === 'Kitchen' ? product.category === 'Refrigerator' ? <g><path d="M58 21h66v86H58Z" fill={product.tone} /><path d="M60 61h62M113 35v17m0 28v14" fill="none" /></g> : <g><path d="M31 50h118v57H31Z" fill={product.tone} /><path d="M27 45h126v13H27Z" fill={product.accent} /><path d="M60 60v47m60-47v47M49 78h9m62 0h9" fill="none" strokeWidth="3" /></g> : <g><path d="M36 49 L123 31 L148 46 L61 66Z" fill={product.tone} /><path d="M36 49v44l25 16V66Z" fill={product.accent} /><path d="M61 66l87-20v44l-87 19Z" fill={product.tone} /><path d="M89 60v42m31-49v42M38 96v10m105-13v10" fill="none" strokeWidth="2" />{product.category === 'Shelving' && <path d="M64 80l82-19M64 95l82-19" strokeWidth="5" />}</g>}
       </g>
     </svg>
   </div>
@@ -149,13 +155,22 @@ function CameraRig({ viewMode, cameraVersion, project }: { viewMode: ViewMode; c
     const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2, w = Math.max(3, maxX - minX), l = Math.max(3, maxZ - minZ)
     const targetY = viewMode === '2d' ? 0 : project.ceilingHeight * 0.24
     orbit?.target.set(cx, targetY, cz)
-    camera.position.set(...(viewMode === '2d' ? [cx, 12, cz + 0.001] : [cx + 8, 7.5 + targetY, cz + 10]) as [number, number, number])
-    camera.lookAt(cx, targetY, cz)
-    const cam = camera as OrthographicCamera
-    const spanX = viewMode === '2d' ? project.width + 1.2 : (w + l) * 0.8 + 1
-    const spanY = viewMode === '2d' ? project.length + 1.8 : (w + l) * 0.46 + project.ceilingHeight * 0.85 + 0.8
-    cam.zoom = Math.min(size.width / spanX, size.height / spanY)
-    cam.updateProjectionMatrix()
+    if (camera instanceof ThreePerspectiveCamera) {
+      const distance = Math.max(9, Math.hypot(w, l) * 1.65)
+      camera.fov = 50
+      camera.aspect = size.width / Math.max(1, size.height)
+      camera.position.set(cx + distance * 0.62, targetY + Math.max(project.ceilingHeight * 1.8, distance * 0.55), cz + distance * 0.78)
+      camera.lookAt(cx, targetY, cz)
+      camera.updateProjectionMatrix()
+    } else {
+      camera.position.set(...(viewMode === '2d' ? [cx, 12, cz + 0.001] : [cx + 8, 7.5 + targetY, cz + 10]) as [number, number, number])
+      camera.lookAt(cx, targetY, cz)
+      const cam = camera as OrthographicCamera
+      const spanX = viewMode === '2d' ? project.width + 1.2 : (w + l) * 0.8 + 1
+      const spanY = viewMode === '2d' ? project.length + 1.8 : (w + l) * 0.46 + project.ceilingHeight * 0.85 + 0.8
+      cam.zoom = Math.min(size.width / spanX, size.height / spanY)
+      cam.updateProjectionMatrix()
+    }
     orbit?.update()
     invalidate()
   }, [camera, controls, size.width, size.height, cameraVersion, viewMode, project.width, project.length, project.ceilingHeight, invalidate])
@@ -203,9 +218,13 @@ export function ProductModel({ product, variantId }: { product: Product; variant
   const width = product.width / 100
   const depth = product.depth / 100
   const height = product.height / 100
-  const fabric = product.group === 'Seating' || product.category === 'Rug'
+  const fabric = product.group === 'Seating' || product.category === 'Rug' || product.category === 'Bed'
   const material = <SurfaceMaterial kind={fabric ? 'linen' : 'oak'} color={product.tone} />
   const darkMaterial = <SurfaceMaterial kind="oak" color={product.accent} />
+  const ceramicMaterial = <meshPhysicalMaterial color={product.tone} roughness={0.2} clearcoat={0.35} />
+  const steelMaterial = <meshStandardMaterial color={product.accent} roughness={0.25} metalness={0.8} />
+  const glassMaterial = <meshPhysicalMaterial color={product.tone} transparent opacity={0.24} transmission={0.7} roughness={0.08} side={DoubleSide} />
+  const waterMaterial = <meshPhysicalMaterial color="#8fc6c8" transparent opacity={0.72} transmission={0.35} roughness={0.08} />
 
   if ((product.category === 'Sofa' || product.category === 'Corner sofa')) {
     return (
@@ -261,6 +280,103 @@ export function ProductModel({ product, variantId }: { product: Product; variant
     )
   }
 
+  if (product.category === 'Bed') {
+    return (
+      <group>
+        <RoundedBox args={[width * 0.96, 0.18, depth * 0.94]} radius={0.035} position={[0, 0.14, 0]} castShadow receiveShadow>{darkMaterial}</RoundedBox>
+        <RoundedBox args={[width * 0.91, height * 0.18, depth * 0.88]} radius={0.07} position={[0, height * 0.32, depth * 0.015]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width * 0.93, height * 0.84, depth * 0.08]} radius={0.045} position={[0, height * 0.43, -depth * 0.43]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width * 0.88, 0.045, depth * 0.42]} radius={0.02} position={[0, height * 0.43, depth * 0.2]} castShadow receiveShadow>{material}</RoundedBox>
+        {[-1, 1].map((side) => <group key={side} position={[side * width * 0.22, height * 0.47, -depth * 0.27]}><Cushion width={width * 0.31} height={height * 0.1} depth={depth * 0.24} color={product.tone} /></group>)}
+      </group>
+    )
+  }
+
+  if (product.category === 'Nightstand') {
+    return (
+      <group>
+        <RoundedBox args={[width * 0.88, height * 0.72, depth * 0.82]} radius={0.025} position={[0, height * 0.4, 0]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width * 0.96, 0.06, depth * 0.9]} radius={0.018} position={[0, height * 0.79, 0]} castShadow receiveShadow>{darkMaterial}</RoundedBox>
+        <RoundedBox args={[width * 0.7, height * 0.18, 0.025]} radius={0.01} position={[0, height * 0.43, depth * 0.42]} castShadow receiveShadow>{darkMaterial}</RoundedBox>
+        {[-1, 1].flatMap((x) => [-1, 1].map((z) => <mesh key={`${x}-${z}`} position={[x * width * 0.33, height * 0.14, z * depth * 0.3]} castShadow><cylinderGeometry args={[0.018, 0.018, height * 0.28, 10]} />{darkMaterial}</mesh>))}
+      </group>
+    )
+  }
+
+  if (product.category === 'Toilet') {
+    return (
+      <group>
+        <RoundedBox args={[width * 0.76, height * 0.3, depth * 0.52]} radius={0.07} position={[0, height * 0.2, depth * 0.1]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <RoundedBox args={[width * 0.72, 0.04, depth * 0.47]} radius={0.025} position={[0, height * 0.39, depth * 0.1]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <RoundedBox args={[width * 0.73, height * 0.65, depth * 0.25]} radius={0.035} position={[0, height * 0.54, -depth * 0.28]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <mesh position={[0, height * 0.83, -depth * 0.28]} castShadow><cylinderGeometry args={[width * 0.07, width * 0.07, 0.012, 20]} />{steelMaterial}</mesh>
+      </group>
+    )
+  }
+
+  if (product.category === 'Shower') {
+    return (
+      <group>
+        <mesh position={[0, 0.04, 0]} receiveShadow><boxGeometry args={[width * 0.94, 0.08, depth * 0.94]} />{ceramicMaterial}</mesh>
+        {[-1, 1].map((side) => <mesh key={side} position={[side * width * 0.46, height * 0.44, 0]} castShadow receiveShadow><boxGeometry args={[0.025, height * 0.84, depth * 0.9]} />{glassMaterial}</mesh>)}
+        <mesh position={[0, height * 0.44, -depth * 0.46]} castShadow receiveShadow><boxGeometry args={[width * 0.9, height * 0.84, 0.025]} />{glassMaterial}</mesh>
+        {[-1, 1].flatMap((x) => [-1, 1].map((z) => <mesh key={`${x}-${z}`} position={[x * width * 0.46, height * 0.43, z * depth * 0.46]} castShadow><cylinderGeometry args={[0.018, 0.018, height * 0.86, 12]} />{steelMaterial}</mesh>))}
+        <mesh position={[0, height * 0.86, -depth * 0.46]} castShadow><boxGeometry args={[width * 0.92, 0.025, 0.025]} />{steelMaterial}</mesh>
+        <mesh position={[0, height * 0.69, -depth * 0.28]} castShadow><cylinderGeometry args={[0.012, 0.012, height * 0.24, 12]} />{steelMaterial}</mesh>
+        <mesh position={[0, height * 0.82, -depth * 0.28]} rotation={[Math.PI / 2, 0, 0]} castShadow><cylinderGeometry args={[0.07, 0.07, 0.025, 24]} />{steelMaterial}</mesh>
+      </group>
+    )
+  }
+
+  if (product.category === 'Bathtub') {
+    return (
+      <group>
+        <RoundedBox args={[width * 0.9, height * 0.35, depth * 0.82]} radius={0.09} position={[0, height * 0.23, 0]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <RoundedBox args={[width * 0.96, 0.07, depth * 0.88]} radius={0.025} position={[0, height * 0.48, 0]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <mesh position={[0, height * 0.44, 0]} receiveShadow><boxGeometry args={[width * 0.76, 0.012, depth * 0.62]} />{waterMaterial}</mesh>
+        <mesh position={[width * 0.35, height * 0.52, -depth * 0.2]} castShadow><cylinderGeometry args={[0.012, 0.012, height * 0.18, 12]} />{steelMaterial}</mesh>
+        <mesh position={[width * 0.35, height * 0.6, -depth * 0.2]} rotation={[Math.PI / 2, 0, 0]} castShadow><cylinderGeometry args={[0.05, 0.05, 0.12, 18]} />{steelMaterial}</mesh>
+      </group>
+    )
+  }
+
+  if (product.category === 'Bathroom vanity') {
+    return (
+      <group>
+        <RoundedBox args={[width * 0.92, height * 0.68, depth * 0.8]} radius={0.025} position={[0, height * 0.35, 0]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width * 0.98, 0.08, depth * 0.88]} radius={0.018} position={[0, height * 0.72, 0]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <RoundedBox args={[width * 0.46, 0.09, depth * 0.36]} radius={0.04} position={[0, height * 0.79, 0.02]} castShadow receiveShadow>{ceramicMaterial}</RoundedBox>
+        <mesh position={[0, height * 0.78, -depth * 0.18]} rotation={[Math.PI / 2, 0, 0]} castShadow><cylinderGeometry args={[0.012, 0.012, 0.16, 12]} />{steelMaterial}</mesh>
+        <RoundedBox args={[width * 0.62, height * 0.06, 0.025]} radius={0.008} position={[0, height * 0.4, depth * 0.41]} castShadow receiveShadow>{darkMaterial}</RoundedBox>
+      </group>
+    )
+  }
+
+  if (product.category === 'Kitchen counter' || product.category === 'Kitchen island') {
+    const island = product.category === 'Kitchen island'
+    return (
+      <group>
+        <RoundedBox args={[width * 0.96, height * 0.82, depth * 0.82]} radius={0.025} position={[0, height * 0.41, 0]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width, 0.08, depth]} radius={0.018} position={[0, height - 0.04, 0]} castShadow receiveShadow>{darkMaterial}</RoundedBox>
+        {!island && <RoundedBox args={[width * 0.96, height * 0.28, 0.05]} radius={0.008} position={[0, height * 0.82, -depth * 0.46]} castShadow receiveShadow>{material}</RoundedBox>}
+        {[-1, 0, 1].map((side) => <RoundedBox key={side} args={[width * 0.28, height * 0.54, 0.025]} radius={0.01} position={[side * width * 0.31, height * 0.39, depth * 0.42]} castShadow receiveShadow>{material}</RoundedBox>)}
+        {[-1, 0, 1].map((side) => <mesh key={side} position={[side * width * 0.31, height * 0.48, depth * 0.44]} castShadow><cylinderGeometry args={[0.012, 0.012, width * 0.1, 10]} />{steelMaterial}</mesh>)}
+        {!island && <RoundedBox args={[width * 0.24, 0.018, depth * 0.46]} radius={0.008} position={[-width * 0.23, height * 0.86, 0]} castShadow receiveShadow>{steelMaterial}</RoundedBox>}
+      </group>
+    )
+  }
+
+  if (product.category === 'Refrigerator') {
+    return (
+      <group>
+        <RoundedBox args={[width * 0.9, height * 0.96, depth * 0.9]} radius={0.025} position={[0, height * 0.48, 0]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width * 0.86, height * 0.36, 0.025]} radius={0.008} position={[0, height * 0.78, depth * 0.46]} castShadow receiveShadow>{material}</RoundedBox>
+        <RoundedBox args={[width * 0.86, height * 0.53, 0.025]} radius={0.008} position={[0, height * 0.32, depth * 0.46]} castShadow receiveShadow>{material}</RoundedBox>
+        {[-1, 1].map((side) => <mesh key={side} position={[side * width * 0.22, height * 0.57, depth * 0.48]} castShadow><cylinderGeometry args={[0.012, 0.012, height * 0.38, 10]} />{steelMaterial}</mesh>)}
+      </group>
+    )
+  }
+
   if (product.category === 'Floor lamp') {
     return (
       <group>
@@ -291,6 +407,18 @@ export function ProductModel({ product, variantId }: { product: Product; variant
     {[-1, 1].flatMap((x) => [-1, 1].map((z) => <mesh key={`${x}-${z}`} position={[x * (width / 2 - 0.02), height / 2, z * (depth / 2 - 0.02)]} castShadow><boxGeometry args={[0.04, height, 0.04]} />{darkMaterial}</mesh>))}
     {[0, 1, 2, 3, 4].map((i) => <mesh key={i} position={[0, 0.06 + i * (height - 0.08) / 4, 0]} castShadow receiveShadow><boxGeometry args={[width, 0.04, depth]} />{material}</mesh>)}
   </group>
+}
+
+function FurnitureLoading({ width, depth, color }: { width: number; depth: number; color: string }) {
+  return <>
+    <mesh position={[0, 0.04, 0]} castShadow receiveShadow>
+      <boxGeometry args={[width, 0.08, depth]} />
+      <meshStandardMaterial color={color} transparent opacity={0.45} roughness={1} />
+    </mesh>
+    <Html center position={[0, 0.36, 0]} style={{ pointerEvents: 'none' }}>
+      <span className="object-loading" role="status" aria-label="Loading furniture model" />
+    </Html>
+  </>
 }
 
 function FurnitureObject({
@@ -351,7 +479,7 @@ function FurnitureObject({
       }}
       onPointerUp={finish} onPointerCancel={finish}
     >
-      {viewMode === '2d' ? <mesh position={[0, product.category === 'Rug' ? 0.015 : 0.06, 0]}><boxGeometry args={[width, 0.02, depth]} /><meshBasicMaterial color={product.tone} transparent opacity={product.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : <ProductModel product={product} variantId={object.variantId} />}
+      {viewMode === '2d' ? <mesh position={[0, product.category === 'Rug' ? 0.015 : 0.06, 0]}><boxGeometry args={[width, 0.02, depth]} /><meshBasicMaterial color={product.tone} transparent opacity={product.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={product.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense>}
       {selected && <>
         <Line points={[[-width / 2 - 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, -depth / 2 - 0.04]]} color="#517e68" lineWidth={2} raycast={() => null} />
         <Html position={[0, 0.05, depth / 2 + 0.18]} center style={{ pointerEvents: 'none' }}><span className="dimension-tag">{product.width} × {product.depth} cm</span></Html>
@@ -377,11 +505,13 @@ function RoomScene({
   onMoveObject,
   onDragStart,
   onDragEnd,
-  snap, wallSnap, onDropProduct, onDrawWall, onMoveEndpoint,
+  snap, wallSnap, lightingMode, onDropProduct, onDrawWall, onMoveEndpoint, onMoveOpening,
 }: {
   onMoveEndpoint: (id: string, previous: Point, next: Point) => void
+  onMoveOpening: (id: string, wallOffset: number) => void
   snap: boolean
   wallSnap: boolean
+  lightingMode: LightingMode
   onDropProduct: (id: string, x: number, z: number) => void
   onDrawWall: (x: number, z: number, endX: number, endZ: number) => void
   project: ProjectState
@@ -402,15 +532,15 @@ function RoomScene({
   onDragEnd: () => void
 }) {
   return (
-    <Canvas shadows orthographic frameloop="demand" dpr={[1, 1.75]}
+    <Canvas shadows orthographic frameloop="demand" dpr={[1, 1.5]}
       camera={{ position: [8, 8, 10], zoom: 65, near: 0.1, far: 150 }}
-      gl={{ antialias: true }} onPointerMissed={() => { if (!draggingId && activeTool === 'select') onClearSelection() }}>
-      <OrbitControls makeDefault enabled={!draggingId} enableRotate={viewMode === '3d' && activeTool === 'select'} enableDamping dampingFactor={0.12} minZoom={1} maxZoom={250} minPolarAngle={viewMode === '2d' ? 0 : 0.1} maxPolarAngle={Math.PI / 2.1} mouseButtons={{ LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }} />
+      gl={{ antialias: true, toneMapping: ACESFilmicToneMapping }} onPointerMissed={() => { if (!draggingId && activeTool === 'select') onClearSelection() }}>
+      {viewMode === '3d' && <PerspectiveCamera makeDefault position={[8, 8, 10]} fov={50} near={0.03} far={150} />}
+      <OrbitControls makeDefault enabled={!draggingId} enableRotate={viewMode === '3d' && activeTool === 'select'} enableDamping dampingFactor={0.12} minDistance={0.2} maxDistance={100} minZoom={1} maxZoom={250} minPolarAngle={viewMode === '2d' ? 0 : 0.1} maxPolarAngle={Math.PI / 2.1} mouseButtons={{ LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }} />
       <CameraRig project={project} viewMode={viewMode} cameraVersion={cameraVersion} />
-      <Suspense fallback={null}>
-      <SceneEnvironment project={project} viewMode={viewMode} gridVisible={gridVisible} tool={activeTool} snap={snap} wallSnap={wallSnap} onClear={onClearSelection} onPlace={onPlaceFeature} onDrop={onDropProduct} onDrawWall={onDrawWall} />
+      <SceneEnvironment project={project} viewMode={viewMode} gridVisible={gridVisible} tool={activeTool} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onClear={onClearSelection} onPlace={onPlaceFeature} onDrop={onDropProduct} onDrawWall={onDrawWall} />
 
-      <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onDragStart={onDragStart} onDragEnd={onDragEnd} />
+      <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onMoveOpening={onMoveOpening} lightingMode={lightingMode} onDragStart={onDragStart} onDragEnd={onDragEnd} />
       {project.objects.map((object) => {
         const product = productById.get(object.productId)
         if (!product) return null
@@ -429,18 +559,8 @@ function RoomScene({
           />
         )
       })}
-      </Suspense>
     </Canvas>
   )
-}
-
-function FloorPlanPreview({ project }: { project: ProjectState }) {
-  const regions = getFloorRegions(project.features)
-  return <div className="floor-plan-preview"><svg viewBox={`${-project.width / 2 - 0.2} ${-project.length / 2 - 0.2} ${project.width + 0.4} ${project.length + 0.4}`} width="100%" height="100%" aria-label="Live drawn floor plan">
-    {regions.map((r) => <path key={r.id} d={[r.points, ...r.holes].map((ring) => `M${ring.map((p) => `${p.x},${p.z}`).join('L')}Z`).join(' ')} fill="#e0e6d7" fillRule="evenodd" />)}
-    {project.objects.map((o) => { const p = productById.get(o.productId)!; return <rect key={o.id} x={-p.width / 200} y={-p.depth / 200} width={p.width / 100} height={p.depth / 100} transform={`translate(${o.x} ${o.z}) rotate(${-o.rotation * 180 / Math.PI})`} fill={p.tone} stroke="#8e9d82" strokeWidth="0.04" /> })}
-    {project.features.map((f) => { const [a, b] = wallEndpoints(f); return <line key={f.id} x1={a.x} y1={a.z} x2={b.x} y2={b.z} stroke={f.type === 'wall' ? '#8f9d82' : f.type === 'door' ? '#ba976e' : '#84b0b5'} strokeWidth={f.type === 'wall' ? 0.12 : 0.16} /> })}
-  </svg></div>
 }
 
 function NumberInput({ value, onCommit, ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> & { value: number | string; onCommit: (value: number) => void }) {
@@ -544,7 +664,7 @@ function FeatureProperties({ project, feature, onPatch, onDelete }: { project: P
   return (
     <>
       <div className="inspector-heading"><div><span className="eyebrow">Architecture</span><h2>{title}</h2></div><span className="status-pill">Editable</span></div>
-      <section className="inspector-section"><div className="section-label-row"><span>{feature.type === 'wall' ? 'Wall size' : 'Opening size'}</span><span className="muted">metres</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="0.3" max="20" step="0.05" value={feature.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Height</span><NumberInput min="0.3" max="6" step="0.05" value={feature.height} onCommit={(height) => onPatch({ height })} /></label>{feature.type === 'window' && <label><span>Sill</span><NumberInput min="0" max="6" step="0.05" value={feature.sillHeight || 0} onCommit={(sillHeight) => onPatch({ sillHeight })} /></label>}</div></section>
+      <section className="inspector-section"><div className="section-label-row"><span>{feature.type === 'wall' ? 'Wall size' : 'Opening size'}</span><span className="muted">metres</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="0.3" max="20" step="0.05" value={feature.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Height</span><NumberInput min="0.3" max="6" step="0.05" value={feature.height} onCommit={(height) => onPatch({ height })} /></label>{feature.type === 'wall' && <label><span>Thickness</span><NumberInput min="0.02" max="2" step="0.01" value={wallThickness(feature).toFixed(3)} onCommit={(thickness) => onPatch({ thickness })} /></label>}{feature.type === 'window' && <label><span>Sill</span><NumberInput min="0" max="6" step="0.05" value={feature.sillHeight || 0} onCommit={(sillHeight) => onPatch({ sillHeight })} /></label>}</div></section>
       <section className="inspector-section"><div className="section-label-row"><span>Position</span><span className="muted">metres / degrees</span></div>{feature.type === 'wall' ? <><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={feature.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round((feature.rotation * 180) / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label><label><span>Z</span><NumberInput step="0.05" value={feature.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label></div><p className="muted">Drag a green corner in 2D. Connected walls follow it; floors update automatically. Deleting this wall also removes its doors and windows.</p></> : <><label className="field-label">Attached wall<select value={feature.wallId} onChange={(event) => onPatch({ wallId: event.target.value, wallOffset: 0 })}>{project.features.filter((f) => f.type === 'wall' && f.width >= 0.5).map((wall, i) => <option key={wall.id} value={wall.id}>Wall {i + 1} · {wall.width.toFixed(2)} m</option>)}</select></label><label className="field-label">Position along wall (m)<NumberInput step="0.1" value={feature.wallOffset || 0} onCommit={(wallOffset) => onPatch({ wallOffset })} /></label><p className="muted">Measured from the wall centre. Openings follow their wall when you reshape the space.</p></>}</section>
       <div className="inspector-actions"><button className="danger-button" onClick={onDelete}><Icon name="trash" /> Remove {feature.type}</button></div>
     </>
@@ -601,12 +721,104 @@ function PurchaseRequestModal({ project, total, onClose }: { project: ProjectSta
     event.preventDefault()
     const customer = Object.fromEntries(new FormData(event.currentTarget as HTMLFormElement))
     const items = project.objects.map((object) => ({ objectId: object.id, product: productById.get(object.productId) }))
-    downloadFile('forma-quote-request.json', JSON.stringify({ createdAt: new Date().toISOString(), status: 'draft', customer, project, items, estimatedTotal: total, currency: 'EUR' }, null, 2), 'application/json')
+    downloadFile('formivo-quote-request.json', JSON.stringify({ createdAt: new Date().toISOString(), status: 'draft', customer, project, items, estimatedTotal: total, currency: 'EUR' }, null, 2), 'application/json')
     setSubmitted(true)
   }
   return (
     <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close purchase request" />{submitted ? <div className="modal-card success-card" role="dialog" aria-modal="true" aria-label="Quote draft exported"><div className="success-icon">✓</div><span className="eyebrow">Quote draft exported</span><h2>Your request is ready.</h2><p>Your downloaded file contains your contact details, room plan and product snapshots. Nothing has been sent to a retailer. Keep the file private and share it only with your chosen partner.</p><button className="primary-button" autoFocus onClick={onClose}>Back to room</button></div> : <form className="modal-card" role="dialog" aria-modal="true" aria-label="Project dialog" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Estimated total {formatPrice(total)}</span><h2>Request a quote</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><div className="form-grid"><label className="field-label">Full name<input name="name" required placeholder="Your name" /></label><label className="field-label">Email<input name="email" required type="email" placeholder="you@example.com" /></label><label className="field-label">Phone<input name="phone" type="tel" placeholder="+30 69..." /></label><label className="field-label">Delivery city<input name="city" required placeholder="Athens" /></label></div><label className="field-label">Notes<textarea name="notes" rows={3} placeholder="Anything we should know about delivery or installation?" /></label><p className="form-note">Demo: this downloads a quote draft, not a live submission. Sample prices, stock, delivery and installation require retailer confirmation.</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Download request <Icon name="download" /></button></div></form>}</div>
   )
+}
+
+function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport: (project: ProjectState) => void }) {
+  const [analysis, setAnalysis] = useState<PlanAnalysis | null>(null)
+  const [fileName, setFileName] = useState('')
+  const [name, setName] = useState('Imported plan')
+  const [realWidth, setRealWidth] = useState('')
+  const [selected, setSelected] = useState<{ kind: 'walls' | 'openings'; index: number } | null>(null)
+  const [draw, setDraw] = useState<'select' | 'wall' | 'door' | 'window'>('select')
+  const [start, setStart] = useState<PixelPoint | null>(null)
+  const request = useRef(0)
+  const draft = useMemo(() => {
+    if (!analysis || !realWidth) return { project: null, error: '' }
+    try { return { project: createProjectFromPlan(analysis, Number(realWidth), name), error: '' } }
+    catch (reason) { return { project: null, error: reason instanceof Error ? reason.message : 'Check the drawing.' } }
+  }, [analysis, realWidth, name])
+  const update = (next: PlanAnalysis) => { setAnalysis(next) }
+  const selectedSegment = selected && analysis ? analysis[selected.kind][selected.index] : null
+  const patchSegment = (patch: Partial<PixelOpening>) => {
+    if (!selected || !analysis || !selectedSegment) return
+    const next = { ...selectedSegment, ...patch, a: { ...(patch.a || selectedSegment.a) }, b: { ...(patch.b || selectedSegment.b) } }
+    if (next.horizontal) next.b.y = next.a.y
+    else next.b.x = next.a.x
+    update({ ...analysis, [selected.kind]: analysis[selected.kind].map((item, i) => i === selected.index ? next : item) })
+  }
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const choose = async (file: File | undefined) => {
+    if (!file) return
+    const version = ++request.current
+    setFileName(file.name)
+    setName(file.name.replace(/\.[^.]+$/, '') || 'Imported plan')
+    setError(''); setSelected(null); setStart(null); setRealWidth('')
+    setAnalysis(null)
+    setLoading(true)
+    try { const result = await analyzePlanFile(file); if (version === request.current) setAnalysis(result) } catch (reason) { if (version === request.current) setError(reason instanceof Error ? reason.message : 'The drawing could not be analyzed.') }
+    finally { if (version === request.current) setLoading(false) }
+  }
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    if (!draft.project) return
+    onImport(draft.project)
+  }
+  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close import dialog" /><form className="modal-card plan-import-card" role="dialog" aria-modal="true" aria-label="Import architectural drawing" onSubmit={submit}>
+    <div className="modal-header"><div><span className="eyebrow">WIP · best-effort detection</span><h2>Import a plan</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
+    <p className="catalog-intro">Upload a plan and enter its scale to import the current detection as-is. Suggested openings are applied automatically; corrections below are optional. Detection is a work in progress. Furniture is not imported.</p>
+    <label className="plan-import-file"><Icon name="upload" /><span>{fileName || 'Choose PNG, JPG, WebP, or PDF'}</span><input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,application/pdf" onChange={(event) => choose(event.currentTarget.files?.[0])} /></label>
+    {loading && <div className="plan-import-status" role="status">Analyzing the first page locally…</div>}
+    {error && <div className="plan-import-error" role="alert">{error}</div>}
+    {analysis && <>
+      <div className="plan-review-tools">{(['select', 'wall', 'door', 'window'] as const).map((tool) => <button type="button" key={tool} aria-pressed={draw === tool} onClick={() => { setDraw(tool); setStart(null) }}>{tool === 'select' ? 'Select / correct' : `Add ${tool}`}</button>)}</div>
+      <p className="muted">Green: walls · blue/purple: suggested windows/doors · orange: gaps left open. {draw === 'select' ? 'Select a line to edit or remove it.' : start ? 'Click the second endpoint.' : 'Click two endpoints on the source to add a segment.'}</p>
+      <svg className="plan-import-preview" viewBox={`0 0 ${analysis.sourceWidth} ${analysis.sourceHeight}`} role="img" aria-label="Detected walls and openings over the source drawing" onClick={(event) => {
+        if (draw === 'select') return
+        const svg = event.currentTarget, matrix = svg.getScreenCTM()
+        if (!matrix) return
+        const p = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+        const nearby = analysis.walls.flatMap((wall) => [wall.a, wall.b]).sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0]
+        const end = nearby && Math.hypot(nearby.x - p.x, nearby.y - p.y) < 10 ? { ...nearby } : { x: Math.round(p.x), y: Math.round(p.y) }
+        if (!start) { setStart(end); return }
+        const horizontal = Math.abs(end.x - start.x) >= Math.abs(end.y - start.y)
+        const a = { ...start }, b = horizontal ? { x: end.x, y: start.y } : { x: start.x, y: end.y }
+        if (Math.hypot(a.x - b.x, a.y - b.y) < 8) return
+        const reversed = horizontal ? a.x > b.x : a.y > b.y
+        const wall: PixelWall = { a: reversed ? b : a, b: reversed ? a : b, horizontal, thickness: 8 }
+        update(draw === 'wall' ? { ...analysis, walls: [...analysis.walls, wall] } : { ...analysis, openings: [...analysis.openings, { ...wall, type: draw }] })
+        setStart(null)
+      }}>
+        <image href={analysis.previewUrl} width={analysis.sourceWidth} height={analysis.sourceHeight} />
+        {[analysis.bounds.minX, analysis.bounds.maxX].map((x) => <line key={x} x1={x} x2={x} y1={0} y2={analysis.sourceHeight} stroke="#a3483d" strokeDasharray="8 6" strokeWidth={1} pointerEvents="none" />)}
+        {(['walls', 'openings'] as const).flatMap((kind) => analysis[kind].map((item, index) => {
+          const opening = item as PixelOpening
+          const type = kind === 'walls' ? 'wall' : opening.type === 'unconfirmed' ? opening.suggestedType || 'unconfirmed' : opening.type
+          const color = type === 'wall' ? '#168448' : type === 'window' ? '#087cd4' : type === 'door' ? '#a537c0' : type === 'ignore' ? '#888888' : '#e77c12'
+          return <line key={`${kind}-${index}`} x1={item.a.x} y1={item.a.y} x2={item.b.x} y2={item.b.y} stroke={color} strokeWidth={Math.max(3, item.thickness) + (selected?.kind === kind && selected.index === index ? 3 : 0)} strokeOpacity={0.55} strokeDasharray={type === 'unconfirmed' || type === 'ignore' ? '6 4' : undefined} onClick={(event) => { if (draw === 'select') { event.stopPropagation(); setSelected({ kind, index }) } }}><title>{`${type} ${index + 1}`}</title></line>
+        }))}
+        {start && <circle cx={start.x} cy={start.y} r={5} fill="#e77c12" />}
+      </svg>
+      <div className="plan-import-stats"><span><strong>{analysis.walls.length}</strong> solid wall segments</span><span><strong>{analysis.openings.filter((o) => o.type === 'door' || o.type === 'window' || (o.type === 'unconfirmed' && o.suggestedType)).length}</strong> suggested openings</span><span><strong>—</strong> furniture phase 2</span></div>
+      <label className="field-label">Review detected segment<select aria-label="Review detected segment" value={selected ? `${selected.kind}:${selected.index}` : ''} onChange={(event) => { const [kind, index] = event.target.value.split(':'); setSelected(kind ? { kind: kind as 'walls' | 'openings', index: Number(index) } : null) }}><option value="">Select a segment</option>{(['walls', 'openings'] as const).flatMap((kind) => analysis[kind].map((item, i) => <option key={`${kind}:${i}`} value={`${kind}:${i}`}>{kind === 'walls' ? 'Wall' : (item as PixelOpening).type} {i + 1}</option>))}</select></label>
+      {selected && selectedSegment && <div className="plan-segment-editor">
+        {selected.kind === 'openings' && <label className="field-label">Opening type<select aria-label="Opening type" value={(selectedSegment as PixelOpening).type} onChange={(event) => patchSegment({ type: event.target.value as PixelOpening['type'] })}><option value="unconfirmed">Unconfirmed{(selectedSegment as PixelOpening).suggestedType ? ` · suggested ${(selectedSegment as PixelOpening).suggestedType}` : ''}</option><option value="door">Door</option><option value="window">Window</option><option value="ignore">Ignore gap / open passage</option></select></label>}
+        {(['a', 'b'] as const).map((end) => <div className="dimension-grid" key={end}>{(['x', 'y'] as const).map((axis) => <label key={axis}>{end.toUpperCase()} {axis} (px)<NumberInput disabled={end === 'b' && axis === (selectedSegment.horizontal ? 'y' : 'x')} min={0} max={axis === 'x' ? analysis.sourceWidth : analysis.sourceHeight} step={1} value={selectedSegment[end][axis]} onCommit={(value) => patchSegment({ [end]: { ...selectedSegment[end], [axis]: value } })} /></label>)}</div>)}
+        <button type="button" className="danger-button" onClick={() => { update({ ...analysis, [selected.kind]: analysis[selected.kind].filter((_, i) => i !== selected.index) }); setSelected(null) }}>Remove segment</button>
+      </div>}
+      <div className="form-grid"><label className="field-label">Project name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Known plan width (m)<input required type="number" min="2" max="38" step="any" placeholder="Width between dashed guides" value={realWidth} onChange={(event) => setRealWidth(event.target.value)} /></label></div>
+      <div className="plan-import-notes">{analysis.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>
+      {draft.error && <p role="alert" className="plan-import-error">{draft.error}</p>}
+      <p className="plan-review-confirm">Creating this space imports the WIP result and replaces the current layout. Undo restores the previous layout.</p>
+    </>}
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={!draft.project || loading}>Create space</button></div>
+  </form></div>
 }
 
 function App() {
@@ -667,6 +879,7 @@ function App() {
   const [sort, setSort] = useState('curated')
   const [notice, setNotice] = useState(() => needsRecovery ? 'Saved data could not be loaded. Your original data has not been overwritten.' : '')
   const [wallsTransparent, setWallsTransparent] = useState(true)
+  const [lightingMode, setLightingMode] = useState<LightingMode>('default')
   const [cameraVersion, setCameraVersion] = useState(0)
   const [category, setCategory] = useState<CategoryFilter>('All')
   const [search, setSearch] = useState('')
@@ -674,6 +887,7 @@ function App() {
   const [shoppingOpen, setShoppingOpen] = useState(false)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [requestOpen, setRequestOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [leftPanelOpen, setLeftPanelOpen] = useState(() => window.innerWidth > 1000)
   const [rightPanelOpen, setRightPanelOpen] = useState(() => window.innerWidth > 1200)
 
@@ -699,13 +913,13 @@ function App() {
   }, [notice])
 
   useEffect(() => {
-    if (!shoppingOpen && !newProjectOpen && !requestOpen) return
+    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen) return
     const previous = document.activeElement as HTMLElement | null
     const panel = document.querySelector<HTMLElement>('.modal-card, .shopping-drawer')
     const elements = () => Array.from(document.querySelector('.modal-card, .shopping-drawer')?.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, textarea') || [])
     const frame = requestAnimationFrame(() => (panel?.querySelector<HTMLElement>('input') || elements()[0])?.focus())
     const keys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(false); setRequestOpen(false) }
+      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(false); setRequestOpen(false); setImportOpen(false) }
       if (event.key !== 'Tab') return
       const targets = elements(), first = targets[0], last = targets[targets.length - 1]
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
@@ -713,7 +927,7 @@ function App() {
     }
     document.addEventListener('keydown', keys)
     return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', keys); previous?.focus() }
-  }, [shoppingOpen, newProjectOpen, requestOpen])
+  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen])
 
   const selectedObject = project.objects.find((object) => object.id === selectedId) ?? null
   const selectedProduct = selectedObject ? productById.get(selectedObject.productId) ?? null : null
@@ -831,11 +1045,12 @@ function App() {
   const addFeature = (type: FeatureType, x: number, z: number) => {
     if (type === 'wall') return
     const current = projectRef.current
+    if (current.features.length >= 200) { setNotice('This prototype supports up to 200 walls and openings.'); return }
     const feature = attachOpening({ id: makeId(type), type, x, z, rotation: 0, width: type === 'door' ? 0.9 : 1.5, height: type === 'door' ? 2.1 : 1.35, sillHeight: type === 'window' ? 0.85 : 0 }, current)
     if (!feature.wallId || Math.hypot(feature.x - x, feature.z - z) > 0.65) { setNotice(`Click a drawn wall to place the ${type}.`); return }
-    if (current.features.some((f) => f.wallId === feature.wallId && Math.abs((f.wallOffset || 0) - (feature.wallOffset || 0)) < (f.width + feature.width) / 2 + 0.05)) { setNotice('That section of wall already contains an opening.'); return }
     setProject({ ...current, features: [...current.features, feature] })
     selectFeature(feature.id)
+    setActiveTool(type)
   }
 
   const patchFeature = (patch: Partial<RoomFeature>) => {
@@ -849,10 +1064,19 @@ function App() {
       const features = current.features.map((f) => {
         if (f.type !== 'wall') return f
         const ends = wallEndpoints(f).map((p) => { const i = before.findIndex((v) => Math.hypot(v.x - p.x, v.z - p.z) < 0.0001); return i < 0 ? p : after[i] })
-        return { ...f, ...wallFromPoints(f.id, ends[0], ends[1], f.id === edited.id ? edited.height : f.height) }
+        return { ...(f.id === edited.id ? edited : f), ...wallFromPoints(f.id, ends[0], ends[1], f.id === edited.id ? edited.height : f.height) }
       })
       if (features.some((f) => f.type === 'wall' && (f.width < 0.25 || wallEndpoints(f).some((p) => Math.abs(p.x) > current.width / 2 || Math.abs(p.z) > current.length / 2)))) return current
       return refreshOpenings({ ...current, features })
+    })
+  }
+
+  const moveOpening = (id: string, wallOffset: number) => {
+    setProject((current) => {
+      const feature = current.features.find((candidate) => candidate.id === id)
+      if (!feature || feature.type === 'wall') return current
+      const next = attachOpening({ ...feature, wallOffset }, current)
+      return { ...current, features: current.features.map((candidate) => candidate.id === id ? next : candidate) }
     })
   }
 
@@ -911,7 +1135,7 @@ function App() {
   }
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen) return
+      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen) return
       if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); endDrag(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject(); return }
@@ -945,15 +1169,27 @@ function App() {
     setCameraVersion((value) => value + 1)
   }
 
+  const importProject = (nextProject: ProjectState) => {
+    if (window.location.hash.startsWith('#project=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    setProject(nextProject)
+    clearSelection()
+    setImportOpen(false)
+    setViewMode('2d')
+    setActiveTool('select')
+    setGridVisible(true)
+    setCameraVersion((value) => value + 1)
+    setNotice('WIP plan imported with estimated wall thicknesses and suggested openings. Furniture was not added.')
+  }
+
   return (
     <div className="app-shell">
-      <header className="topbar" inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen}>
-        <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /><span /></div><strong><a href="/" aria-label="Forma home" style={{ color: 'inherit', textDecoration: 'none' }}>FORMA</a></strong><span className="brand-divider" /><button className="project-switcher" onClick={() => setNewProjectOpen(true)}><span>{project.name}</span><Icon name="chevron" size={14} /></button></div>
+      <header className="topbar" inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen}>
+        <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /><span /></div><strong><a href="/" aria-label="Formivo home" style={{ color: 'inherit', textDecoration: 'none' }}>FORMIVO</a></strong><span className="brand-divider" /><button className="project-switcher" onClick={() => setNewProjectOpen(true)}><span>{project.name}</span><Icon name="chevron" size={14} /></button></div>
         <div className="save-indicator"><span className={`save-dot ${saveStatus === 'Unsaved changes' ? 'save-dot-dirty' : ''}`} />{saveStatus}</div>
         <div className="top-actions"><button className="top-icon-button" title="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" /></button><button className="top-icon-button" title="Redo" disabled={!history.current.future.length} onClick={redo}><Icon name="redo" /></button><span className="top-divider" /><button className="top-action-button" aria-label="Share project" onClick={shareProject}><Icon name="share" /> Share</button><button className="top-action-button" aria-label="Shopping list" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> List <span className="action-count">{itemCount}</span></button><button className="top-action-button primary-top-action" aria-label="Save project" onClick={saveProject}><Icon name="save" /> Save</button><div className="avatar">V</div></div>
       </header>
 
-      <div className={`editor-layout ${leftPanelOpen ? '' : 'left-collapsed'} ${rightPanelOpen ? '' : 'right-collapsed'}`} inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen}>
+      <div className={`editor-layout ${leftPanelOpen ? '' : 'left-collapsed'} ${rightPanelOpen ? '' : 'right-collapsed'}`} inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen}>
         <aside className="sidebar left-sidebar" aria-label="Catalogue and room tools" inert={!leftPanelOpen}>
           <div className="sidebar-scroll">
             <div className="panel-heading"><div><span className="eyebrow">Workspace</span><h1>Build your space</h1></div><button className="icon-button panel-collapse-button" onClick={() => setLeftPanelOpen(false)} title="Collapse tools"><Icon name="panel" /></button></div>
@@ -975,9 +1211,8 @@ function App() {
         </aside>
 
         <main className="workspace">
-          <div className="workspace-toolbar"><div className="workspace-context"><span className="live-dot" />{activeTool === 'wall' ? 'Build mode' : 'Your space'}<span className="context-separator">/</span><span>{floors.length} {floors.length === 1 ? 'room' : 'rooms'} · {floorArea.toFixed(1)} m²</span></div><div className="canvas-actions"><button className="render-launch" disabled={!floors.length} onClick={() => setRenderOpen(true)}>Render studio</button><button className="canvas-action-button" title="Toggle grid" aria-pressed={gridVisible} onClick={() => setGridVisible(!gridVisible)}><Icon name="grid" /> Grid <span className={`toggle ${gridVisible ? 'toggle-on' : ''}`}><span /></span></button><button className="canvas-action-button" title="Toggle wall cutaway" aria-pressed={wallsTransparent} onClick={() => setWallsTransparent(!wallsTransparent)}><Icon name="layers" /> Walls <span className={`toggle ${wallsTransparent ? 'toggle-on' : ''}`}><span /></span></button><span className="canvas-action-divider" /><div className="view-switcher"><button className={viewMode === '3d' ? 'view-active' : ''} onClick={() => setViewMode('3d')}><Icon name="cube" size={14} /> 3D</button><button className={viewMode === '2d' ? 'view-active' : ''} onClick={() => setViewMode('2d')}><Icon name="box" size={14} /> 2D plan</button></div><button className="canvas-icon-button" onClick={() => setCameraVersion((value) => value + 1)} title="Reset camera"><Icon name="rotate" /></button><button className="workspace-collapse-button" onClick={() => setLeftPanelOpen(!leftPanelOpen)} title="Toggle catalogue"><Icon name="panel" /></button></div></div>
-          <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={project.features.filter((f) => f.type === 'wall').length}><RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedId={selectedId} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={clearSelection} onSelectObject={selectObject} onSelectFeature={selectFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} snap={snap} wallSnap={wallSnap} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} /><div className="canvas-label"><span className="canvas-label-number">01</span><span>{viewMode === '3d' ? 'Isometric view' : 'Floor plan'}</span><span className="canvas-label-dot" /><span>{activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</span></div>{!project.features.length && !dragProduct && <div className="empty-build-hint"><strong>Your space starts here</strong><span>Drag your first wall on the grid.<br />Connect the walls to create a floor.</span></div>}{dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your space' : 'Close your walls before furnishing'}</div>}<div className="canvas-tip">{activeTool === 'wall' ? 'Drag to draw · Shift for straight walls · Esc to select' : activeTool !== 'select' ? `Click a wall to add a ${activeTool}` : selectedObject ? 'Drag to move · R to rotate · Arrows to nudge' : viewMode === '3d' ? 'Drag empty space to orbit · Right-drag to pan · Scroll to zoom' : 'Right-drag to pan · Scroll to zoom'}</div><div className="placement-controls">{activeTool === 'wall' ? <span className="build-grid-label">Wall grid · 25 cm · Corners snap together</span> : <><button aria-pressed={snap} onClick={() => setSnap(!snap)}>Snap · 10 cm <span className={`toggle ${snap ? 'toggle-on' : ''}`}><span /></span></button><button aria-pressed={wallSnap} onClick={() => setWallSnap(!wallSnap)}>To walls <span className={`toggle ${wallSnap ? 'toggle-on' : ''}`}><span /></span></button></>}</div>{selectedObject && <div className="selection-toolbar"><button title="Rotate selected product" onClick={() => patchObject({ rotation: selectedObject.rotation + Math.PI / 12 })}><Icon name="rotate" />15°</button><button title="Duplicate selected product" onClick={duplicateSelected}><Icon name="copy" /></button><button title="Delete selected product" onClick={deleteSelected}><Icon name="trash" /></button></div>}</div>
-          <div className="layer-strip"><div className="layer-card layer-plan"><div className="layer-card-heading"><span className="layer-number">01</span><div><strong>Floor plan</strong><span>Live room layout</span></div><button className="layer-open-button" onClick={() => setViewMode('2d')}><Icon name="arrow" size={14} /></button></div><FloorPlanPreview project={project} /></div><div className="layer-card layer-materials"><div className="layer-card-heading"><span className="layer-number">02</span><div><strong>Material palette</strong><span>Neutral foundation</span></div></div><div className="palette-row"><span className="palette-swatch palette-floor" style={{ background: floorColors[project.floorMaterial] }} /><span className="palette-swatch palette-wall" style={{ background: wallColors[project.wallMaterial] }} /><span className="palette-swatch palette-linen" /><span className="palette-swatch palette-olive" /><span className="palette-swatch palette-charcoal" /></div><div className="palette-labels"><span>{project.floorMaterial}</span><span>{project.wallMaterial}</span></div></div><div className="layer-card layer-summary"><div className="layer-card-heading"><span className="layer-number">03</span><div><strong>Project summary</strong><span>{saveStatus}</span></div></div><div className="summary-grid"><div><strong>{floorArea.toFixed(1)} m²<small>enclosed floor</small></strong></div><div><strong>{itemCount}<small>products</small></strong></div><div><strong>{formatPrice(estimatedTotal)}<small>estimated total</small></strong></div></div></div></div>
+          <div className="workspace-toolbar"><div className="workspace-context"><span className="live-dot" />{activeTool === 'wall' ? 'Build mode' : 'Your space'}<span className="context-separator">/</span><span>{floors.length} {floors.length === 1 ? 'room' : 'rooms'} · {floorArea.toFixed(1)} m²</span></div><div className="canvas-actions"><button className="render-launch" disabled={!floors.length} onClick={() => setRenderOpen(true)}>Render studio</button><button className="canvas-action-button" title="Toggle grid" aria-pressed={gridVisible} onClick={() => setGridVisible(!gridVisible)}><Icon name="grid" /> Grid <span className={`toggle ${gridVisible ? 'toggle-on' : ''}`}><span /></span></button><button className="canvas-action-button" title="Toggle wall cutaway" aria-pressed={wallsTransparent} onClick={() => setWallsTransparent(!wallsTransparent)}><Icon name="layers" /> Walls <span className={`toggle ${wallsTransparent ? 'toggle-on' : ''}`}><span /></span></button><label className="lighting-control" title="Editor lighting mode"><Icon name="sun" /><select aria-label="Editor lighting mode" value={lightingMode} onChange={(event) => setLightingMode(event.target.value as LightingMode)}><option value="default">Default</option><option value="day">Day</option><option value="night">Night</option></select></label><span className="canvas-action-divider" /><div className="view-switcher"><button className={viewMode === '3d' ? 'view-active' : ''} onClick={() => setViewMode('3d')}><Icon name="cube" size={14} /> 3D</button><button className={viewMode === '2d' ? 'view-active' : ''} onClick={() => setViewMode('2d')}><Icon name="box" size={14} /> 2D plan</button></div><button className="canvas-icon-button" onClick={() => setCameraVersion((value) => value + 1)} title="Reset camera"><Icon name="rotate" /></button><button className="workspace-collapse-button" onClick={() => setLeftPanelOpen(!leftPanelOpen)} title="Toggle catalogue"><Icon name="panel" /></button></div></div>
+          <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={project.features.filter((f) => f.type === 'wall').length}><RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedId={selectedId} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={clearSelection} onSelectObject={selectObject} onSelectFeature={selectFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} /><div className="canvas-label"><span className="canvas-label-number">01</span><span>{viewMode === '3d' ? '3D view' : 'Floor plan'}</span><span className="canvas-label-dot" /><span>{activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</span></div>{!project.features.length && !dragProduct && <div className="empty-build-hint"><strong>Your space starts here</strong><span>Drag your first wall on the grid.<br />Connect the walls to create a floor.</span></div>}{dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your space' : 'Close your walls before furnishing'}</div>}<div className="canvas-tip">{activeTool === 'wall' ? 'Drag to draw · Shift for straight walls · Esc to select' : activeTool !== 'select' ? `Click a wall to add a ${activeTool}` : selectedObject ? 'Drag to move · R to rotate · Arrows to nudge' : viewMode === '3d' ? 'Drag empty space to orbit · Right-drag to pan · Scroll to zoom' : 'Right-drag to pan · Scroll to zoom'}</div><div className="placement-controls">{activeTool === 'wall' ? <span className="build-grid-label">Wall grid · 25 cm · Corners snap together</span> : <><button aria-pressed={snap} onClick={() => setSnap(!snap)}>Snap · 10 cm <span className={`toggle ${snap ? 'toggle-on' : ''}`}><span /></span></button><button aria-pressed={wallSnap} onClick={() => setWallSnap(!wallSnap)}>To walls <span className={`toggle ${wallSnap ? 'toggle-on' : ''}`}><span /></span></button></>}</div>{selectedObject && <div className="selection-toolbar"><button title="Rotate selected product" onClick={() => patchObject({ rotation: selectedObject.rotation + Math.PI / 12 })}><Icon name="rotate" />15°</button><button title="Duplicate selected product" onClick={duplicateSelected}><Icon name="copy" /></button><button title="Delete selected product" onClick={deleteSelected}><Icon name="trash" /></button></div>}</div>
         </main>
 
         <aside className="sidebar right-sidebar" aria-label="Properties" inert={!rightPanelOpen}>
@@ -986,13 +1221,14 @@ function App() {
         </aside>
       </div>
 
-      {!leftPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !renderOpen && <button className="floating-panel-button floating-left" onClick={() => { setLeftPanelOpen(true); if (window.innerWidth <= 1200) setRightPanelOpen(false) }} title="Open catalogue" aria-label="Open catalogue"><Icon name="panel" /><span>Catalogue</span></button>}
+      {!leftPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && <button className="floating-panel-button floating-left" onClick={() => { setLeftPanelOpen(true); if (window.innerWidth <= 1200) setRightPanelOpen(false) }} title="Open catalogue" aria-label="Open catalogue"><Icon name="panel" /><span>Catalogue</span></button>}
       {!rightPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !renderOpen && <button className="floating-panel-button floating-right" onClick={() => setRightPanelOpen(true)} title="Open inspector" aria-label="Open inspector"><Icon name="panel" /><span>Inspector</span></button>}
       {renderOpen && <Suspense fallback={<div className="render-loading" role="status">Loading render studio… <button onClick={() => setRenderOpen(false)}>Back to editor</button></div>}><RenderStudio project={project} onClose={() => setRenderOpen(false)} /></Suspense>}
-      {!renderOpen && notice && <div className="toast" role="status">{notice}</div>}
+      {!renderOpen && !importOpen && notice && <div className="toast" role="status">{notice}</div>}
       {shoppingOpen && <ShoppingDrawer items={shoppingItems} total={estimatedTotal} onClose={() => setShoppingOpen(false)} onExport={exportList} onRequest={() => { setShoppingOpen(false); setRequestOpen(true) }} />}
       {newProjectOpen && <NewProjectModal onClose={() => setNewProjectOpen(false)} onCreate={createProject} />}
       {requestOpen && <PurchaseRequestModal project={project} total={estimatedTotal} onClose={() => setRequestOpen(false)} />}
+      {importOpen && <PlanImportModal onClose={() => setImportOpen(false)} onImport={importProject} />}
     </div>
   )
 }

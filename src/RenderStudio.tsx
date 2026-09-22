@@ -7,7 +7,7 @@ import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js'
 import { Architecture, FloorSurface } from './SceneEnvironment'
 import { ProductModel } from './App'
 import { surfaceUrls } from './SurfaceMaterial'
-import { floorColors, getFloorRegions, pointInPolygon, productById, type FloorRegion, type ProjectState } from './editor'
+import { floorColors, getFloorRegions, pointInPolygon, productById, wallThickness, type FloorRegion, type ProjectState } from './editor'
 
 const noop = () => {}
 
@@ -150,7 +150,7 @@ function RenderLoop({ traced, exposure, ceiling, exportVersion, onStatus, onRead
       gl.domElement.toBlob((blob) => {
         if (!blob) { onStatus('PNG export failed. Try again.'); return }
         const url = URL.createObjectURL(blob), link = document.createElement('a')
-        link.href = url; link.download = 'forma-interior.png'; link.click()
+        link.href = url; link.download = 'formivo-interior.png'; link.click()
         window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       }, 'image/png')
     }
@@ -168,11 +168,12 @@ function Interior({ project, ceiling }: { project: ProjectState; ceiling: boolea
       <FloorSurface region={region} color={floorColors[project.floorMaterial]} finish={project.floorMaterial} />
       {ceiling && <FloorSurface region={region} color="#eee9df" elevation={project.ceilingHeight} ceiling />}
     </group>)}
-    <Architecture project={project} viewMode="3d" cutaway={false} selectedId={null} tool="render" onSelect={noop} onPlace={noop} onMoveEndpoint={noop} onDragStart={noop} onDragEnd={noop} />
+    <Architecture project={project} viewMode="3d" cutaway={false} selectedId={null} tool="render" onSelect={noop} onPlace={noop} onMoveEndpoint={noop} onMoveOpening={noop} onDragStart={noop} onDragEnd={noop} />
     {project.features.filter((f) => f.type === 'window').map((f) => {
       const nx = Math.sin(f.rotation), nz = Math.cos(f.rotation)
+      const parent = project.features.find((wall) => wall.id === f.wallId), offset = (parent ? wallThickness(parent) : 0.12) / 2 + 0.03
       const inside = regions.some((r) => pointInPolygon({ x: f.x + nx * 0.2, z: f.z + nz * 0.2 }, r.points)) ? 1 : -1
-      return <rectAreaLight key={f.id} position={[f.x + nx * inside * 0.09, (f.sillHeight || 0) + f.height / 2, f.z + nz * inside * 0.09]} rotation={[0, f.rotation + (inside === 1 ? Math.PI : 0), 0]} width={f.width * 0.9} height={f.height * 0.9} intensity={5} color="#ffedcf" />
+      return <rectAreaLight key={f.id} position={[f.x + nx * inside * offset, (f.sillHeight || 0) + f.height / 2, f.z + nz * inside * offset]} rotation={[0, f.rotation + (inside === 1 ? Math.PI : 0), 0]} width={f.width * 0.9} height={f.height * 0.9} intensity={5} color="#ffedcf" />
     })}
     {project.objects.map((o) => <group key={o.id} position={[o.x, 0, o.z]} rotation={[0, o.rotation, 0]}><ProductModel product={productById.get(o.productId)!} variantId={o.variantId} /></group>)}
   </>
@@ -206,7 +207,7 @@ export default function RenderStudio({ project, onClose }: { project: ProjectSta
     return () => { node?.removeEventListener('keydown', keys); previous?.focus() }
   }, [onClose])
   return <div ref={root} className="render-studio" role="dialog" aria-modal="true" aria-label="Render studio">
-    <header className="render-header"><button onClick={onClose}>Back to editor</button><div><span className="eyebrow">FORMA / INTERIORS</span><strong>Render studio</strong></div><button onClick={() => setExportVersion((v) => v + 1)} disabled={!ready}>Save PNG</button></header>
+    <header className="render-header"><button onClick={onClose}>Back to editor</button><div><span className="eyebrow">FORMIVO / INTERIORS</span><strong>Render studio</strong></div><button onClick={() => setExportVersion((v) => v + 1)} disabled={!ready}>Save PNG</button></header>
     <div className="render-viewport">
       <RenderBoundary><Canvas shadows frameloop="demand" dpr={[1, 1.5]} camera={{ fov: 60, near: 0.03, far: 160 }} gl={{ antialias: true, toneMapping: ACESFilmicToneMapping }}>
         <OrbitControls makeDefault enableDamping={false} minDistance={0.2} maxDistance={40} maxPolarAngle={Math.PI * 0.85} />

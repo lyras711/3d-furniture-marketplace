@@ -37,11 +37,11 @@
 
 # Brand showcase (2026-09-16)
 
-- `/` serves `src/Showcase.tsx`; `/planner` serves the existing editor. `/for-business` (with `/b2b` as an alias) serves the B2B retailer landing page. Root `#project=` links still open the editor. Hosting must rewrite `/planner`, `/for-business` and `/b2b` to `index.html`. `TEST_URL` is the server origin, not the planner path.
+- `/` serves `src/Business.tsx`; `/for-shoppers` serves the existing B2C `src/Showcase.tsx` as a hidden direct route. `/for-business` and `/b2b` remain B2B aliases. Root `#project=` links still open the editor. Hosting must rewrite `/planner`, `/for-shoppers`, `/for-business` and `/b2b` to `index.html`. `TEST_URL` is the server origin, not the planner path.
 - The showcase is lazy-separated from the editor. Its SVG guided demo does not touch localStorage. Opt-in 3D reuses `ProductModel`; quote drafts use catalogue prices and valid project geometry. Drafts and partnership briefs are local downloads, not purchases or lead submissions.
 - Original local showcase JPGs are path-traced from the project's sample models and CC0 surfaces, not retailer photography. Regenerate with the dev server running using `node showcase-assets.mjs`; `/?art=room` and product IDs expose the asset-rendering views. No image-generation service is required.
 - `npm test -- showcase.spec.ts` checks the guided journey, totals, downloads, saved-project preservation, shared-link routing, 3D, dialogs and responsive layouts. Full-page captures: `/tmp/forma-showcase-1440.png` and `/tmp/forma-showcase-375.png`.
-- A real founder contact destination, lead-submission service, verified retailer data and checkout are still needed before representing these as live capabilities. Do not invent contact details, partnerships, traction or conversion metrics.
+- The B2B page uses the confirmed inquiry address `info@formivo3d.com` in its mailto links. A lead-submission service, verified retailer data and checkout are still needed before representing these as live capabilities. Do not invent contact details, partnerships, traction or conversion metrics.
 
 # Product ingestion prototype (2026-09-16)
 
@@ -83,3 +83,11 @@
 - `register-catalog` dedupe bug: `sku: null` records collided (`item.sku !== record.sku` dropped previous null-SKU products). Filter by SKU only when non-null.
 - `validate-model` Vancouver material names are gated to that product id; other products just require ≥1 material. The shared-GLB check still requires `generationStatus: 'generated'` + `validationStatus: 'validated'`.
 - Verified pilots: `homad-canova` (369×183×92, 155k tris), `al2-prism-dining-table` (240×124×74, 7k tris), `grecostrom-krevati-ermis` (159×185×102 — mm-as-m export fixed by 0.1 scale). All render on-floor centered in the editor.
+
+# Drawing import (2026-09-22)
+
+- `src/planImport.ts` extracts filled axis-aligned wall bands locally, including thinner/fainter bands connected to strong walls. Never generate a bounding rectangle as a fallback or infer metre dimensions from an unscaled raster.
+- Import is explicitly WIP and best-effort, and the editor hides its entry points until the flow is polished. When re-enabled, users can create the space after entering scale without reviewing symbols or checking a confirmation box. Suggested opening types are used automatically; unknown gaps stay open. Overlay corrections are optional. Changes remain one Undo step; furniture stays deferred.
+- Wall features have optional `thickness` in metres (0.02–2); old projects default to 0.12 via `wallThickness`. Import scales detected pixel thicknesses. Rendering, opening frames, skirting, window light offsets, furniture clearance and wall snapping use the actual thickness; edits/history/save must preserve it.
+- This is assisted reconstruction, not certified architectural recognition. Diagonal/outline-only walls and ambiguous symbols need correction or a better source. Passing geometry tests does not establish accuracy on arbitrary drawings.
+- Targeted checks: `npm test -- editor-model.spec.ts editor.spec.ts --grep "plan extraction|plan openings|wall thickness|architectural drawing import|WIP drawing"`. Review screenshots: `/tmp/forma-plan-review-1440.png` and `/tmp/forma-plan-review-375.png`.

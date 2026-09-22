@@ -1,11 +1,97 @@
 import { test, expect } from '@playwright/test'
-import { attachOpening, emptyProject, getFloorRegions, fitsFloor, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, snapBuildPoint, wallFromPoints, wallEndpoints, type Point, type ProjectState } from './src/editor'
+import { attachOpening, emptyProject, getFloorRegions, fitsFloor, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState } from './src/editor'
+
+import { analyzePlanPixels, createProjectFromPlan, type PlanAnalysis } from './src/planImport'
+
+function planImage(rects: number[][]) {
+  const width = 500, height = 400, data = new Uint8ClampedArray(width * height * 4).fill(255)
+  for (const [x, y, w, h, shade = 190] of rects) for (let py = y; py < y + h; py++) for (let px = x; px < x + w; px++) {
+    const i = (py * width + px) * 4
+    data[i] = data[i + 1] = data[i + 2] = shade
+  }
+  return { width, height, data }
+}
 
 const loop = (points: Point[], prefix = 'wall') => points.map((a, i) => wallFromPoints(`${prefix}-${i}`, a, points[(i + 1) % points.length], 2.8))
 const square: Point[] = [{ x: -2, z: -2 }, { x: 2, z: -2 }, { x: 2, z: 2 }, { x: -2, z: 2 }]
 const room = (): ProjectState => ({ ...emptyProject(), features: loop(square) })
 const sofa = { id: 'sofa', productId: 'sofa-haven', x: 0, z: 0, rotation: 0 }
 const area = (p: ProjectState) => getFloorRegions(p.features).reduce((sum, f) => sum + f.area, 0)
+
+test('plan extraction preserves disjoint collinear walls and rejects invented bounding rooms', () => {
+  const result = analyzePlanPixels(planImage([[30, 50, 100, 10], [210, 50, 180, 10], [80, 180, 280, 10], [200, 260, 120, 1, 80], [10, 330, 2, 30, 80]]))
+  const row = result.walls.filter((wall) => wall.horizontal && Math.abs(wall.a.y - 54.5) < 2)
+  expect(row).toHaveLength(2)
+  expect(row[0].b.x < 140 || row[1].b.x < 140).toBe(true)
+  expect(result.walls.every((wall) => wall.horizontal)).toBe(true)
+  expect(result.bounds.minX).toBeGreaterThan(20)
+  expect(result.openings.some((opening) => opening.type === 'unconfirmed')).toBe(true)
+  expect(() => analyzePlanPixels(planImage([]))).toThrow('No solid wall bands')
+  expect(() => analyzePlanPixels(planImage([[30, 40, 300, 1, 0], [30, 40, 1, 200, 0]]))).toThrow('No solid wall bands')
+})
+
+test('plan extraction retains an irregular footprint instead of filling its missing corner', () => {
+  const result = analyzePlanPixels(planImage([[100, 30, 220, 10], [100, 30, 10, 90], [30, 110, 80, 10], [30, 110, 10, 200], [30, 300, 290, 10], [310, 30, 10, 280]]))
+  expect(result.walls).toHaveLength(6)
+  const analysis: PlanAnalysis = { ...result, openings: [], sourceWidth: 500, sourceHeight: 400, previewUrl: '', pageCount: 1 }
+  const project = createProjectFromPlan(analysis, 10, 'Irregular import')
+  expect(getFloorRegions(project.features)).toHaveLength(1)
+  expect(project.objects).toEqual([])
+  expect(isProject(project)).toBe(true)
+  expect(getFloorRegions(project.features)[0].area).toBeLessThan(10 * 10)
+  expect(() => createProjectFromPlan(analysis, NaN, '')).toThrow('measured')
+  expect(() => createProjectFromPlan(analysis, 100, '')).toThrow('measured')
+  expect(createProjectFromPlan({ ...analysis, openings: [{ ...analysis.walls[0], type: 'unconfirmed' }] }, 10, '').features).toEqual(project.features)
+})
+
+test('plan openings use their actual supporting wall and preserve measured width', () => {
+  const walls: PlanAnalysis['walls'] = [
+    { a: { x: 10, y: 20 }, b: { x: 80, y: 20 }, horizontal: true, thickness: 8 },
+    { a: { x: 110, y: 20 }, b: { x: 210, y: 20 }, horizontal: true, thickness: 8 },
+    { a: { x: 10, y: 20 }, b: { x: 10, y: 150 }, horizontal: false, thickness: 8 },
+    { a: { x: 210, y: 20 }, b: { x: 210, y: 150 }, horizontal: false, thickness: 8 },
+    { a: { x: 10, y: 150 }, b: { x: 210, y: 150 }, horizontal: true, thickness: 8 },
+  ]
+  const analysis: PlanAnalysis = { walls, openings: [{ a: { x: 80, y: 20 }, b: { x: 110, y: 20 }, horizontal: true, thickness: 8, type: 'window' }], bounds: { minX: 10, maxX: 210, minY: 20, maxY: 150 }, sourceWidth: 220, sourceHeight: 160, previewUrl: '', pageCount: 1, warnings: [] }
+  const project = createProjectFromPlan(analysis, 8, 'Measured import'), opening = project.features.find((f) => f.type === 'window')!
+  expect(opening.width).toBeCloseTo(1.2)
+  expect(opening.x).toBeCloseTo(-0.6)
+  expect(project.features.find((f) => f.id === opening.wallId)?.z).toBeCloseTo(-2.6)
+  expect(getFloorRegions(project.features)).toHaveLength(1)
+  const inferred = createProjectFromPlan({ ...analysis, openings: [{ ...analysis.openings[0], type: 'unconfirmed', suggestedType: 'window' }] }, 8, 'WIP')
+  expect(inferred.features).toEqual(project.features)
+})
+
+test('wall thickness survives import, persistence and connected endpoint edits', () => {
+  const image = planImage([[40, 40, 300, 16], [40, 320, 300, 16], [40, 40, 16, 296], [324, 40, 16, 296], [180, 56, 3, 264, 230]])
+  const detection = analyzePlanPixels(image)
+  const partition = detection.walls.find((wall) => !wall.horizontal && Math.abs(wall.a.x - 181) < 3)
+  expect(partition).toBeTruthy()
+  expect(partition!.thickness).toBeLessThan(5)
+  const analysis: PlanAnalysis = { ...detection, openings: [], sourceWidth: 500, sourceHeight: 400, previewUrl: '', pageCount: 1 }
+  const project = createProjectFromPlan(analysis, 10, 'Variable walls')
+  const thicknesses = project.features.map(wallThickness)
+  expect(Math.max(...thicknesses)).toBeGreaterThan(Math.min(...thicknesses) * 3)
+  const restored = migrateProject(JSON.parse(JSON.stringify(project)))
+  expect(restored.features.map(wallThickness)).toEqual(thicknesses)
+  const wall = project.features[0], previous = wallEndpoints(wall)[0]
+  const changed = moveWallEndpoint(project, wall.id, previous, { x: previous.x + 0.25, z: previous.z })
+  expect(changed.features.map(wallThickness)).toEqual(thicknesses)
+  expect(wallThickness(wallFromPoints('legacy', { x: 0, z: 0 }, { x: 1, z: 0 }, 2.8))).toBe(0.12)
+  expect(isProject({ ...project, features: [{ ...wall, thickness: -1 }] })).toBe(false)
+  expect(isProject({ ...project, features: [{ ...wall, thickness: Infinity }] })).toBe(false)
+})
+
+test('furniture clearance and snapping use the wall surface rather than the centreline', () => {
+  const p = room(), north = p.features[0]
+  p.features[0] = { ...north, thickness: 0.6 }
+  const object = { ...sofa, productId: 'chair-arc', x: 0, z: -1.6 }
+  expect(fitsFloor(object, { ...p, features: p.features.map((f) => ({ ...f, thickness: 0.08 })) })).toBe(true)
+  expect(fitsFloor(object, p)).toBe(false)
+  const snapped = placeObject({ ...object, z: -1.3 }, p, false, true)
+  expect(fitsFloor(snapped, p)).toBe(true)
+  expect(snapped.z).toBeGreaterThan(object.z)
+})
 
 test('new spaces contain only a build grid, never implicit walls, floors or furniture', () => {
   const p = emptyProject()

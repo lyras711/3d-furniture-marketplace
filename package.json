@@ -22,6 +22,7 @@
     "@react-three/fiber": "9.3.0",
     "firebase": "12.19.0",
     "firebase-admin": "14.4.0",
+    "pdfjs-dist": "6.3.289",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "three": "0.180.0",

@@ -55,7 +55,7 @@ test('render studio preserves the project and exports the actual interior canvas
   await studio.getByLabel('Camera position').selectOption('1')
   const download = page.waitForEvent('download')
   await studio.getByRole('button', { name: 'Save PNG' }).click()
-  expect((await download).suggestedFilename()).toBe('forma-interior.png')
+  expect((await download).suggestedFilename()).toBe('formivo-interior.png')
   await studio.getByRole('button', { name: 'Path traced', exact: true }).click()
   await expect.poll(async () => Number(await studio.locator('canvas').getAttribute('data-samples')), { timeout: 60000 }).toBeGreaterThan(0)
   await studio.getByRole('button', { name: 'Back to editor' }).click()
@@ -123,6 +123,8 @@ test('new users start on an empty grid and new projects contain no templates', a
   await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '0')
   await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '0.00')
   await expect(page.getByText('Your space starts here')).toBeVisible()
+  await expect(page.locator('.empty-import-button')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Import architectural drawing', exact: true })).toHaveCount(0)
   const p = await save(page)
   expect(p.objects).toEqual([])
   expect(p.features).toEqual([])
@@ -204,9 +206,72 @@ test('catalog category, retailer, search, sorting and clear filters still work',
   await page.getByPlaceholder('Search products').fill('no such product')
   await expect(page.getByText('No products found')).toBeVisible()
   await page.getByRole('button', { name: 'Clear filters' }).click()
-  await expect(page.locator('.product-card')).toHaveCount(13)
+  await expect(page.locator('.product-card')).toHaveCount(22)
+  await page.getByRole('button', { name: 'Bathroom', exact: true }).click()
+  await expect(page.locator('.product-card')).toHaveCount(4)
+  await page.getByRole('button', { name: 'Kitchen', exact: true }).click()
+  await expect(page.locator('.product-card')).toHaveCount(3)
+  await page.getByRole('button', { name: 'All', exact: true }).click()
   await page.getByLabel('Sort products').selectOption('price-low')
   await expect(page.locator('.product-card').first()).toContainText('Olive tree')
+})
+
+test('temporary room categories render without runtime errors', async ({ page }) => {
+  const project = emptyProject('Temporary catalogue models')
+  project.width = 12
+  project.length = 12
+  const corners = [{ x: -5.5, z: -5.5 }, { x: 5.5, z: -5.5 }, { x: 5.5, z: 5.5 }, { x: -5.5, z: 5.5 }]
+  project.features = corners.map((a, index) => wallFromPoints(`wall-${index}`, a, corners[(index + 1) % corners.length], 2.8))
+  project.objects = [
+    { id: 'bed', productId: 'bed-cloud', x: -3.2, z: -3.8, rotation: 0 },
+    { id: 'nightstand', productId: 'nightstand-form', x: -1.4, z: -3.8, rotation: 0 },
+    { id: 'toilet', productId: 'toilet-arc', x: 0, z: -3.8, rotation: 0 },
+    { id: 'shower', productId: 'shower-frame', x: 1.5, z: -3.8, rotation: 0 },
+    { id: 'bath', productId: 'bath-curve', x: 3.5, z: -3.8, rotation: 0 },
+    { id: 'vanity', productId: 'vanity-stone', x: -3.2, z: 0, rotation: 0 },
+    { id: 'counter', productId: 'counter-line', x: 0, z: 0, rotation: 0 },
+    { id: 'island', productId: 'island-form', x: 3.2, z: 0, rotation: 0 },
+    { id: 'fridge', productId: 'fridge-tall', x: -3.8, z: 3.2, rotation: 0 },
+  ]
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await page.evaluate((data) => localStorage.setItem('forma-room-planner-project', JSON.stringify(data)), project)
+  await page.reload()
+  await expect(page.locator('canvas')).toHaveAttribute('data-scene-ready', 'true')
+  await frame(page)
+  expect(errors).toEqual([])
+})
+
+test('a slow furniture model keeps the editor visible with an interactive loading placeholder', async ({ page }) => {
+  await page.route('**/storage.googleapis.com/**/shared.glb*', async (route) => { await new Promise((resolve) => setTimeout(resolve, 1500)); await route.continue() })
+  const project = emptyProject('Loading room')
+  project.features = [
+    wallFromPoints('north', { x: -2.5, z: -2.5 }, { x: 2.5, z: -2.5 }, 2.8),
+    wallFromPoints('east', { x: 2.5, z: -2.5 }, { x: 2.5, z: 2.5 }, 2.8),
+    wallFromPoints('south', { x: 2.5, z: 2.5 }, { x: -2.5, z: 2.5 }, 2.8),
+    wallFromPoints('west', { x: -2.5, z: 2.5 }, { x: -2.5, z: -2.5 }, 2.8),
+  ]
+  project.objects = [{ id: 'sofa', productId: 'polihome-vancouver-162638009', x: 0, z: 0, rotation: 0 }]
+  await page.evaluate((value) => localStorage.setItem('forma-room-planner-project', JSON.stringify(value)), project)
+  await page.reload()
+  await page.getByRole('button', { name: '3D', exact: true }).click()
+  await expect(page.locator('.object-loading')).toBeVisible({ timeout: 5000 })
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '1')
+  await expect(page.locator('canvas')).toBeVisible()
+})
+
+test('editor lighting modes preserve the room while switching day and night', async ({ page }) => {
+  await build(page)
+  await page.getByRole('button', { name: '3D', exact: true }).click(); await frame(page)
+  const lighting = page.getByLabel('Editor lighting mode')
+  await expect(lighting).toHaveValue('default')
+  await lighting.selectOption('night')
+  await expect(lighting).toHaveValue('night')
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '1')
+  await lighting.selectOption('day')
+  await expect(lighting).toHaveValue('day')
+  await lighting.selectOption('default')
+  await expect(lighting).toHaveValue('default')
 })
 
 test('registered Polihome sofa loads its generated GLB and switches material variants', async ({ page }) => {
@@ -286,12 +351,58 @@ test('doors and windows attach to custom walls, survive corner edits, and delete
   const p = await save(page)
   expect(p.features.filter((f: { wallId?: string }) => f.wallId)).toHaveLength(2)
   expect(p.features.find((f: { type: string }) => f.type === 'window').sillHeight).toBe(0)
+  await page.getByRole('button', { name: 'Select', exact: true }).click(); await frame(page)
   await page.mouse.click((await gridPoint(page, 1.5, -2.5)).x, point.y)
   await expect(page.getByRole('heading', { name: 'Wall', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Remove wall' }).click()
   expect((await save(page)).features.some((f: { type: string }) => f.type === 'door')).toBe(false)
   await page.getByTitle('Undo').click()
   expect((await save(page)).features).toEqual(p.features)
+})
+
+test('multiple openings stay placeable and draggable along their wall', async ({ page }) => {
+  await build(page)
+  await page.getByRole('button', { name: 'Door', exact: true }).click(); await frame(page)
+  for (const x of [0, 0.2]) { const point = await gridPoint(page, x, -2.5); await page.mouse.click(point.x, point.y); await frame(page) }
+  await page.getByRole('button', { name: 'Select', exact: true }).click(); await frame(page)
+  const from = await gridPoint(page, 0.2, -2.5), to = await gridPoint(page, 1.3, -2.5)
+  await page.mouse.move(from.x, from.y); await page.mouse.down(); await page.mouse.move(to.x, to.y, { steps: 10 }); await page.mouse.up(); await frame(page)
+  const saved = await save(page), doors = saved.features.filter((feature: { type: string }) => feature.type === 'door')
+  expect(doors).toHaveLength(2)
+  expect(doors.some((door: { wallOffset?: number }) => (door.wallOffset || 0) > 1)).toBe(true)
+})
+
+test('WIP drawing import stays hidden until polished', async ({ page }) => {
+  await expect(page.getByRole('button', { name: 'Import architectural drawing', exact: true })).toHaveCount(0)
+  await expect(page.getByText('Import drawing', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.empty-import-button')).toHaveCount(0)
+  await expect(page.locator('.plan-import-card')).toHaveCount(0)
+})
+
+test('wall thickness edits persist, undo and render in 2D and 3D', async ({ page }) => {
+  await build(page)
+  const point = await gridPoint(page, 0, -2.5)
+  await page.mouse.click(point.x, point.y)
+  const thickness = page.getByLabel('Thickness', { exact: true })
+  await expect(thickness).toHaveValue('0.120')
+  await thickness.fill('0.45'); await thickness.press('Enter')
+  expect((await save(page)).features[0].thickness).toBeCloseTo(0.45)
+  await page.getByTitle('Undo').click()
+  expect((await save(page)).features[0].thickness).toBeUndefined()
+  await page.getByTitle('Redo').click()
+  const saved = await save(page)
+  await page.reload()
+  await expect(page.locator('canvas')).toHaveAttribute('data-scene-ready', 'true')
+  expect((await save(page)).features).toEqual(saved.features)
+  await page.getByRole('button', { name: '3D', exact: true }).click()
+  await frame(page)
+  await page.screenshot({ path: '/tmp/forma-wall-thickness-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.getByTitle('Collapse inspector').click()
+  await page.getByTitle('Collapse tools').click()
+  await frame(page)
+  await page.screenshot({ path: '/tmp/forma-wall-thickness-mobile.png', fullPage: true })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(375)
 })
 
 test('legacy saved rooms convert to editable walls without discarding products', async ({ page }) => {

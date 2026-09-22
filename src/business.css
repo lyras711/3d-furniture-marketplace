@@ -4,9 +4,13 @@ body.business-page { background: #f2f1e9; }
 .b2b h1, .b2b h2, .b2b h3 { font-weight: 400; }
 .b2b h1, .b2b h2 { letter-spacing: -.065em; line-height: 1.02; }
 .b2b h1 em, .b2b h2 em, .b2b h3 em { color: #71814e; }
+.b2b .s-button-acid { color: var(--s-ink); }
 .b2b-header { gap: 22px; }
 .b2b-audience { flex-shrink: 0; padding-left: 20px; border-left: 1px solid var(--s-line); color: var(--s-muted); font-size: 9px; letter-spacing: .12em; }
 .b2b-header .s-nav { padding-left: 20px; }
+.b2b-header-demo { align-self: center; flex-shrink: 0; gap: 13px; padding: 14px 17px; border-bottom: 0; background: var(--s-acid); color: var(--s-ink); font-weight: 600; transition: background .2s, transform .2s; }
+.b2b-header-demo:hover { background: #cfdf58; transform: translateY(-1px); }
+.b2b-header-demo svg { width: 18px; }
 .b2b-hero { display: grid; grid-template-columns: 43% 57%; padding: 28px 4.5% 0; }
 .b2b-hero-copy { position: relative; z-index: 2; padding: 73px 0 45px; }
 .b2b-hero h1 { max-width: 690px; margin: 36px -120px 27px 0; font-size: clamp(64px, 6.5vw, 110px); }
@@ -118,7 +122,6 @@ body.business-page { background: #f2f1e9; }
 .b2b-footer > div > a { font-size: 11px; }
 .b2b-footer > div > a > span { margin-left: 20px; }
 .b2b-footer-base { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 20px; padding-top: 23px; margin-top: 40px; border-top: 1px solid var(--s-line); color: var(--s-muted); font-size: 7px; letter-spacing: .08em; }
-.b2b-brief { color: var(--s-ink); }
 @media (prefers-reduced-motion: no-preference) {
   .b2b-hero-copy, .b2b-hero-art { animation: b2b-arrive .75s both; }
   .b2b-hero-art { animation-delay: .1s; }
@@ -138,6 +141,7 @@ body.business-page { background: #f2f1e9; }
   .b2b-header { gap: 13px; }
   .b2b-audience { display: none; }
   .b2b-header .s-header-cta { font-size: 9px; }
+  .b2b-header .b2b-header-demo { gap: 8px; padding: 10px 9px; }
   .b2b-hero { display: block; padding: 0 6%; }
   .b2b-hero-copy { padding: 39px 0 31px; }
   .b2b-hero h1 { margin: 31px 0 22px; font-size: clamp(55px, 11.2vw, 78px); }

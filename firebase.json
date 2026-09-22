@@ -8,7 +8,8 @@
       { "source": "/admin{,/**}", "destination": "/index.html" },
       { "source": "/planner{,/**}", "destination": "/index.html" },
       { "source": "/for-business{,/**}", "destination": "/index.html" },
-      { "source": "/b2b{,/**}", "destination": "/index.html" }
+      { "source": "/b2b{,/**}", "destination": "/index.html" },
+      { "source": "/for-shoppers{,/**}", "destination": "/index.html" }
     ]
   },
   "firestore": {

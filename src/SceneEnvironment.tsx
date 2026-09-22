@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import SurfaceMaterial from './SurfaceMaterial'
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
-import { Edges, Grid, Html, Line } from '@react-three/drei'
+import { Edges, Environment, Grid, Html, Line } from '@react-three/drei'
 import { DoubleSide, Path, Plane, Raycaster, Shape, Vector2, Vector3 } from 'three'
-import { fitsFloor, floorColors, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
+import { fitsFloor, floorColors, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
 
 const floor = new Plane(new Vector3(0, 1, 0), 0)
 const dragType = 'application/x-forma-product'
+export type EditorLightingMode = 'default' | 'day' | 'night'
 export function FloorSurface({ region, color, finish, elevation = -0.01, ceiling = false }: { region: FloorRegion; color: string; finish?: string; elevation?: number; ceiling?: boolean }) {
   const shape = useMemo(() => {
     const shape = new Shape(region.points.map((p) => new Vector2(p.x, -p.z)))
@@ -16,20 +17,24 @@ export function FloorSurface({ region, color, finish, elevation = -0.01, ceiling
   return <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, elevation, 0]} receiveShadow castShadow={ceiling} raycast={() => null}><shapeGeometry args={[shape]} onUpdate={(geometry) => { const uv = geometry.getAttribute('uv'); for (let i = 0; i < uv.count; i++) uv.setXY(i, geometry.getAttribute('position').getX(i) / 2, geometry.getAttribute('position').getY(i) / 2); uv.needsUpdate = true }} />{finish?.includes('oak') ? <SurfaceMaterial kind="floor" color={finish === 'Pale oak' ? '#fff8ec' : '#e4c9a7'} /> : <meshStandardMaterial color={color} side={DoubleSide} roughness={ceiling ? 0.85 : 0.7} />}</mesh>
 }
 
-export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onDragStart, onDragEnd }: {
+export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, lightingMode = 'default' }: {
   project: ProjectState; viewMode: '2d' | '3d'; cutaway: boolean; selectedId: string | null; tool: string
   onSelect: (id: string) => void; onPlace: (type: 'door' | 'window', x: number, z: number) => void
   onMoveEndpoint: (id: string, previous: Point, next: Point) => void
+  onMoveOpening: (id: string, wallOffset: number) => void
   onDragStart: (id: string) => void; onDragEnd: () => void
+  lightingMode?: EditorLightingMode
 }) {
   const regions = useMemo(() => getFloorRegions(project.features), [project.features])
-  return <>{project.features.filter((f) => f.type === 'wall').map((wall) => <WallObject key={wall.id} {...{ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onDragStart, onDragEnd, regions }} wall={wall} />)}</>
+  return <>{project.features.filter((f) => f.type === 'wall').map((wall) => <WallObject key={wall.id} {...{ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, lightingMode, regions }} wall={wall} />)}</>
 }
-function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onDragStart, onDragEnd, wall, regions }: Parameters<typeof Architecture>[0] & { wall: RoomFeature; regions: FloorRegion[] }) {
+function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, lightingMode = 'default', wall, regions }: Parameters<typeof Architecture>[0] & { wall: RoomFeature; regions: FloorRegion[] }) {
   const { camera, controls } = useThree()
   const [front, setFront] = useState(false)
   const drag = useRef<Point | null>(null)
+  const openingDrag = useRef<string | null>(null)
   const selected = selectedId === wall.id
+  const thickness = wallThickness(wall)
   const openings = project.features.filter((f) => f.wallId === wall.id)
   useFrame(() => {
     const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
@@ -48,9 +53,19 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
     if (tool === 'door' || tool === 'window') onPlace(tool, event.point.x, event.point.z)
     else onSelect(id)
   }
+  const openingOffset = (event: ThreeEvent<PointerEvent>) => {
+    const point = event.ray.intersectPlane(floor, new Vector3())
+    return point ? (point.x - wall.x) * Math.cos(wall.rotation) - (point.z - wall.z) * Math.sin(wall.rotation) : null
+  }
   const finish = (event: ThreeEvent<PointerEvent>) => {
     if (!drag.current) return
     event.stopPropagation(); drag.current = null
+    ;(event.target as Element).releasePointerCapture?.(event.pointerId)
+    onDragEnd()
+  }
+  const finishOpening = (event: ThreeEvent<PointerEvent>) => {
+    if (!openingDrag.current) return
+    event.stopPropagation(); openingDrag.current = null
     ;(event.target as Element).releasePointerCapture?.(event.pointerId)
     onDragEnd()
   }
@@ -59,17 +74,39 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
       const right = xs[i + 1], top = ys[j + 1], x = (left + right) / 2, y = (bottom + top) / 2
       if (openings.some((f) => Math.abs(x - (f.wallOffset || 0)) < f.width / 2 && (low || (y >= (f.sillHeight || 0) && y < (f.sillHeight || 0) + f.height)))) return null
       return <mesh key={`${i}-${j}`} position={[x, y, 0]} castShadow={!plan} receiveShadow onClick={(event) => click(event, wall.id)}>
-        <boxGeometry args={[right - left, top - bottom, 0.12]} /><meshStandardMaterial color={selected ? '#93af97' : plan ? '#7e8878' : wallColors[project.wallMaterial]} roughness={0.9} />{selected && <Edges color="#58765d" />}
+        <boxGeometry args={[right - left, top - bottom, thickness]} /><meshStandardMaterial color={selected ? '#93af97' : plan ? '#7e8878' : wallColors[project.wallMaterial]} roughness={0.9} />{selected && <Edges color="#58765d" />}
       </mesh>
     }))}
     {openings.map((f) => {
       const openingHeight = low ? 0.08 : f.height, y = low ? 0.065 : (f.sillHeight || 0) + openingHeight / 2
-      return <group key={f.id} position={[f.wallOffset || 0, 0, 0]} onClick={(event) => click(event, f.id)}>
-        <mesh position={[0, y, 0]} castShadow={f.type === 'door'} receiveShadow>{f.type === 'window' && !low ? <planeGeometry args={[f.width, openingHeight]} /> : <boxGeometry args={[f.width, openingHeight, 0.045]} />}{f.type === 'window' && !low ? <meshPhysicalMaterial color="#f5faf7" transmission={0.98} thickness={0} ior={1.5} roughness={0.035} side={DoubleSide} /> : low ? <meshStandardMaterial color={f.type === 'window' ? '#a5c3c5' : '#c4aa88'} /> : <SurfaceMaterial kind="oak" color="#d3b996" />}{selectedId === f.id && <Edges color="#4d7858" lineWidth={2} />}</mesh>
+      const windowColor = lightingMode === 'night' ? '#142238' : lightingMode === 'day' ? '#eaf8ff' : '#f5faf7'
+      const windowTransmission = lightingMode === 'night' ? 0.04 : lightingMode === 'day' ? 0.82 : 0.98
+      const windowRoughness = lightingMode === 'night' ? 0.28 : lightingMode === 'day' ? 0.08 : 0.035
+      const windowEmissive = lightingMode === 'night' ? '#0c1423' : lightingMode === 'day' ? '#dff4ff' : '#000000'
+      const windowEmissiveIntensity = lightingMode === 'night' ? 0.04 : lightingMode === 'day' ? 0.12 : 0
+      return <group key={f.id} position={[f.wallOffset || 0, 0, 0]} onClick={(event) => click(event, f.id)}
+        onPointerDown={(event) => {
+          if (event.button !== 0 || tool !== 'select') return
+          const offset = openingOffset(event)
+          if (offset === null) return
+          event.stopPropagation()
+          openingDrag.current = f.id
+          ;(event.target as Element).setPointerCapture?.(event.pointerId)
+          if (controls) (controls as unknown as { enabled: boolean }).enabled = false
+          onSelect(f.id)
+          onDragStart(f.id)
+        }}
+        onPointerMove={(event) => {
+          if (openingDrag.current !== f.id) return
+          event.stopPropagation()
+          const offset = openingOffset(event)
+          if (offset !== null) onMoveOpening(f.id, offset)
+        }} onPointerUp={finishOpening} onPointerCancel={finishOpening}>
+        <mesh position={[0, y, 0]} castShadow={f.type === 'door'} receiveShadow>{f.type === 'window' && !low ? <planeGeometry args={[f.width, openingHeight]} /> : <boxGeometry args={[f.width, openingHeight, low ? thickness : 0.045]} />}{f.type === 'window' && !low ? <meshPhysicalMaterial color={windowColor} transmission={windowTransmission} thickness={0} ior={1.5} roughness={windowRoughness} emissive={windowEmissive} emissiveIntensity={windowEmissiveIntensity} side={DoubleSide} /> : low ? <meshStandardMaterial color={f.type === 'window' ? '#a5c3c5' : '#c4aa88'} /> : <SurfaceMaterial kind="oak" color="#d3b996" />}{selectedId === f.id && <Edges color="#4d7858" lineWidth={2} />}</mesh>
         {!low && <>
-          {(f.type === 'window' ? [-1, 0, 1] : [-1, 1]).map((i) => <mesh key={i} position={[i * (f.width / 2 - 0.025), y, 0]} castShadow receiveShadow><boxGeometry args={[0.045, openingHeight, 0.145]} /><meshStandardMaterial color={f.type === 'window' ? '#30362f' : '#ede5d7'} roughness={0.38} metalness={f.type === 'window' ? 0.45 : 0} /></mesh>)}
-          {[-1, 1].map((i) => <mesh key={i} position={[0, y + i * (openingHeight / 2 - 0.02), 0]} castShadow receiveShadow><boxGeometry args={[f.width, 0.04, 0.145]} /><meshStandardMaterial color={f.type === 'window' ? '#30362f' : '#ede5d7'} roughness={0.38} /></mesh>)}
-          {f.type === 'window' && <mesh position={[0, y - openingHeight / 2 - 0.025, 0]} castShadow receiveShadow><boxGeometry args={[f.width + 0.08, 0.045, 0.23]} /><meshStandardMaterial color="#d8cfbb" roughness={0.35} /></mesh>}
+          {(f.type === 'window' ? [-1, 0, 1] : [-1, 1]).map((i) => <mesh key={i} position={[i * (f.width / 2 - 0.025), y, 0]} castShadow receiveShadow><boxGeometry args={[0.045, openingHeight, thickness + 0.025]} /><meshStandardMaterial color={f.type === 'window' ? '#30362f' : '#ede5d7'} roughness={0.38} metalness={f.type === 'window' ? 0.45 : 0} /></mesh>)}
+          {[-1, 1].map((i) => <mesh key={i} position={[0, y + i * (openingHeight / 2 - 0.02), 0]} castShadow receiveShadow><boxGeometry args={[f.width, 0.04, thickness + 0.025]} /><meshStandardMaterial color={f.type === 'window' ? '#30362f' : '#ede5d7'} roughness={0.38} /></mesh>)}
+          {f.type === 'window' && <mesh position={[0, y - openingHeight / 2 - 0.025, 0]} castShadow receiveShadow><boxGeometry args={[f.width + 0.08, 0.045, thickness + 0.11]} /><meshStandardMaterial color="#d8cfbb" roughness={0.35} /></mesh>}
           {f.type === 'door' && [-1, 1].map((side) => <mesh key={side} position={[f.width * 0.34, Math.min(1, f.height * 0.55), side * 0.045]} rotation={[0, 0, Math.PI / 2]} castShadow><cylinderGeometry args={[0.012, 0.012, 0.13, 16]} /><meshStandardMaterial color="#bca171" roughness={0.25} metalness={0.85} /></mesh>)}
         </>}
         {f.type === 'door' && low && <Line points={Array.from({ length: 25 }, (_, i) => [-f.width / 2 + Math.cos(i / 24 * Math.PI / 2) * f.width, 0.035, -Math.sin(i / 24 * Math.PI / 2) * f.width] as [number, number, number])} color="#a89679" lineWidth={1} dashed dashSize={0.08} gapSize={0.05} raycast={() => null} />}
@@ -78,7 +115,7 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
     {!low && xs.slice(0, -1).map((left, i) => {
       const right = xs[i + 1], x = (left + right) / 2
       if (openings.some((f) => (f.sillHeight || 0) < 0.1 && Math.abs(x - (f.wallOffset || 0)) < f.width / 2)) return null
-      return [-1, 1].map((side) => <mesh key={`${i}-${side}`} position={[x, 0.055, side * 0.073]} castShadow receiveShadow><boxGeometry args={[right - left, 0.11, 0.026]} /><meshStandardMaterial color="#e6dfd2" roughness={0.5} /></mesh>)
+      return [-1, 1].map((side) => <mesh key={`${i}-${side}`} position={[x, 0.055, side * (thickness / 2 + 0.013)]} castShadow receiveShadow><boxGeometry args={[right - left, 0.11, 0.026]} /><meshStandardMaterial color="#e6dfd2" roughness={0.5} /></mesh>)
     })}
     {selected && <Html center position={[0, height + 0.15, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{wall.width.toFixed(2)} m</span></Html>}
     {selected && tool === 'select' && [-1, 1].map((side, index) => <mesh key={side} position={[side * wall.width / 2, plan ? 0.16 : height + 0.08, 0]}
@@ -104,8 +141,8 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
   </group>
 }
 
-export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, onClear, onPlace, onDrop, onDrawWall }: {
-  project: ProjectState; viewMode: '2d' | '3d'; gridVisible: boolean; tool: string; snap: boolean; wallSnap: boolean
+export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, lightingMode, onClear, onPlace, onDrop, onDrawWall }: {
+  project: ProjectState; viewMode: '2d' | '3d'; gridVisible: boolean; tool: string; snap: boolean; wallSnap: boolean; lightingMode: EditorLightingMode
   onClear: () => void; onPlace: (type: 'wall' | 'door' | 'window', x: number, z: number) => void
   onDrop: (id: string, x: number, z: number) => void
   onDrawWall: (x: number, z: number, endX: number, endZ: number) => void
@@ -119,6 +156,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     else invalidate()
   })
   const regions = useMemo(() => getFloorRegions(project.features), [project.features])
+  const editor3d = viewMode === '3d', day3d = editor3d && lightingMode === 'day', exterior3d = editor3d && lightingMode === 'default'
   const [ghost, setGhost] = useState<{ id: string; x: number; z: number; valid: boolean } | null>(null)
   const wallStart = useRef<Point | null>(null)
   const [wallEnd, setWallEnd] = useState<Point | null>(null)
@@ -183,8 +221,17 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     cancelWall()
   }
   return <>
-    <color attach="background" args={['#f4f3ef']} /><ambientLight intensity={1.4} /><hemisphereLight args={['#fff8ed', '#c5c9c3', 1]} />
-    <directionalLight castShadow={viewMode === '3d'} position={[3, 9, 5]} intensity={2.3} shadow-mapSize={[2048, 2048]} shadow-bias={-0.0004} shadow-normalBias={0.025} shadow-camera-left={-20} shadow-camera-right={20} shadow-camera-top={20} shadow-camera-bottom={-20} />
+    <color attach="background" args={[editor3d ? '#e8e4d9' : '#f4f3ef']} />
+    {exterior3d && <Suspense fallback={null}><Environment files="/materials/forest.hdr" environmentIntensity={day3d ? 0.65 : 0.45} /></Suspense>}
+    <ambientLight intensity={!editor3d ? 1.4 : exterior3d ? 0.2 : 0} />
+    <hemisphereLight args={['#fff8ed', '#c5c9c3', !editor3d ? 1 : exterior3d ? 0.55 : 0]} />
+    <directionalLight castShadow={exterior3d} position={[3, 9, 5]} intensity={!editor3d ? 2.3 : exterior3d ? 3.2 : 0} color={day3d ? '#fff4dc' : '#ffffff'} shadow-mapSize={[2048, 2048]} shadow-bias={-0.0004} shadow-normalBias={0.025} shadow-camera-left={-20} shadow-camera-right={20} shadow-camera-top={20} shadow-camera-bottom={-20} />
+    {editor3d && lightingMode !== 'night' && project.features.filter((feature) => feature.type === 'window').map((feature) => {
+      const nx = Math.sin(feature.rotation), nz = Math.cos(feature.rotation)
+      const parent = project.features.find((wall) => wall.id === feature.wallId), offset = (parent ? wallThickness(parent) : 0.12) / 2 + 0.03
+      const inside = regions.some((region) => pointInPolygon({ x: feature.x + nx * 0.2, z: feature.z + nz * 0.2 }, region.points)) ? 1 : -1
+      return <rectAreaLight key={feature.id} position={[feature.x + nx * inside * offset, (feature.sillHeight || 0) + feature.height / 2, feature.z + nz * inside * offset]} rotation={[0, feature.rotation + (inside === 1 ? Math.PI : 0), 0]} width={feature.width * 0.9} height={feature.height * 0.9} intensity={day3d ? 30 : 2.5} color="#ffedcf" />
+    })}
     <mesh position={[0, -0.035, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow
       onClick={(event) => { if (tool === 'select') { event.stopPropagation(); onClear() } else if (tool === 'door' || tool === 'window') { event.stopPropagation(); onPlace(tool, event.point.x, event.point.z) } }}
       onPointerDown={(event) => { if (tool !== 'wall' || event.button !== 0) return; event.stopPropagation(); wallStart.current = wallPoint(event); setWallEnd(wallStart.current); capture.current = { element: event.target as Element, id: event.pointerId }; capture.current.element.setPointerCapture?.(event.pointerId) }}

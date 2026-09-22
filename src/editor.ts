@@ -5,7 +5,7 @@ export type RoomObject = { id: string; productId: string; variantId?: string; x:
 export type RoomFeature = {
   id: string; type: 'wall' | 'door' | 'window'; x: number; z: number; rotation: number
   width: number; height: number; sillHeight?: number; wall?: 'north' | 'south' | 'east' | 'west'
-  wallId?: string; wallOffset?: number
+  wallId?: string; wallOffset?: number; thickness?: number
 }
 export interface ProjectState {
   schemaVersion?: 2
@@ -27,6 +27,7 @@ export const polygonArea = (points: Point[]) => points.reduce((sum, p, i) => sum
 export function emptyProject(name = 'My space'): ProjectState {
   return { schemaVersion: 2, name, roomType: 'Custom space', width: 12, length: 12, ceilingHeight: 2.8, floorMaterial: 'Natural oak', wallMaterial: 'Warm white', features: [], objects: [] }
 }
+export const wallThickness = (wall: RoomFeature) => wall.thickness ?? 0.12
 export function wallEndpoints(wall: RoomFeature): [Point, Point] {
   const dx = Math.cos(wall.rotation) * wall.width / 2, dz = -Math.sin(wall.rotation) * wall.width / 2
   return [{ x: wall.x - dx, z: wall.z - dz }, { x: wall.x + dx, z: wall.z + dz }]
@@ -133,11 +134,12 @@ function crosses(a: Point, b: Point, c: Point, d: Point) {
 }
 export function fitsFloor(object: RoomObject, project: ProjectState, regions = getFloorRegions(project.features)) {
   if (!productById.has(object.productId)) return false
-  const points = corners(object, 0.065)
+  const points = corners(object, 0.005)
   const inside = regions.some((region) => points.every((p) => pointInPolygon(p, region.points) && !region.holes.some((h) => pointInPolygon(p, h))) && [region.points, ...region.holes].every((ring) => ring.every((p, i) => !points.some((q, j) => crosses(q, points[(j + 1) % 4], p, ring[(i + 1) % ring.length])))) && !region.holes.some((ring) => ring.some((p) => pointInPolygon(p, points))))
   return inside && !project.features.filter((f) => f.type === 'wall').some((wall) => {
-    const [a, b] = wallEndpoints(wall)
-    return pointInPolygon(a, points) || pointInPolygon(b, points) || points.some((p, i) => crosses(p, points[(i + 1) % 4], a, b))
+    const [a, b] = wallEndpoints(wall), half = wallThickness(wall) / 2, nx = Math.sin(wall.rotation) * half, nz = Math.cos(wall.rotation) * half
+    const outline = [{ x: a.x + nx, z: a.z + nz }, { x: b.x + nx, z: b.z + nz }, { x: b.x - nx, z: b.z - nz }, { x: a.x - nx, z: a.z - nz }]
+    return outline.some((p) => pointInPolygon(p, points)) || points.some((p) => pointInPolygon(p, outline)) || outline.some((p, i) => points.some((q, j) => crosses(p, outline[(i + 1) % 4], q, points[(j + 1) % 4])))
   })
 }
 export function placeObject(object: RoomObject, room: ProjectState, snap = false, wallSnap = false): RoomObject {
@@ -149,7 +151,7 @@ export function placeObject(object: RoomObject, room: ProjectState, snap = false
       const [a, b] = wallEndpoints(wall), hit = projection(result, a, b)
       if (hit.t < 0 || hit.t > 1) continue
       const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
-      const extent = footprint(product, object.rotation - wall.rotation).z + 0.075
+      const extent = footprint(product, object.rotation - wall.rotation).z + wallThickness(wall) / 2 + 0.015
       const signed = (result.x - hit.point.x) * nx + (result.z - hit.point.z) * nz
       if (Math.abs(Math.abs(signed) - extent) < 0.16) {
         result = { ...result, x: hit.point.x + Math.sign(signed || 1) * extent * nx, z: hit.point.z + Math.sign(signed || 1) * extent * nz }
@@ -218,5 +220,5 @@ export function migrateProject(project: ProjectState): ProjectState {
 export function isProject(value: unknown): value is ProjectState {
   if (!value || typeof value !== 'object') return false
   const p = value as ProjectState
-  return (p.schemaVersion === undefined || p.schemaVersion === 2) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => o && typeof o.id === 'string' && productById.has(o.productId) && (o.variantId === undefined || typeof o.variantId === 'string') && [o.x, o.z, o.rotation].every(Number.isFinite)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)))
+  return (p.schemaVersion === undefined || p.schemaVersion === 2) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => o && typeof o.id === 'string' && productById.has(o.productId) && (o.variantId === undefined || typeof o.variantId === 'string') && [o.x, o.z, o.rotation].every(Number.isFinite)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)) && (f.thickness === undefined || (Number.isFinite(f.thickness) && f.thickness >= 0.02 && f.thickness <= 2)))
 }

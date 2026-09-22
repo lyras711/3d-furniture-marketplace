@@ -3,9 +3,10 @@ import { emptyProject, fitsFloor, getFloorRegions, isProject } from './src/edito
 
 test.use({ viewport: { width: 1440, height: 1000 }, contextOptions: { reducedMotion: 'reduce' }, launchOptions: { executablePath: process.env.CHROMIUM_PATH, channel: process.platform === 'darwin' ? 'chromium' : undefined, args: process.platform === 'darwin' ? ['--use-angle=metal'] : [] }, screenshot: 'only-on-failure', trace: 'retain-on-failure' })
 const url = (process.env.TEST_URL || 'http://127.0.0.1:5174').replace(/\/$/, '')
+const shopperUrl = `${url}/for-shoppers`
 const saved = JSON.stringify(emptyProject('My existing project'))
 async function start(page: Page) {
-  await page.goto(url)
+  await page.goto(shopperUrl)
   await page.evaluate((data) => localStorage.setItem('forma-room-planner-project', data), saved)
   await page.getByRole('button', { name: 'Draw my room' }).click()
 }
@@ -24,7 +25,7 @@ test('showcase loads original local imagery without loading the 3D editor', asyn
   const requests: string[] = []
   page.on('pageerror', (error) => errors.push(error.message))
   page.on('request', (request) => requests.push(request.url()))
-  await page.goto(url)
+  await page.goto(shopperUrl)
   await expect(page.getByRole('heading', { name: 'Make room for possibility.' })).toBeVisible()
   await expect(page.locator('.s-hero-art > img')).toHaveJSProperty('complete', true)
   expect(await page.locator('.s-hero-art > img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1400)
@@ -46,7 +47,7 @@ test('showcase room-to-quote journey calculates exact totals, removes items, and
   await demo.getByRole('button', { name: 'Review 4 pieces' }).click()
   await expect(demo.locator('.s-demo-basket > div')).toHaveCount(4)
   const { filename, data } = await readDownload(page, () => demo.getByRole('button', { name: 'Download quote draft' }).click())
-  expect(filename).toBe('forma-demo-quote.json')
+  expect(filename).toBe('formivo-demo-quote.json')
   expect(data.estimatedTotal).toBe(1466)
   expect(data.status).toBe('draft-not-submitted')
   expect(data.retailers).toHaveLength(4)
@@ -62,7 +63,7 @@ test('showcase room-to-quote journey calculates exact totals, removes items, and
 })
 
 test('showcase walkthrough can be interrupted and reset without downloading', async ({ page }) => {
-  await page.goto(url)
+  await page.goto(shopperUrl)
   const downloads: string[] = []
   page.on('download', (download) => downloads.push(download.suggestedFilename()))
   await page.getByRole('button', { name: 'Or, play the walkthrough' }).click()
@@ -78,10 +79,10 @@ test('showcase walkthrough can be interrupted and reset without downloading', as
 })
 
 test('showcase partnership and investor briefs are honest local downloads with accessible dialogs', async ({ page }) => {
-  await page.goto(url)
+  await page.goto(shopperUrl)
   const outbound: string[] = []
   page.on('request', (request) => { if (request.method() !== 'GET') outbound.push(request.url()) })
-  for (const [button, filename] of [['Explore a retail partnership', 'forma-retailer-brief.json'], ['Explore the investment thesis', 'forma-investor-brief.json']]) {
+  for (const [button, filename] of [['Explore a retail partnership', 'formivo-retailer-brief.json'], ['Explore the investment thesis', 'formivo-investor-brief.json']]) {
     const trigger = page.getByRole('button', { name: button, exact: true })
     await trigger.click()
     const dialog = page.getByRole('dialog')
@@ -145,7 +146,7 @@ test('showcase preserves legacy shared-project URLs', async ({ page }) => {
 test('showcase desktop and mobile screenshots have no overflow, broken images, or hidden content', async ({ page }) => {
   for (const width of [1440, 375]) {
     await page.setViewportSize({ width, height: 1000 })
-    await page.goto(url)
+    await page.goto(shopperUrl)
     await expect(page.getByRole('heading', { name: 'Make room for possibility.' })).toBeVisible()
     for (const section of await page.locator('.s-reveal').all()) await section.scrollIntoViewIfNeeded()
     await expect.poll(() => page.evaluate(() => [...document.images].every((image) => image.complete && image.naturalWidth > 0))).toBe(true)
