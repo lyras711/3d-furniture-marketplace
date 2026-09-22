@@ -28,7 +28,7 @@ export const generatedProducts: Product[] = [
     "accent": "#85837d",
     "status": "Source extracted · 6 review warnings",
     "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fthumbnail.png?v=3b17181fb68a",
-    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a",
+    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a-cors1",
     "variants": [
       {
         "id": "grey-light",
@@ -37,7 +37,7 @@ export const generatedProducts: Product[] = [
         "colorName": "light grey",
         "tone": "#b8b7b3",
         "accent": "#85837d",
-        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a-cors1",
         "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fthumbnail.png?v=3b17181fb68a",
         "materialReference": "generated tileable nap/weave maps with photo-sampled colour; not measured physical fabric",
         "sourceAvailability": "Διαθέσιμο"
@@ -49,7 +49,7 @@ export const generatedProducts: Product[] = [
         "colorName": "dark grey",
         "tone": "#505256",
         "accent": "#292b2e",
-        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fshared.glb?v=3b17181fb68a-cors1",
         "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fpolihome-vancouver-162638009%2Fthumbnail.png?v=3b17181fb68a",
         "materialReference": "generated tileable nap/weave maps with photo-sampled colour; not measured physical fabric",
         "sourceAvailability": "Διαθέσιμο"
@@ -117,7 +117,7 @@ export const generatedProducts: Product[] = [
     "accent": "#292b2e",
     "status": "Source extracted · 5 review warnings",
     "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fthumbnail.jpg?v=6931fa76a2d7",
-    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fshared.glb?v=6931fa76a2d7",
+    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fshared.glb?v=6931fa76a2d7-cors1",
     "variants": [
       {
         "id": "canova-default",
@@ -126,7 +126,7 @@ export const generatedProducts: Product[] = [
         "colorName": null,
         "tone": "#505256",
         "accent": "#292b2e",
-        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fshared.glb?v=6931fa76a2d7",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fshared.glb?v=6931fa76a2d7-cors1",
         "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fhomad-canova%2Fthumbnail.jpg?v=6931fa76a2d7",
         "materialReference": "",
         "sourceAvailability": "available"
@@ -174,7 +174,7 @@ export const generatedProducts: Product[] = [
     "accent": "#292b2e",
     "status": "Source extracted · 5 review warnings",
     "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fthumbnail.jpg?v=c55301140599",
-    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fshared.glb?v=c55301140599",
+    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fshared.glb?v=c55301140599-cors1",
     "variants": [
       {
         "id": "prism-dining-table-default",
@@ -183,7 +183,7 @@ export const generatedProducts: Product[] = [
         "colorName": null,
         "tone": "#505256",
         "accent": "#292b2e",
-        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fshared.glb?v=c55301140599",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fshared.glb?v=c55301140599-cors1",
         "thumbnailPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fal2-prism-dining-table%2Fthumbnail.jpg?v=c55301140599",
         "materialReference": "",
         "sourceAvailability": "available"
@@ -231,7 +231,7 @@ export const generatedProducts: Product[] = [
     "accent": "#292b2e",
     "status": "Source extracted · 5 review warnings",
     "thumbnailPath": null,
-    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fgrecostrom-krevati-ermis%2Fshared.glb?v=55e4984db983",
+    "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fgrecostrom-krevati-ermis%2Fshared.glb?v=55e4984db983-cors1",
     "variants": [
       {
         "id": "krevati-ermis-default",
@@ -240,7 +240,7 @@ export const generatedProducts: Product[] = [
         "colorName": null,
         "tone": "#505256",
         "accent": "#292b2e",
-        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fgrecostrom-krevati-ermis%2Fshared.glb?v=55e4984db983",
+        "modelPath": "https://storage.googleapis.com/forma-furniture-marketplace.firebasestorage.app/catalog%2Fgrecostrom-krevati-ermis%2Fshared.glb?v=55e4984db983-cors1",
         "thumbnailPath": null,
         "materialReference": "",
         "sourceAvailability": "available"

@@ -96,7 +96,7 @@ export async function registerCatalog(options: CatalogRegistrationOptions): Prom
     const file = path.resolve(root, asset.localPath)
     if (!file.startsWith(`${root}${path.sep}`)) throw new Error('Model asset must be inside the product artifact directory.')
     const revision = createHash('sha256').update(await readFile(file)).digest('hex').slice(0, 12)
-    const versioned = (url: string) => `${url}${url.includes('?') ? '&' : '?'}v=${revision}`
+    const versioned = (url: string) => `${url}${url.includes('?') ? '&' : '?'}v=${revision}-cors1`
     asset.publicPathOrStorageKey = versioned(asset.publicPathOrStorageKey)
     if (asset.thumbnailPath) asset.thumbnailPath = versioned(asset.thumbnailPath)
   }

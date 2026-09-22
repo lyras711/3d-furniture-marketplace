@@ -61,7 +61,7 @@
 
 # Deployment (2026-09-17)
 
-- Catalog GLBs/thumbnails are uploaded to the `forma-furniture-marketplace.firebasestorage.app` bucket as public objects (`uploadFile` `{ public: true }` → `publicUrl()`); signed URLs are the fallback. The bucket has a CORS config allowing GET/HEAD from the hosting domains and local dev ports — GLTFLoader fetches cross-origin and fails without it.
+- Catalog GLBs/thumbnails are uploaded to the `forma-furniture-marketplace.firebasestorage.app` bucket as public objects (`uploadFile` `{ public: true }` → `publicUrl()`); signed URLs are the fallback. The bucket CORS config allows GET/HEAD from `https://formivo3d.com`, the Firebase hosting domains and local dev ports — GLTFLoader fetches cross-origin and fails without it. If CORS changes, bump model URL query versions to bypass stale edge responses.
 - `register-catalog` appends `?v=`/`&v=` content hashes without stripping existing query params, preserving signed URLs.
 - `GOOGLE_APPLICATION_CREDENTIALS` points at a firebase-adminsdk key outside the repo. `.env.local` is only auto-loaded by `scripts/admin-server.ts`; CLI pipeline runs need the variable exported in the shell.
 - `firebase.json` rewrites both `/api/admin/**` and `/api/worker/**` to Cloud Run `forma-admin-worker`. Cloud Tasks worker delivery requires WORKER_URL/WORKER_TASK_SECRET on the service; a failed enqueue falls back to in-process execution, which Cloud Run CPU throttling can still freeze after the response. A trailing newline in `WORKER_TASK_SECRET` silently 401s every delivery (HTTP headers strip it) — the env var is trimmed in `admin-server`, and the stored secret version must be clean.
