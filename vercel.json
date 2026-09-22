@@ -1,0 +1,14 @@
+{
+  "rewrites": [
+    { "source": "/planner", "destination": "/index.html" },
+    { "source": "/planner/:path*", "destination": "/index.html" },
+    { "source": "/for-business", "destination": "/index.html" },
+    { "source": "/for-business/:path*", "destination": "/index.html" },
+    { "source": "/b2b", "destination": "/index.html" },
+    { "source": "/b2b/:path*", "destination": "/index.html" },
+    { "source": "/for-shoppers", "destination": "/index.html" },
+    { "source": "/for-shoppers/:path*", "destination": "/index.html" },
+    { "source": "/admin", "destination": "/index.html" },
+    { "source": "/admin/:path*", "destination": "/index.html" }
+  ]
+}

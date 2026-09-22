@@ -16,6 +16,12 @@ test('root serves the B2B journey and the B2C showcase stays on a hidden shopper
   await expect(page.locator('.b2b')).toHaveCount(0)
 })
 
+test('planner direct route opens the editor', async ({ page }) => {
+  await page.goto(`${url}/planner`)
+  await expect(page).toHaveTitle('Formivo — room planner')
+  await expect(page.locator('canvas')).toHaveAttribute('data-scene-ready', 'true')
+})
+
 test('business contact links open a proposal email and keep the customer demo visible', async ({ page }) => {
   await page.goto(url)
   const contactHref = /mailto:info@formivo3d\.com\?subject=Formivo%20B2B%20pilot%20conversation/
