@@ -122,6 +122,8 @@ body.business-page { background: #f2f1e9; }
 .b2b-footer > div > a { font-size: 11px; }
 .b2b-footer > div > a > span { margin-left: 20px; }
 .b2b-footer-base { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 20px; padding-top: 23px; margin-top: 40px; border-top: 1px solid var(--s-line); color: var(--s-muted); font-size: 7px; letter-spacing: .08em; }
+.b2b-language-picker { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; margin-top: 4px; color: var(--s-muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
+.b2b-language-picker select { max-width: 100%; padding: 7px 10px; border: 1px solid var(--s-line); border-radius: 0; color: var(--s-ink); background: transparent; font: inherit; font-size: 11px; letter-spacing: normal; text-transform: none; }
 @media (prefers-reduced-motion: no-preference) {
   .b2b-hero-copy, .b2b-hero-art { animation: b2b-arrive .75s both; }
   .b2b-hero-art { animation-delay: .1s; }

@@ -16,6 +16,39 @@ test('root serves the B2B journey and the B2C showcase stays on a hidden shopper
   await expect(page.locator('.b2b')).toHaveCount(0)
 })
 
+test('business home switches between English, German and Greek and remembers the selection', async ({ page }) => {
+  await page.goto(url)
+  const language = page.locator('#business-language')
+  await expect(language).toHaveValue('en')
+  await expect(language.locator('option')).toHaveText(['English', 'Deutsch', 'Ελληνικά'])
+
+  await language.selectOption('de')
+  await expect(page.locator('html')).toHaveAttribute('lang', 'de')
+  await expect(page).toHaveTitle('Formivo für Unternehmen — räumliches Möbel-Shopping')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Möbel direkt im Raum erleben.')
+  await expect(page.getByLabel('Sprache')).toHaveValue('de')
+  await page.setViewportSize({ width: 375, height: 1000 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.reload()
+  await expect(page.locator('#business-language')).toHaveValue('de')
+
+  await page.locator('#business-language').selectOption('el')
+  await expect(page.locator('html')).toHaveAttribute('lang', 'el')
+  await expect(page).toHaveTitle('Formivo για επιχειρήσεις — αγορές επίπλων στον χώρο')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Δείτε τα έπιπλα στον χώρο τους.')
+  await expect(page.getByLabel('Γλώσσα')).toHaveValue('el')
+  await page.setViewportSize({ width: 375, height: 1000 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.reload()
+  await expect(page.locator('#business-language')).toHaveValue('el')
+
+  await page.goto(`${url}/planner`)
+  await expect(page.locator('#business-language')).toHaveCount(0)
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en')
+})
+
 test('planner direct route opens the editor', async ({ page }) => {
   await page.goto(`${url}/planner`)
   await expect(page).toHaveTitle('Formivo — room planner')
