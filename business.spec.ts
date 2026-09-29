@@ -59,7 +59,7 @@ test('business contact links open a proposal email and keep the customer demo vi
   await page.goto(url)
   const contactHref = /mailto:info@formivo3d\.com\?subject=Formivo%20B2B%20pilot%20conversation/
   const headerDemo = page.locator('.b2b-header').getByRole('link', { name: 'Open customer demo' })
-  const journeyDemo = page.locator('#flow').getByRole('link', { name: 'Open customer demo' })
+  const journeyDemo = page.locator('#flow .b2b-heading > div').getByRole('link', { name: 'Open customer demo' })
   await expect(page.getByRole('link', { name: 'Open customer demo' })).toHaveCount(2)
   await expect(headerDemo).toHaveAttribute('href', '/planner')
   await expect(headerDemo).toHaveClass(/b2b-header-demo/)

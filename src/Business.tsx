@@ -483,7 +483,14 @@ export default function Business() {
       </section>
 
       <section className="b2b-section b2b-flow" id="flow">
-        <div className="b2b-heading"><div><div className="b2b-section-index">{copy.journey.index}</div><h2>{copy.journey.titleStart}<br /><em>{copy.journey.titleEnd}</em></h2></div><p>{copy.journey.description}</p></div>
+        <div className="b2b-heading">
+          <div>
+            <div className="b2b-section-index">{copy.journey.index}</div>
+            <h2>{copy.journey.titleStart}<br /><em>{copy.journey.titleEnd}</em></h2>
+            <div className="b2b-flow-actions"><a className="s-button s-button-acid" href="/planner">{copy.customerDemo} <Arrow diagonal /></a></div>
+          </div>
+          <p>{copy.journey.description}</p>
+        </div>
         <div className="b2b-space-inputs" aria-label={copy.journey.inputsLabel}>
           <div className="b2b-space-option"><div className="b2b-space-preview b2b-space-draw" aria-hidden="true"><svg viewBox="0 0 260 145" fill="none"><rect x="35" y="22" width="190" height="101" stroke="currentColor" strokeWidth="3" /><path d="M35 89h33V55h47v34h110M115 22v33M181 22v22" stroke="currentColor" strokeWidth="3" /><rect x="79" y="63" width="57" height="18" rx="3" fill="currentColor" opacity=".3" /><circle cx="171" cy="83" r="12" fill="currentColor" opacity=".3" /></svg><span>{copy.journey.roomDimensions}</span></div><div><span>{copy.journey.drawLabel}</span><strong>{copy.journey.drawTitle}</strong><p>{copy.journey.drawDescription}</p></div></div>
           <div className="b2b-space-option"><div className="b2b-space-preview b2b-space-photo" aria-hidden="true"><div className="b2b-photo-sheet"><span>{copy.journey.layoutPhoto}</span><i /><i /><i /><b>+</b></div></div><div><span>{copy.journey.photoLabel}</span><strong>{copy.journey.photoTitle}</strong><p>{copy.journey.photoDescription}</p></div></div>
@@ -491,7 +498,6 @@ export default function Business() {
         <ol className="b2b-steps">
           {copy.steps.map((step, index) => <li key={step.title}><span>{String(index + 1).padStart(2, '0')}</span><h3>{step.title}</h3><p>{step.description}</p><small>{step.label}</small></li>)}
         </ol>
-        <div className="b2b-flow-actions"><a className="s-button s-button-acid" href="/planner">{copy.customerDemo} <Arrow diagonal /></a></div>
       </section>
 
       <section className="b2b-pilot" id="pilot">
