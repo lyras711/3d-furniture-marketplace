@@ -119,7 +119,8 @@ test('daylight study renders at desktop and mobile widths with local assets', as
   expect(errors).toEqual([])
 })
 
-test('new users start on an empty grid and new projects contain no templates', async ({ page }) => {
+test('editor opens in 3D and new scenes start in 2D without templates', async ({ page }) => {
+  await expect(page.locator('.canvas-label')).toContainText('3D view')
   await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '0')
   await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '0.00')
   await expect(page.getByText('Your space starts here')).toBeVisible()
@@ -136,9 +137,15 @@ test('new users start on an empty grid and new projects contain no templates', a
   await page.getByLabel('Project name').fill('My own layout')
   await page.getByRole('button', { name: 'Create space' }).click()
   expect((await save(page)).features).toEqual([])
+  await expect(page.locator('.canvas-label')).toContainText('Floor plan')
+  await page.reload()
+  await expect(page.locator('canvas')).toHaveAttribute('data-scene-ready', 'true')
+  await expect(page.locator('.canvas-label')).toContainText('3D view')
 })
 
 test('continuous wall drawing fills only a closed loop, deletion opens it, undo restores it', async ({ page }) => {
+  await page.getByRole('button', { name: 'Wall', exact: true }).click()
+  await expect(page.locator('.canvas-label')).toContainText('Floor plan')
   for (let i = 0; i < 3; i++) await segment(page, square[i], square[i + 1])
   await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '3')
   await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '0')

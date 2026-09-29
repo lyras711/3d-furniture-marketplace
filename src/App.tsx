@@ -866,7 +866,7 @@ function App() {
     refreshHistory((v) => v + 1)
   }
   const [renderOpen, setRenderOpen] = useState(false)
-  const [viewMode, setViewMode] = useState<ViewMode>('2d')
+  const [viewMode, setViewMode] = useState<ViewMode>('3d')
   const [activeTool, setActiveTool] = useState<Tool>(() => project.features.length ? 'select' : 'wall')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null)
