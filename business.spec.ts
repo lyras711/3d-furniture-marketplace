@@ -58,8 +58,14 @@ test('planner direct route opens the editor', async ({ page }) => {
 test('business contact links open a proposal email and keep the customer demo visible', async ({ page }) => {
   await page.goto(url)
   const contactHref = /mailto:info@formivo3d\.com\?subject=Formivo%20B2B%20pilot%20conversation/
-  await expect(page.getByRole('link', { name: 'Open customer demo' })).toHaveAttribute('href', '/planner')
-  await expect(page.getByRole('link', { name: 'Open customer demo' })).toHaveClass(/b2b-header-demo/)
+  const headerDemo = page.locator('.b2b-header').getByRole('link', { name: 'Open customer demo' })
+  const journeyDemo = page.locator('#flow').getByRole('link', { name: 'Open customer demo' })
+  await expect(page.getByRole('link', { name: 'Open customer demo' })).toHaveCount(2)
+  await expect(headerDemo).toHaveAttribute('href', '/planner')
+  await expect(headerDemo).toHaveClass(/b2b-header-demo/)
+  await expect(journeyDemo).toHaveAttribute('href', '/planner')
+  await expect(journeyDemo).toHaveClass(/s-button-acid/)
+  await expect(journeyDemo).toBeVisible()
   await expect(page.getByRole('link', { name: 'Contact us about a pilot' }).first()).toHaveAttribute('href', contactHref)
   await expect(page.getByRole('link', { name: 'Email us about a pilot' })).toHaveAttribute('href', contactHref)
 })

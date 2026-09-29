@@ -491,6 +491,7 @@ export default function Business() {
         <ol className="b2b-steps">
           {copy.steps.map((step, index) => <li key={step.title}><span>{String(index + 1).padStart(2, '0')}</span><h3>{step.title}</h3><p>{step.description}</p><small>{step.label}</small></li>)}
         </ol>
+        <div className="b2b-flow-actions"><a className="s-button s-button-acid" href="/planner">{copy.customerDemo} <Arrow diagonal /></a></div>
       </section>
 
       <section className="b2b-pilot" id="pilot">
