@@ -25,7 +25,7 @@ test('business home switches between English, German and Greek and remembers the
   await language.selectOption('de')
   await expect(page.locator('html')).toHaveAttribute('lang', 'de')
   await expect(page).toHaveTitle('Formivo für Unternehmen — räumliches Möbel-Shopping')
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Möbel direkt im Raum erleben.')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Möbel direkt im eigenen Zuhause erleben.')
   await expect(page.getByLabel('Sprache')).toHaveValue('de')
   await page.setViewportSize({ width: 375, height: 1000 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
