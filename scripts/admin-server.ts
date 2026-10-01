@@ -6,8 +6,10 @@ try { loadEnvFile('.env.local') } catch {}
 import { CloudTasksClient } from '@google-cloud/tasks'
 import { getApps, initializeApp } from 'firebase-admin/app'
 import { getAuth, type DecodedIdToken } from 'firebase-admin/auth'
+import { getAppCheck } from 'firebase-admin/app-check'
 import { FieldValue, getFirestore } from 'firebase-admin/firestore'
 import { cancelCrawlJob, createCrawlJob, getJob, listJobs, runCrawlJob } from './catalog-workflow'
+import { VertexPlanVisionProvider } from './plan-vision'
 
 type Role = 'viewer' | 'editor' | 'admin' | 'owner'
 const roleRank: Record<Role, number> = { viewer: 1, editor: 2, admin: 3, owner: 4 }
@@ -15,6 +17,7 @@ const port = Number(process.env.PORT || process.env.ADMIN_PORT || 8787)
 const host = process.env.ADMIN_HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1')
 const workers = new Set<string>()
 const tasks = new CloudTasksClient()
+const planVision = new VertexPlanVisionProvider()
 
 class ApiError extends Error {
   constructor(public status: number, message: string) { super(message) }
@@ -22,19 +25,27 @@ class ApiError extends Error {
 
 function firebase() {
   const app = getApps()[0] || initializeApp()
-  return { auth: getAuth(app), db: getFirestore(app) }
+  return { auth: getAuth(app), appCheck: getAppCheck(app), db: getFirestore(app) }
 }
 
 function json(response: ServerResponse, status: number, value: unknown) {
   const body = JSON.stringify(value)
-  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization,content-type' })
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization,content-type,x-firebase-appcheck' })
   response.end(body)
 }
 
-async function body(request: IncomingMessage) {
-  let value = ''
-  for await (const chunk of request) value += chunk
-  return value ? JSON.parse(value) as Record<string, unknown> : {}
+async function body(request: IncomingMessage, limit = 2 * 1024 * 1024) {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    size += bytes.length
+    if (size > limit) throw new ApiError(413, 'Request body is too large.')
+    chunks.push(bytes)
+  }
+  const value = Buffer.concat(chunks).toString('utf8')
+  if (!value) return {}
+  try { return JSON.parse(value) as Record<string, unknown> } catch { throw new ApiError(400, 'Request body must be valid JSON.') }
 }
 
 function jobId(pathname: string) {
@@ -116,10 +127,47 @@ async function runJob(job: Awaited<ReturnType<typeof createCrawlJob>>, actor: Aw
   if (!workers.has(job.id)) { workers.add(job.id); void runCrawlJob(job.id).finally(() => workers.delete(job.id)) }
 }
 
+async function plannerUser(request: IncomingMessage) {
+  const token = request.headers.authorization?.replace(/^Bearer\s+/i, ''), appCheckToken = request.headers['x-firebase-appcheck']
+  if (!token || typeof appCheckToken !== 'string') throw new ApiError(401, 'Firebase Auth and App Check tokens are required for AI plan processing.')
+  try {
+    const decoded = await firebase().auth.verifyIdToken(token)
+    await firebase().appCheck.verifyToken(appCheckToken)
+    return decoded.uid
+  } catch {
+    throw new ApiError(401, 'Firebase Auth and App Check tokens are invalid or expired.')
+  }
+}
+
+async function consumePlanQuota(uid: string) {
+  const { db } = firebase(), ref = db.collection('plannerUsage').doc(uid), day = new Date().toISOString().slice(0, 10)
+  const configuredLimit = Number(process.env.PLAN_DETECTION_DAILY_LIMIT || 10)
+  const limit = Number.isFinite(configuredLimit) ? Math.max(1, Math.min(50, Math.floor(configuredLimit))) : 10
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref), data = snapshot.data(), count = data?.day === day ? Number(data.count) || 0 : 0
+    if (count >= limit) throw new ApiError(429, 'Daily AI plan detection limit reached. Use the local fallback or try again tomorrow.')
+    transaction.set(ref, { day, count: count + 1, updatedAt: FieldValue.serverTimestamp() })
+  })
+}
+
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || host}`)
-    if (request.method === 'OPTIONS') { response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type' }); response.end(); return }
+    if (request.method === 'OPTIONS') { response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type,x-firebase-appcheck' }); response.end(); return }
+    if (request.method === 'POST' && url.pathname === '/api/planner/detect-floor-plan') {
+      const uid = await plannerUser(request), input = await body(request, 12 * 1024 * 1024)
+      if (input.mimeType !== 'image/png' || typeof input.imageData !== 'string' || !/^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.imageData)) throw new ApiError(400, 'A base64 PNG floor plan is required.')
+      if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || Number(input.width) < 1 || Number(input.width) > 1800 || Number(input.height) < 1 || Number(input.height) > 1400) throw new ApiError(400, 'Image dimensions are outside supported limits.')
+      const imageBytes = Buffer.from(input.imageData, 'base64')
+      if (!imageBytes.length || imageBytes.length > 8 * 1024 * 1024 || imageBytes.toString('base64') !== input.imageData) throw new ApiError(400, 'Image data is invalid or too large.')
+      try { await consumePlanQuota(uid) } catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(503, 'AI plan quota service is unavailable.') }
+      try {
+        const result = await planVision.detect({ imageData: input.imageData, mimeType: 'image/png', width: Number(input.width), height: Number(input.height) })
+        json(response, 200, result); return
+      } catch {
+        throw new ApiError(503, 'Vertex AI plan detection is unavailable. Use the local fallback or try again later.')
+      }
+    }
     if (request.method === 'POST' && url.pathname === '/api/worker/jobs') {
       if (!process.env.WORKER_TASK_SECRET?.trim() || request.headers['x-forma-worker-secret'] !== process.env.WORKER_TASK_SECRET.trim()) throw new ApiError(401, 'Worker task authentication is required.')
       const input = await body(request)

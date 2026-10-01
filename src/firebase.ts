@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp } from 'firebase/app'
+import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check'
 import { browserLocalPersistence, getAuth, setPersistence } from 'firebase/auth'
 
 const config = {
@@ -13,6 +14,11 @@ const config = {
 export const firebaseConfigured = Boolean(config.apiKey && config.messagingSenderId && config.appId)
 export const firebaseApp = firebaseConfigured ? (getApps().length ? getApp() : initializeApp(config)) : null
 export const auth = firebaseApp ? getAuth(firebaseApp) : null
+const appCheckSiteKey = import.meta.env.VITE_FIREBASE_APPCHECK_SITE_KEY
+export const appCheck = (() => {
+  if (!firebaseApp || !appCheckSiteKey) return null
+  try { return initializeAppCheck(firebaseApp, { provider: new ReCaptchaV3Provider(appCheckSiteKey), isTokenAutoRefreshEnabled: true }) } catch { return null }
+})()
 
 export async function keepAdminSession() {
   if (auth) await setPersistence(auth, browserLocalPersistence)

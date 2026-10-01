@@ -1,19 +1,40 @@
 import { products, type Product } from './catalog'
 
 export type Point = { x: number; z: number }
-export type RoomObject = { id: string; productId: string; variantId?: string; x: number; z: number; rotation: number }
+export type CustomRoomItem = { name: string; width: number; depth: number; height: number; color: string; kind: 'furniture' | 'rug' }
+export type RoomObject = { id: string; productId?: string; variantId?: string; custom?: CustomRoomItem; x: number; z: number; rotation: number; inBasket?: boolean; mirrored?: boolean }
 export type RoomFeature = {
   id: string; type: 'wall' | 'door' | 'window'; x: number; z: number; rotation: number
   width: number; height: number; sillHeight?: number; wall?: 'north' | 'south' | 'east' | 'west'
   wallId?: string; wallOffset?: number; thickness?: number
 }
+export type ProjectRoomLabel = { id: string; name: string; x: number; z: number; confidence: number }
+export type PlanImportInfo = { provider: 'local' | 'vertex-ai'; confidence: number; scaleCalibrated: boolean }
 export interface ProjectState {
-  schemaVersion?: 2
+  schemaVersion?: 2 | 3
   name: string; roomType: string; width: number; length: number; ceilingHeight: number
   floorMaterial: string; wallMaterial: string; objects: RoomObject[]; features: RoomFeature[]
+  roomLabels?: ProjectRoomLabel[]; planImport?: PlanImportInfo
 }
 export type FloorRegion = { id: string; points: Point[]; holes: Point[][]; area: number }
 export const productById = new Map(products.map((product) => [product.id, product]))
+export type RoomItemShape = Pick<Product, 'name' | 'width' | 'depth' | 'height' | 'category' | 'tone' | 'accent'>
+export function roomItemShape(object: RoomObject): RoomItemShape | null {
+  if (object.custom) return { name: object.custom.name, width: object.custom.width, depth: object.custom.depth, height: object.custom.height, category: object.custom.kind === 'rug' ? 'Rug' : 'Custom', tone: object.custom.color, accent: object.custom.color }
+  const product = object.productId ? productById.get(object.productId) : null
+  return product ? product : null
+}
+function isCustomRoomItem(value: unknown): value is CustomRoomItem {
+  if (!value || typeof value !== 'object') return false
+  const item = value as CustomRoomItem
+  return typeof item.name === 'string' && item.name.trim().length > 0 && item.name.length <= 80 && [item.width, item.depth].every((dimension) => Number.isFinite(dimension) && dimension >= 1 && dimension <= 2000) && Number.isFinite(item.height) && item.height >= 1 && item.height <= 600 && /^#[\da-f]{6}$/i.test(item.color) && ['furniture', 'rug'].includes(item.kind)
+}
+function isRoomObject(value: unknown): value is RoomObject {
+  if (!value || typeof value !== 'object') return false
+  const item = value as RoomObject, catalogItem = typeof item.productId === 'string' && productById.has(item.productId) && item.custom === undefined && (item.variantId === undefined || typeof item.variantId === 'string')
+  const customItem = item.productId === undefined && item.variantId === undefined && isCustomRoomItem(item.custom) && item.inBasket !== true
+  return typeof item.id === 'string' && (catalogItem || customItem) && (item.inBasket === undefined || typeof item.inBasket === 'boolean') && (item.mirrored === undefined || typeof item.mirrored === 'boolean') && [item.x, item.z, item.rotation].every(Number.isFinite)
+}
 export const floorColors: Record<string, string> = { 'Natural oak': '#cfb58f', 'Pale oak': '#e1d3b8', 'Warm concrete': '#c9c6bd' }
 export const wallColors: Record<string, string> = { 'Warm white': '#f1eee6', 'Soft sage': '#c8d1c0', 'Sand': '#ded0bb' }
 export const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
@@ -25,7 +46,7 @@ const key = (p: Point) => `${Math.round(p.x * 100000)},${Math.round(p.z * 100000
 const at = (a: Point, b: Point, t: number): Point => ({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t })
 export const polygonArea = (points: Point[]) => points.reduce((sum, p, i) => sum + cross(p, points[(i + 1) % points.length]), 0) / 2
 export function emptyProject(name = 'My space'): ProjectState {
-  return { schemaVersion: 2, name, roomType: 'Custom space', width: 12, length: 12, ceilingHeight: 2.8, floorMaterial: 'Natural oak', wallMaterial: 'Warm white', features: [], objects: [] }
+  return { schemaVersion: 3, name, roomType: 'Custom space', width: 12, length: 12, ceilingHeight: 2.8, floorMaterial: 'Natural oak', wallMaterial: 'Warm white', features: [], objects: [] }
 }
 export const wallThickness = (wall: RoomFeature) => wall.thickness ?? 0.12
 export function wallEndpoints(wall: RoomFeature): [Point, Point] {
@@ -117,12 +138,13 @@ export function getFloorRegions(features: RoomFeature[]): FloorRegion[] {
     return { id: points.map(key).sort().join(';'), points, holes, area: polygonArea(points) - holes.reduce((sum, hole) => sum + polygonArea(hole), 0) }
   })
 }
-export function footprint(product: Product, rotation: number) {
+export function footprint(product: Pick<Product, 'width' | 'depth'>, rotation: number) {
   const c = Math.abs(Math.cos(rotation)), s = Math.abs(Math.sin(rotation))
   return { x: (product.width * c + product.depth * s) / 200, z: (product.width * s + product.depth * c) / 200 }
 }
 function corners(object: RoomObject, margin = 0): Point[] {
-  const p = productById.get(object.productId)!, c = Math.cos(object.rotation), s = Math.sin(object.rotation)
+  const p = roomItemShape(object), c = Math.cos(object.rotation), s = Math.sin(object.rotation)
+  if (!p) return []
   return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, z]) => {
     const dx = x * (p.width / 200 + margin), dz = z * (p.depth / 200 + margin)
     return { x: object.x + dx * c + dz * s, z: object.z - dx * s + dz * c }
@@ -133,7 +155,7 @@ function crosses(a: Point, b: Point, c: Point, d: Point) {
   return cross(ab, sub(c, a)) * cross(ab, sub(d, a)) < -EPS && cross(cd, sub(a, c)) * cross(cd, sub(b, c)) < -EPS
 }
 export function fitsFloor(object: RoomObject, project: ProjectState, regions = getFloorRegions(project.features)) {
-  if (!productById.has(object.productId)) return false
+  if (!roomItemShape(object)) return false
   const points = corners(object, 0.005)
   const inside = regions.some((region) => points.every((p) => pointInPolygon(p, region.points) && !region.holes.some((h) => pointInPolygon(p, h))) && [region.points, ...region.holes].every((ring) => ring.every((p, i) => !points.some((q, j) => crosses(q, points[(j + 1) % 4], p, ring[(i + 1) % ring.length])))) && !region.holes.some((ring) => ring.some((p) => pointInPolygon(p, points))))
   return inside && !project.features.filter((f) => f.type === 'wall').some((wall) => {
@@ -143,7 +165,7 @@ export function fitsFloor(object: RoomObject, project: ProjectState, regions = g
   })
 }
 export function placeObject(object: RoomObject, room: ProjectState, snap = false, wallSnap = false): RoomObject {
-  const product = productById.get(object.productId)
+  const product = roomItemShape(object)
   if (!product) return object
   let result = { ...object, x: snap ? Math.round(object.x * 10) / 10 : object.x, z: snap ? Math.round(object.z * 10) / 10 : object.z }
   if (wallSnap) {
@@ -161,25 +183,25 @@ export function placeObject(object: RoomObject, room: ProjectState, snap = false
   return result
 }
 export function overlaps(a: RoomObject, b: RoomObject) {
-  const pa = productById.get(a.productId), pb = productById.get(b.productId)
+  const pa = roomItemShape(a), pb = roomItemShape(b)
   if (!pa || !pb || pa.category === 'Rug' || pb.category === 'Rug') return false
   const axes = (r: number) => [[Math.cos(r), -Math.sin(r)], [Math.sin(r), Math.cos(r)]]
   const aa = axes(a.rotation), ba = axes(b.rotation)
   return [...aa, ...ba].every(([x, z]) => {
-    const radius = (p: Product, ax: number[][]) => Math.abs(x * ax[0][0] + z * ax[0][1]) * p.width / 200 + Math.abs(x * ax[1][0] + z * ax[1][1]) * p.depth / 200
+    const radius = (p: Pick<Product, 'width' | 'depth'>, ax: number[][]) => Math.abs(x * ax[0][0] + z * ax[0][1]) * p.width / 200 + Math.abs(x * ax[1][0] + z * ax[1][1]) * p.depth / 200
     return Math.abs((a.x - b.x) * x + (a.z - b.z) * z) < radius(pa, aa) + radius(pb, ba) - 0.025
   })
 }
 export function placementWarnings(project: ProjectState) {
   const warnings: { id: string; message: string }[] = [], regions = getFloorRegions(project.features)
   project.objects.forEach((object, index) => {
-    const product = productById.get(object.productId)
-    if (!product) return
-    if (!fitsFloor(object, project, regions)) warnings.push({ id: object.id, message: `${product.name} is outside an enclosed room or crosses a wall.` })
-    project.objects.slice(index + 1).forEach((other) => { if (overlaps(object, other)) warnings.push({ id: object.id, message: `${product.name} overlaps ${productById.get(other.productId)?.name}.` }) })
+    const item = roomItemShape(object)
+    if (!item) return
+    if (!fitsFloor(object, project, regions)) warnings.push({ id: object.id, message: `${item.name} is outside an enclosed room or crosses a wall.` })
+    project.objects.slice(index + 1).forEach((other) => { if (overlaps(object, other)) warnings.push({ id: object.id, message: `${item.name} overlaps ${roomItemShape(other)?.name || 'another item'}.` }) })
     project.features.filter((f) => f.type === 'door').forEach((door) => {
-      const dx = object.x - door.x, dz = object.z - door.z, extent = footprint(product, object.rotation - door.rotation)
-      if (product.category !== 'Rug' && Math.abs(dx * Math.cos(door.rotation) - dz * Math.sin(door.rotation)) < door.width / 2 + extent.x && Math.abs(dx * Math.sin(door.rotation) + dz * Math.cos(door.rotation)) < 0.65 + extent.z) warnings.push({ id: object.id, message: `${product.name} may block the door clearance.` })
+      const dx = object.x - door.x, dz = object.z - door.z, extent = footprint(item, object.rotation - door.rotation)
+      if (item.category !== 'Rug' && Math.abs(dx * Math.cos(door.rotation) - dz * Math.sin(door.rotation)) < door.width / 2 + extent.x && Math.abs(dx * Math.sin(door.rotation) + dz * Math.cos(door.rotation)) < 0.65 + extent.z) warnings.push({ id: object.id, message: `${item.name} may block the door clearance.` })
     })
   })
   return warnings
@@ -211,14 +233,16 @@ export function moveWallEndpoint(project: ProjectState, id: string, previous: Po
   return refreshOpenings({ ...project, features })
 }
 export function migrateProject(project: ProjectState): ProjectState {
-  if (project.schemaVersion === 2) return refreshOpenings(project)
+  const objects = project.objects.map((object) => ({ ...object, inBasket: object.inBasket ?? false }))
+  if (project.schemaVersion === 3) return refreshOpenings({ ...project, objects })
+  if (project.schemaVersion === 2) return refreshOpenings({ ...project, schemaVersion: 3, objects })
   const { width: w, length: l } = project
   const points = [{ x: -w / 2, z: -l / 2 }, { x: w / 2, z: -l / 2 }, { x: w / 2, z: l / 2 }, { x: -w / 2, z: l / 2 }]
   const walls = points.map((a, i) => wallFromPoints(`boundary-${i}`, a, points[(i + 1) % 4], project.ceilingHeight))
-  return refreshOpenings({ ...project, schemaVersion: 2, width: Math.max(12, w + 2), length: Math.max(12, l + 2), features: [...walls, ...project.features] })
+  return refreshOpenings({ ...project, schemaVersion: 3, width: Math.max(12, w + 2), length: Math.max(12, l + 2), features: [...walls, ...project.features], objects })
 }
 export function isProject(value: unknown): value is ProjectState {
   if (!value || typeof value !== 'object') return false
   const p = value as ProjectState
-  return (p.schemaVersion === undefined || p.schemaVersion === 2) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => o && typeof o.id === 'string' && productById.has(o.productId) && (o.variantId === undefined || typeof o.variantId === 'string') && [o.x, o.z, o.rotation].every(Number.isFinite)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)) && (f.thickness === undefined || (Number.isFinite(f.thickness) && f.thickness >= 0.02 && f.thickness <= 2)))
+  return (p.schemaVersion === undefined || p.schemaVersion === 2 || p.schemaVersion === 3) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && (p.roomLabels === undefined || (Array.isArray(p.roomLabels) && p.roomLabels.length <= 40 && p.roomLabels.every((label) => label && typeof label.id === 'string' && typeof label.name === 'string' && [label.x, label.z, label.confidence].every(Number.isFinite) && label.confidence >= 0 && label.confidence <= 1))) && (p.planImport === undefined || (typeof p.planImport === 'object' && p.planImport !== null && ['local', 'vertex-ai'].includes(p.planImport.provider) && Number.isFinite(p.planImport.confidence) && p.planImport.confidence >= 0 && p.planImport.confidence <= 1 && typeof p.planImport.scaleCalibrated === 'boolean')) && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => isRoomObject(o)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)) && (f.thickness === undefined || (Number.isFinite(f.thickness) && f.thickness >= 0.02 && f.thickness <= 2)))
 }

@@ -5,12 +5,15 @@ const RenderStudio = lazy(() => import('./RenderStudio'))
 import { Canvas, useThree } from '@react-three/fiber'
 import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF } from '@react-three/drei'
 import SceneEnvironment, { Architecture, type EditorLightingMode } from './SceneEnvironment'
-import { analyzePlanFile, createProjectFromPlan, type PlanAnalysis, type PixelPoint, type PixelWall, type PixelOpening } from './planImport'
+import { analyzePlanFile, createProjectFromPlan, type PlanAnalysis, type PixelPoint, type PixelWall, type PixelOpening, type PlanCalibration, type PlanDetectionProvider } from './planImport'
 import { ACESFilmicToneMapping, CatmullRomCurve3, DoubleSide, MOUSE, OrthographicCamera, PerspectiveCamera as ThreePerspectiveCamera, Plane, Vector3 } from 'three'
 import type { ThreeEvent } from '@react-three/fiber'
-import type { FormEvent, InputHTMLAttributes } from 'react'
+import type { FormEvent, InputHTMLAttributes, PointerEvent as ReactPointerEvent } from 'react'
+import { getToken } from 'firebase/app-check'
+import { signInAnonymously } from 'firebase/auth'
+import { appCheck, auth } from './firebase'
 import { products, type CategoryFilter, type Product } from './catalog'
-import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, productById, refreshOpenings, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
+import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, productById, refreshOpenings, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 type ViewMode = '3d' | '2d'
 type LightingMode = EditorLightingMode
@@ -65,7 +68,8 @@ function loadProject(): ProjectState {
       needsRecovery = Boolean(saved)
       return emptyProject()
     }
-    if (parsed.schemaVersion !== 2 && !shared && saved) localStorage.setItem(`${STORAGE_KEY}-before-custom-spaces`, saved)
+    if (parsed.schemaVersion === undefined && !shared && saved) localStorage.setItem(`${STORAGE_KEY}-before-custom-spaces`, saved)
+    if (parsed.schemaVersion === 2 && !shared && saved) localStorage.setItem(`${STORAGE_KEY}-before-explicit-basket`, saved)
     return migrateProject(parsed)
   } catch {
     needsRecovery = true
@@ -79,6 +83,16 @@ function makeId(prefix: string) {
 
 function formatPrice(value: number | null) {
   return value === null ? 'Price unavailable' : EURO.format(value)
+}
+
+const requestPlanDetection: PlanDetectionProvider = async (request) => {
+  if (!auth || !appCheck) throw new Error('Firebase Auth and App Check are not configured for AI plan detection.')
+  const user = auth.currentUser || (await signInAnonymously(auth)).user
+  const [idToken, appCheckToken] = await Promise.all([user.getIdToken(), getToken(appCheck)])
+  const response = await fetch('/api/planner/detect-floor-plan', { method: 'POST', headers: { authorization: `Bearer ${idToken}`, 'x-firebase-appcheck': appCheckToken.token, 'content-type': 'application/json' }, body: JSON.stringify(request) })
+  const result = await response.json() as Awaited<ReturnType<PlanDetectionProvider>> & { error?: string }
+  if (!response.ok) throw new Error(result.error || `AI plan detection failed (${response.status}).`)
+  return result
 }
 
 function downloadFile(name: string, content: string, type: string) {
@@ -435,15 +449,15 @@ function FurnitureObject({
   selectable: boolean
   viewMode: ViewMode
   object: RoomObject
-  product: Product
+  product: Product | null
   selected: boolean
-  onSelect: () => void
+  onSelect: (extend: boolean) => void
   onDragStart: () => void
   onDragMove: (x: number, z: number) => void
   onDragEnd: () => void
 }) {
-  const width = product.width / 100
-  const depth = product.depth / 100
+  const item = roomItemShape(object)!
+  const width = item.width / 100, depth = item.depth / 100, height = item.height / 100
   const drag = useRef<{ x: number; z: number } | null>(null)
   const { controls, gl } = useThree()
   const finish = (event: ThreeEvent<PointerEvent>) => {
@@ -455,7 +469,7 @@ function FurnitureObject({
     onDragEnd()
   }
   return (
-    <group position={[object.x, 0, object.z]} rotation={[0, object.rotation, 0]}
+    <group position={[object.x, 0, object.z]} rotation={[0, object.rotation, 0]} scale={[object.mirrored ? -1 : 1, 1, 1]}
       onClick={(event) => { if (selectable) event.stopPropagation() }}
       onPointerOver={(event) => { if (selectable) { event.stopPropagation(); gl.domElement.style.cursor = 'grab' } }}
       onPointerOut={() => { if (!drag.current) gl.domElement.style.cursor = 'auto' }}
@@ -468,7 +482,7 @@ function FurnitureObject({
         ;(event.target as Element).setPointerCapture?.(event.pointerId)
         if (controls) (controls as unknown as { enabled: boolean }).enabled = false
         gl.domElement.style.cursor = 'grabbing'
-        onSelect()
+        onSelect(event.shiftKey || event.ctrlKey || event.metaKey)
         onDragStart()
       }}
       onPointerMove={(event) => {
@@ -479,10 +493,10 @@ function FurnitureObject({
       }}
       onPointerUp={finish} onPointerCancel={finish}
     >
-      {viewMode === '2d' ? <mesh position={[0, product.category === 'Rug' ? 0.015 : 0.06, 0]}><boxGeometry args={[width, 0.02, depth]} /><meshBasicMaterial color={product.tone} transparent opacity={product.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={product.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense>}
+      {viewMode === '2d' ? <mesh position={[0, item.category === 'Rug' ? 0.015 : 0.06, 0]}><boxGeometry args={[width, 0.02, depth]} /><meshBasicMaterial color={item.tone} transparent opacity={item.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : product ? <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={item.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense> : <RoundedBox position={[0, height / 2, 0]} args={[width, height, depth]} radius={Math.min(0.035, height / 4)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={item.tone} roughness={0.9} /></RoundedBox>}
       {selected && <>
         <Line points={[[-width / 2 - 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, -depth / 2 - 0.04]]} color="#517e68" lineWidth={2} raycast={() => null} />
-        <Html position={[0, 0.05, depth / 2 + 0.18]} center style={{ pointerEvents: 'none' }}><span className="dimension-tag">{product.width} × {product.depth} cm</span></Html>
+        <Html position={[0, 0.05, depth / 2 + 0.18]} center style={{ pointerEvents: 'none' }}><span className="dimension-tag">{item.width} × {item.depth} cm</span></Html>
       </>}
     </group>
   )
@@ -493,7 +507,7 @@ function RoomScene({
   viewMode,
   gridVisible,
   wallsTransparent,
-  selectedId,
+  selectedIds,
   selectedFeatureId,
   activeTool,
   draggingId,
@@ -513,18 +527,18 @@ function RoomScene({
   wallSnap: boolean
   lightingMode: LightingMode
   onDropProduct: (id: string, x: number, z: number) => void
-  onDrawWall: (x: number, z: number, endX: number, endZ: number) => void
+  onDrawWall: (x: number, z: number, endX: number, endZ: number) => boolean
   project: ProjectState
   viewMode: ViewMode
   gridVisible: boolean
   wallsTransparent: boolean
-  selectedId: string | null
+  selectedIds: string[]
   selectedFeatureId: string | null
   activeTool: Tool
   draggingId: string | null
   cameraVersion: number
   onClearSelection: () => void
-  onSelectObject: (id: string) => void
+  onSelectObject: (id: string, extend: boolean) => void
   onSelectFeature: (id: string) => void
   onPlaceFeature: (type: FeatureType, x: number, z: number) => void
   onMoveObject: (id: string, x: number, z: number) => void
@@ -542,8 +556,8 @@ function RoomScene({
 
       <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onMoveOpening={onMoveOpening} lightingMode={lightingMode} onDragStart={onDragStart} onDragEnd={onDragEnd} />
       {project.objects.map((object) => {
-        const product = productById.get(object.productId)
-        if (!product) return null
+        const product = object.productId ? productById.get(object.productId) ?? null : null
+        if (!product && !object.custom) return null
         return (
           <FurnitureObject
             key={object.id}
@@ -551,8 +565,8 @@ function RoomScene({
             viewMode={viewMode}
             selectable={activeTool === 'select'}
             product={product}
-            selected={object.id === selectedId}
-            onSelect={() => onSelectObject(object.id)}
+            selected={selectedIds.includes(object.id)}
+            onSelect={(extend) => onSelectObject(object.id, extend || (selectedIds.length > 1 && selectedIds.includes(object.id)))}
             onDragStart={() => onDragStart(object.id)}
             onDragMove={(x, z) => onMoveObject(object.id, x, z)}
             onDragEnd={onDragEnd}
@@ -590,6 +604,7 @@ function RoomProperties({ project, onPatch }: { project: ProjectState; onPatch: 
         <div className="section-label-row"><span>Built by you</span><span className="muted">Live geometry</span></div>
         <div className="spec-grid"><div><strong>{project.features.filter((f) => f.type === 'wall').length}</strong><span>Walls</span></div><div><strong>{regions.length}</strong><span>Closed rooms</span></div><div><strong>{regions.reduce((sum, r) => sum + r.area, 0).toFixed(1)}</strong><span>Floor m²</span></div></div>
         <p className="muted">{regions.length ? 'Floors follow your walls. Move a corner to reshape connected walls, or delete a wall to open the room.' : 'Draw connected walls on the grid. The floor appears when the outline closes.'}</p>
+        {project.planImport && <div className="plan-import-result"><strong>Approximate imported plan</strong><span>{project.planImport.provider === 'vertex-ai' ? `AI confidence ${Math.round(project.planImport.confidence * 100)}%` : 'Local axis-aligned fallback'} · {project.planImport.scaleCalibrated ? 'scale calibrated' : 'scale estimated from full width'}</span><small>Review wall lengths, room boundaries and openings before furnishing.</small></div>}
         <label className="field-label">New wall height (m)<NumberInput min="2" max="6" step="0.1" value={project.ceilingHeight} onCommit={(ceilingHeight) => onPatch({ ceilingHeight })} /></label>
         <details className="build-grid-settings"><summary>Build grid settings</summary><p className="muted">Expand the canvas without resizing your rooms.</p><div className="dimension-grid"><label><span>Grid width</span><NumberInput min={project.width} max="40" step="1" value={project.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Grid length</span><NumberInput min={project.length} max="40" step="1" value={project.length} onCommit={(length) => onPatch({ length })} /></label></div></details>
       </section>
@@ -603,7 +618,7 @@ function RoomProperties({ project, onPatch }: { project: ProjectState; onPatch: 
         {warnings.length ? warnings.map((warning, i) => <div className="health-row warning" key={i}><span className="health-dot" />{warning.message}</div>) : <div className="health-row"><span className="health-dot good" />No boundary or furniture overlap warnings</div>}
         <p className="muted">Basic footprint checks. Verify circulation and delivery access before purchase.</p>
       </section>
-      <div className="inspector-tip"><span className="tip-icon">i</span><span>Click any item in the room to inspect its exact dimensions and move it with drag.</span></div>
+      <div className="inspector-tip"><span className="tip-icon">i</span><span>Select an item to move, rotate, duplicate, delete, or add it to the basket. Open Details for exact dimensions.</span></div>
     </>
   )
 }
@@ -659,6 +674,20 @@ function ObjectProperties({
   )
 }
 
+function CustomObjectProperties({ object, onPatch, onRotate, onDuplicate, onDelete, onClose }: { object: RoomObject & { custom: CustomRoomItem }; onPatch: (patch: Partial<RoomObject>) => void; onRotate: () => void; onDuplicate: () => void; onDelete: () => void; onClose: () => void }) {
+  const [name, setName] = useState(object.custom.name)
+  useEffect(() => setName(object.custom.name), [object.custom.name])
+  const patch = (value: Partial<CustomRoomItem>) => onPatch({ custom: { ...object.custom, ...value } })
+  return <>
+    <div className="inspector-heading inspector-heading-product"><div><span className="eyebrow">Existing furniture</span><h2>{object.custom.name}</h2></div><button className="icon-button" title="Close selection" onClick={onClose}><Icon name="close" /></button></div>
+    <section className="inspector-section"><div className="section-label-row"><span>Measured dimensions</span><span className="muted">cm</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="1" max="2000" step="1" value={object.custom.width} onCommit={(width) => patch({ width })} /></label><label><span>Depth</span><NumberInput min="1" max="2000" step="1" value={object.custom.depth} onCommit={(depth) => patch({ depth })} /></label><label><span>Height</span><NumberInput min="1" max="600" step="1" value={object.custom.height} onCommit={(height) => patch({ height })} /></label></div></section>
+    <section className="inspector-section"><div className="section-label-row"><span>Appearance</span><span className="muted">Illustrative block</span></div><label className="field-label">Name<input value={name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim()) patch({ name: name.trim() }); else setName(object.custom.name) }} maxLength={80} /></label><label className="material-row"><span className="material-swatch" style={{ background: object.custom.color }} /><span className="field-label">Color<input type="color" value={object.custom.color} onChange={(event) => patch({ color: event.target.value })} /></span></label><label className="field-label">Type<select value={object.custom.kind} onChange={(event) => patch({ kind: event.target.value as CustomRoomItem['kind'] })}><option value="furniture">Furniture</option><option value="rug">Rug</option></select></label></section>
+    <section className="inspector-section"><div className="section-label-row"><span>Placement</span><span className="muted">metres / degrees</span></div><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={object.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round(object.rotation * 180 / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label><label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label></div><button className="rotate-button" onClick={onRotate}><Icon name="rotate" /> Rotate 15°</button></section>
+    <div className="inspector-tip"><span className="tip-icon">i</span><span>This item stays in the room but is never added to the shopping basket.</span></div>
+    <div className="inspector-actions"><button className="secondary-button" onClick={onDuplicate}><Icon name="copy" /> Duplicate</button><button className="danger-button" onClick={onDelete}><Icon name="trash" /> Delete</button></div>
+  </>
+}
+
 function FeatureProperties({ project, feature, onPatch, onDelete }: { project: ProjectState; feature: RoomFeature; onPatch: (patch: Partial<RoomFeature>) => void; onDelete: () => void }) {
   const title = feature.type === 'wall' ? 'Wall' : feature.type === 'door' ? 'Door opening' : 'Window opening'
   return (
@@ -695,7 +724,7 @@ function ShoppingDrawer({
           {items.map(({ product, quantity, subtotal }) => (
             <div className="shopping-item" key={product.id}><ProductThumb product={product} compact /><div className="shopping-item-info"><strong>{product.name}</strong><span>{product.retailer} · {product.sku}</span><small>{product.width} × {product.depth} × {product.height} cm · {formatPrice(product.price)} each</small><small>{product.status}</small></div><div className="shopping-item-price"><span>×{quantity}</span><strong>{formatPrice(subtotal)}</strong></div></div>
           ))}
-          {items.length === 0 ? <div className="empty-search">Your room is empty. Add a piece from the catalogue to start your list.</div> : <section className="retailer-summary"><h3>By retailer</h3>{[...new Set(items.map((item) => item.product.retailer))].map((name) => <div key={name}><span>{name}</span><strong>{formatPrice(items.filter((item) => item.product.retailer === name).reduce((sum, item) => sum + item.subtotal, 0))}</strong></div>)}</section>}
+          {items.length === 0 ? <div className="empty-search">No products in the basket yet. Add any room item when you are ready to consider buying it.</div> : <section className="retailer-summary"><h3>By retailer</h3>{[...new Set(items.map((item) => item.product.retailer))].map((name) => <div key={name}><span>{name}</span><strong>{formatPrice(items.filter((item) => item.product.retailer === name).reduce((sum, item) => sum + item.subtotal, 0))}</strong></div>)}</section>}
         </div>
         <div className="drawer-total"><div><span>Estimated total</span><small>Prices and availability are subject to retailer confirmation.</small></div><strong>{formatPrice(total)}</strong></div>
         <div className="drawer-actions"><button className="secondary-button" onClick={onExport}><Icon name="download" /> Export CSV</button><button className="primary-button" onClick={onRequest} disabled={!items.length}><Icon name="arrow" /> Request a quote</button></div>
@@ -704,14 +733,35 @@ function ShoppingDrawer({
   )
 }
 
+type RoomTemplate = 'empty' | 'living-room' | 'bedroom' | 'studio'
+
+function roomTemplateProject(template: RoomTemplate, name: string) {
+  const project = emptyProject(name)
+  if (template === 'empty') return project
+  const room = template === 'living-room' ? { type: 'Living room', width: 5.5, length: 4.5, objects: [['sofa-haven', 0, -1], ['table-arc', 0, 0.2], ['rug-loom', 0, 0.1], ['lamp-halo', -2, 1.3]] as [string, number, number][] }
+    : template === 'bedroom' ? { type: 'Bedroom', width: 4.6, length: 4.8, objects: [['bed-cloud', 0, -0.1], ['nightstand-form', -1.25, -0.7], ['nightstand-form', 1.25, -0.7]] as [string, number, number][] }
+      : { type: 'Studio', width: 7, length: 5.5, objects: [['sofa-haven', -1, -1.3], ['table-arc', -0.7, 0.2], ['rug-loom', -0.7, 0.2], ['table-form', 1.7, 1.2]] as [string, number, number][] }
+  project.roomType = room.type
+  const corners: Point[] = [{ x: -room.width / 2, z: -room.length / 2 }, { x: room.width / 2, z: -room.length / 2 }, { x: room.width / 2, z: room.length / 2 }, { x: -room.width / 2, z: room.length / 2 }]
+  project.features = corners.map((point, index) => wallFromPoints(makeId('wall'), point, corners[(index + 1) % corners.length], project.ceilingHeight))
+  project.objects = room.objects.map(([productId, x, z]) => {
+    const variantId = productById.get(productId)?.variants?.[0]?.id
+    return { id: makeId('object'), productId, ...(variantId ? { variantId } : {}), x, z, rotation: 0, inBasket: false }
+  })
+  return project
+}
+
 function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate: (project: ProjectState) => void }) {
   const [name, setName] = useState('My space')
-  const submit = (event: FormEvent) => { event.preventDefault(); onCreate(emptyProject(name.trim() || 'My space')) }
+  const [template, setTemplate] = useState<RoomTemplate>('empty')
+  const submit = (event: FormEvent) => { event.preventDefault(); onCreate(roomTemplateProject(template, name.trim() || 'My space')) }
+  const templates: { id: RoomTemplate; name: string; detail: string }[] = [{ id: 'empty', name: 'Empty', detail: 'Draw your own room' }, { id: 'living-room', name: 'Living room', detail: 'Sofa, table, rug, lamp' }, { id: 'bedroom', name: 'Bedroom', detail: 'Bed and bedside tables' }, { id: 'studio', name: 'Studio', detail: 'Living and dining zones' }]
   return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close new project dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Project dialog" onSubmit={submit}>
-    <div className="modal-header"><div><span className="eyebrow">No templates. Your layout.</span><h2>Create your space</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
+    <div className="modal-header"><div><span className="eyebrow">Start with a room</span><h2>Create your space</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
     <label className="field-label">Project name<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label>
-    <p className="catalog-intro">Start on an empty metric grid. Draw the walls, close the outline, then make it yours with furniture from the catalogue.</p>
-    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Create space <Icon name="arrow" /></button></div>
+    <div className="template-options" role="group" aria-label="Room template">{templates.map((item) => <button type="button" key={item.id} className={template === item.id ? 'template-option template-option-active' : 'template-option'} aria-pressed={template === item.id} onClick={() => setTemplate(item.id)}><strong>{item.name}</strong><span>{item.detail}</span></button>)}</div>
+    <p className="catalog-intro">Templates create editable walls and sample furniture. Sample products start outside the basket, so you can experiment freely.</p>
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">{template === 'empty' ? 'Create space' : 'Create room'} <Icon name="arrow" /></button></div>
   </form></div>
 }
 
@@ -720,7 +770,7 @@ function PurchaseRequestModal({ project, total, onClose }: { project: ProjectSta
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const customer = Object.fromEntries(new FormData(event.currentTarget as HTMLFormElement))
-    const items = project.objects.map((object) => ({ objectId: object.id, product: productById.get(object.productId) }))
+    const items = project.objects.filter((object) => object.inBasket && object.productId).map((object) => ({ objectId: object.id, product: productById.get(object.productId!) }))
     downloadFile('formivo-quote-request.json', JSON.stringify({ createdAt: new Date().toISOString(), status: 'draft', customer, project, items, estimatedTotal: total, currency: 'EUR' }, null, 2), 'application/json')
     setSubmitted(true)
   }
@@ -735,20 +785,24 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
   const [name, setName] = useState('Imported plan')
   const [realWidth, setRealWidth] = useState('')
   const [selected, setSelected] = useState<{ kind: 'walls' | 'openings'; index: number } | null>(null)
-  const [draw, setDraw] = useState<'select' | 'wall' | 'door' | 'window'>('select')
+  const [draw, setDraw] = useState<'select' | 'calibrate' | 'wall' | 'door' | 'window'>('select')
   const [start, setStart] = useState<PixelPoint | null>(null)
+  const [calibrationPoints, setCalibrationPoints] = useState<PixelPoint[]>([])
+  const [allowAi, setAllowAi] = useState(false)
   const request = useRef(0)
   const draft = useMemo(() => {
-    if (!analysis || !realWidth) return { project: null, error: '' }
-    try { return { project: createProjectFromPlan(analysis, Number(realWidth), name), error: '' } }
+    if (!analysis || !realWidth || calibrationPoints.length === 1) return { project: null, error: '' }
+    const calibration: PlanCalibration | undefined = calibrationPoints.length === 2 ? { a: calibrationPoints[0], b: calibrationPoints[1] } : undefined
+    try { return { project: createProjectFromPlan(analysis, Number(realWidth), name, calibration), error: '' } }
     catch (reason) { return { project: null, error: reason instanceof Error ? reason.message : 'Check the drawing.' } }
-  }, [analysis, realWidth, name])
+  }, [analysis, realWidth, name, calibrationPoints])
   const update = (next: PlanAnalysis) => { setAnalysis(next) }
   const selectedSegment = selected && analysis ? analysis[selected.kind][selected.index] : null
   const patchSegment = (patch: Partial<PixelOpening>) => {
     if (!selected || !analysis || !selectedSegment) return
     const next = { ...selectedSegment, ...patch, a: { ...(patch.a || selectedSegment.a) }, b: { ...(patch.b || selectedSegment.b) } }
-    if (next.horizontal) next.b.y = next.a.y
+    if (analysis.provider === 'vertex-ai') next.horizontal = Math.abs(next.b.x - next.a.x) >= Math.abs(next.b.y - next.a.y)
+    else if (next.horizontal) next.b.y = next.a.y
     else next.b.x = next.a.x
     update({ ...analysis, [selected.kind]: analysis[selected.kind].map((item, i) => i === selected.index ? next : item) })
   }
@@ -759,10 +813,10 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
     const version = ++request.current
     setFileName(file.name)
     setName(file.name.replace(/\.[^.]+$/, '') || 'Imported plan')
-    setError(''); setSelected(null); setStart(null); setRealWidth('')
+    setError(''); setSelected(null); setStart(null); setCalibrationPoints([]); setRealWidth('')
     setAnalysis(null)
     setLoading(true)
-    try { const result = await analyzePlanFile(file); if (version === request.current) setAnalysis(result) } catch (reason) { if (version === request.current) setError(reason instanceof Error ? reason.message : 'The drawing could not be analyzed.') }
+    try { const result = await analyzePlanFile(file, allowAi ? requestPlanDetection : undefined); if (version === request.current) setAnalysis(result) } catch (reason) { if (version === request.current) setError(reason instanceof Error ? reason.message : 'The drawing could not be analyzed.') }
     finally { if (version === request.current) setLoading(false) }
   }
   const submit = (event: FormEvent) => {
@@ -771,14 +825,15 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
     onImport(draft.project)
   }
   return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close import dialog" /><form className="modal-card plan-import-card" role="dialog" aria-modal="true" aria-label="Import architectural drawing" onSubmit={submit}>
-    <div className="modal-header"><div><span className="eyebrow">WIP · best-effort detection</span><h2>Import a plan</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
-    <p className="catalog-intro">Upload a plan and enter its scale to import the current detection as-is. Suggested openings are applied automatically; corrections below are optional. Detection is a work in progress. Furniture is not imported.</p>
-    <label className="plan-import-file"><Icon name="upload" /><span>{fileName || 'Choose PNG, JPG, WebP, or PDF'}</span><input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,application/pdf" onChange={(event) => choose(event.currentTarget.files?.[0])} /></label>
-    {loading && <div className="plan-import-status" role="status">Analyzing the first page locally…</div>}
+    <div className="modal-header"><div><span className="eyebrow">AI-assisted · approximate geometry</span><h2>Import a floor plan</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
+    <p className="catalog-intro">Upload an architectural plan, screenshot, or simple sketch. AI returns editable walls, rooms and suggested openings. Geometry and dimensions are approximate; review and calibrate the scale before furnishing. Room photos and video are not supported in this release.</p>
+    <label className="plan-ai-consent"><input type="checkbox" checked={allowAi} onChange={(event) => setAllowAi(event.target.checked)} /><span>Send this image to Google Vertex AI for detection. If unchecked, use the on-device detector. Do not upload layouts you are not comfortable processing with the selected provider.</span></label>
+    <label className="plan-import-file"><Icon name="upload" /><span>{fileName || 'Choose PNG, JPG, WebP, SVG, or PDF'}</span><input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,application/pdf" onChange={(event) => choose(event.currentTarget.files?.[0])} /></label>
+    {loading && <div className="plan-import-status" role="status">{allowAi ? 'Sending the plan for AI detection…' : 'Analyzing locally…'}</div>}
     {error && <div className="plan-import-error" role="alert">{error}</div>}
     {analysis && <>
-      <div className="plan-review-tools">{(['select', 'wall', 'door', 'window'] as const).map((tool) => <button type="button" key={tool} aria-pressed={draw === tool} onClick={() => { setDraw(tool); setStart(null) }}>{tool === 'select' ? 'Select / correct' : `Add ${tool}`}</button>)}</div>
-      <p className="muted">Green: walls · blue/purple: suggested windows/doors · orange: gaps left open. {draw === 'select' ? 'Select a line to edit or remove it.' : start ? 'Click the second endpoint.' : 'Click two endpoints on the source to add a segment.'}</p>
+      <div className="plan-review-tools">{(['select', 'calibrate', 'wall', 'door', 'window'] as const).map((tool) => <button type="button" key={tool} aria-pressed={draw === tool} onClick={() => { setDraw(tool); setStart(null) }}>{tool === 'select' ? 'Select / correct' : tool === 'calibrate' ? 'Set scale' : `Add ${tool}`}</button>)}</div>
+      <p className="muted">Green: walls · blue/purple: suggested windows/doors · orange: gaps left open. {draw === 'select' ? 'Select a line to edit or remove it.' : draw === 'calibrate' ? calibrationPoints.length === 0 ? 'Tap the first point of a known dimension.' : calibrationPoints.length === 1 ? 'Tap the second point on the same known dimension.' : 'Scale reference set; tap two points to choose a different line.' : start ? 'Click the second endpoint.' : 'Click two endpoints on the source to add a segment.'}</p>
       <svg className="plan-import-preview" viewBox={`0 0 ${analysis.sourceWidth} ${analysis.sourceHeight}`} role="img" aria-label="Detected walls and openings over the source drawing" onClick={(event) => {
         if (draw === 'select') return
         const svg = event.currentTarget, matrix = svg.getScreenCTM()
@@ -786,39 +841,58 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
         const p = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
         const nearby = analysis.walls.flatMap((wall) => [wall.a, wall.b]).sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y))[0]
         const end = nearby && Math.hypot(nearby.x - p.x, nearby.y - p.y) < 10 ? { ...nearby } : { x: Math.round(p.x), y: Math.round(p.y) }
+        if (draw === 'calibrate') {
+          if (calibrationPoints.length !== 1) setCalibrationPoints([end])
+          else if (Math.hypot(end.x - calibrationPoints[0].x, end.y - calibrationPoints[0].y) >= 8) setCalibrationPoints([calibrationPoints[0], end])
+          return
+        }
         if (!start) { setStart(end); return }
         const horizontal = Math.abs(end.x - start.x) >= Math.abs(end.y - start.y)
-        const a = { ...start }, b = horizontal ? { x: end.x, y: start.y } : { x: start.x, y: end.y }
+        const a = { ...start }, b = analysis.provider === 'vertex-ai' ? { ...end } : horizontal ? { x: end.x, y: start.y } : { x: start.x, y: end.y }
         if (Math.hypot(a.x - b.x, a.y - b.y) < 8) return
-        const reversed = horizontal ? a.x > b.x : a.y > b.y
+        const reversed = analysis.provider === 'vertex-ai' ? false : horizontal ? a.x > b.x : a.y > b.y
         const wall: PixelWall = { a: reversed ? b : a, b: reversed ? a : b, horizontal, thickness: 8 }
         update(draw === 'wall' ? { ...analysis, walls: [...analysis.walls, wall] } : { ...analysis, openings: [...analysis.openings, { ...wall, type: draw }] })
         setStart(null)
       }}>
         <image href={analysis.previewUrl} width={analysis.sourceWidth} height={analysis.sourceHeight} />
         {[analysis.bounds.minX, analysis.bounds.maxX].map((x) => <line key={x} x1={x} x2={x} y1={0} y2={analysis.sourceHeight} stroke="#a3483d" strokeDasharray="8 6" strokeWidth={1} pointerEvents="none" />)}
+        <line x1={analysis.bounds.minX} x2={analysis.bounds.maxX} y1={(analysis.bounds.minY + analysis.bounds.maxY) / 2} y2={(analysis.bounds.minY + analysis.bounds.maxY) / 2} stroke="#bd8052" strokeDasharray="5 5" strokeWidth={2} pointerEvents="none" />
+        {analysis.roomLabels?.map((label, index) => <text key={`label-${index}`} x={label.x} y={label.y} fill="#273f30" fontSize={20} fontWeight={600} textAnchor="middle" pointerEvents="none">{label.name}</text>)}
+        {calibrationPoints.length === 2 && <line x1={calibrationPoints[0].x} y1={calibrationPoints[0].y} x2={calibrationPoints[1].x} y2={calibrationPoints[1].y} stroke="#e0a13d" strokeWidth={Math.max(4, analysis.sourceWidth / 180)} pointerEvents="none" />}
+        {calibrationPoints.map((point, index) => <circle key={`calibration-${index}`} cx={point.x} cy={point.y} r={Math.max(8, analysis.sourceWidth / 120)} fill="#e0a13d" pointerEvents="none"><title>{`Scale point ${index + 1}`}</title></circle>)}
         {(['walls', 'openings'] as const).flatMap((kind) => analysis[kind].map((item, index) => {
           const opening = item as PixelOpening
           const type = kind === 'walls' ? 'wall' : opening.type === 'unconfirmed' ? opening.suggestedType || 'unconfirmed' : opening.type
           const color = type === 'wall' ? '#168448' : type === 'window' ? '#087cd4' : type === 'door' ? '#a537c0' : type === 'ignore' ? '#888888' : '#e77c12'
-          return <line key={`${kind}-${index}`} x1={item.a.x} y1={item.a.y} x2={item.b.x} y2={item.b.y} stroke={color} strokeWidth={Math.max(3, item.thickness) + (selected?.kind === kind && selected.index === index ? 3 : 0)} strokeOpacity={0.55} strokeDasharray={type === 'unconfirmed' || type === 'ignore' ? '6 4' : undefined} onClick={(event) => { if (draw === 'select') { event.stopPropagation(); setSelected({ kind, index }) } }}><title>{`${type} ${index + 1}`}</title></line>
+          return <line key={`${kind}-${index}`} x1={item.a.x} y1={item.a.y} x2={item.b.x} y2={item.b.y} stroke={color} strokeWidth={Math.max(3, item.thickness) + (selected?.kind === kind && selected.index === index ? 3 : 0)} strokeOpacity={0.55} strokeDasharray={type === 'unconfirmed' || type === 'ignore' || (item.confidence !== undefined && item.confidence < 0.55) ? '6 4' : undefined} onClick={(event) => { if (draw === 'select') { event.stopPropagation(); setSelected({ kind, index }) } }}><title>{`${type} ${index + 1}`}</title></line>
         }))}
         {start && <circle cx={start.x} cy={start.y} r={5} fill="#e77c12" />}
       </svg>
-      <div className="plan-import-stats"><span><strong>{analysis.walls.length}</strong> solid wall segments</span><span><strong>{analysis.openings.filter((o) => o.type === 'door' || o.type === 'window' || (o.type === 'unconfirmed' && o.suggestedType)).length}</strong> suggested openings</span><span><strong>—</strong> furniture phase 2</span></div>
+      <div className="plan-detection-result" role="status"><strong>{analysis.provider === 'vertex-ai' ? 'Vertex AI detection' : 'Local fallback detection'}</strong><span>{analysis.provider === 'vertex-ai' ? `${Math.round((analysis.confidence || 0) * 100)}% overall confidence · geometry remains approximate` : 'Limited to clear axis-aligned filled walls'}</span></div>
+      {analysis.knownDimensions?.length ? <div className="plan-known-dimensions"><span>Detected dimensions</span>{analysis.knownDimensions.map((dimension, index) => <button type="button" key={index} aria-label={`Use scale ${dimension.label}, ${dimension.meters} metres`} onClick={() => { setCalibrationPoints([dimension.a, dimension.b]); setRealWidth(String(dimension.meters)); setDraw('calibrate') }}>Use {dimension.label}: {dimension.meters.toFixed(2)} m · {Math.round(dimension.confidence * 100)}%</button>)}</div> : null}
+      <div className="plan-import-stats"><span><strong>{analysis.walls.length}</strong> wall segments</span><span><strong>{analysis.openings.filter((o) => o.type === 'door' || o.type === 'window' || (o.type === 'unconfirmed' && o.suggestedType)).length}</strong> suggested openings</span><span><strong>{analysis.roomLabels?.length || 0}</strong> room labels</span></div>
       <label className="field-label">Review detected segment<select aria-label="Review detected segment" value={selected ? `${selected.kind}:${selected.index}` : ''} onChange={(event) => { const [kind, index] = event.target.value.split(':'); setSelected(kind ? { kind: kind as 'walls' | 'openings', index: Number(index) } : null) }}><option value="">Select a segment</option>{(['walls', 'openings'] as const).flatMap((kind) => analysis[kind].map((item, i) => <option key={`${kind}:${i}`} value={`${kind}:${i}`}>{kind === 'walls' ? 'Wall' : (item as PixelOpening).type} {i + 1}</option>))}</select></label>
       {selected && selectedSegment && <div className="plan-segment-editor">
         {selected.kind === 'openings' && <label className="field-label">Opening type<select aria-label="Opening type" value={(selectedSegment as PixelOpening).type} onChange={(event) => patchSegment({ type: event.target.value as PixelOpening['type'] })}><option value="unconfirmed">Unconfirmed{(selectedSegment as PixelOpening).suggestedType ? ` · suggested ${(selectedSegment as PixelOpening).suggestedType}` : ''}</option><option value="door">Door</option><option value="window">Window</option><option value="ignore">Ignore gap / open passage</option></select></label>}
-        {(['a', 'b'] as const).map((end) => <div className="dimension-grid" key={end}>{(['x', 'y'] as const).map((axis) => <label key={axis}>{end.toUpperCase()} {axis} (px)<NumberInput disabled={end === 'b' && axis === (selectedSegment.horizontal ? 'y' : 'x')} min={0} max={axis === 'x' ? analysis.sourceWidth : analysis.sourceHeight} step={1} value={selectedSegment[end][axis]} onCommit={(value) => patchSegment({ [end]: { ...selectedSegment[end], [axis]: value } })} /></label>)}</div>)}
+        {(['a', 'b'] as const).map((end) => <div className="dimension-grid" key={end}>{(['x', 'y'] as const).map((axis) => <label key={axis}>{end.toUpperCase()} {axis} (px)<NumberInput disabled={analysis.provider !== 'vertex-ai' && end === 'b' && axis === (selectedSegment.horizontal ? 'y' : 'x')} min={0} max={axis === 'x' ? analysis.sourceWidth : analysis.sourceHeight} step={1} value={selectedSegment[end][axis]} onCommit={(value) => patchSegment({ [end]: { ...selectedSegment[end], [axis]: value } })} /></label>)}</div>)}
         <button type="button" className="danger-button" onClick={() => { update({ ...analysis, [selected.kind]: analysis[selected.kind].filter((_, i) => i !== selected.index) }); setSelected(null) }}>Remove segment</button>
       </div>}
-      <div className="form-grid"><label className="field-label">Project name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Known plan width (m)<input required type="number" min="2" max="38" step="any" placeholder="Width between dashed guides" value={realWidth} onChange={(event) => setRealWidth(event.target.value)} /></label></div>
+      <div className="form-grid"><label className="field-label">Project name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Known dimension (m)<input required type="number" min="0.25" max="38" step="any" placeholder="Enter the measured distance" value={realWidth} onChange={(event) => setRealWidth(event.target.value)} /><small className="muted">{calibrationPoints.length === 2 ? `Distance between selected points: ${Math.hypot(calibrationPoints[1].x - calibrationPoints[0].x, calibrationPoints[1].y - calibrationPoints[0].y).toFixed(0)} px` : 'By default this is the full detected width between dashed guides.'}</small></label></div>
       <div className="plan-import-notes">{analysis.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>
       {draft.error && <p role="alert" className="plan-import-error">{draft.error}</p>}
-      <p className="plan-review-confirm">Creating this space imports the WIP result and replaces the current layout. Undo restores the previous layout.</p>
+      <p className="plan-review-confirm">AI geometry and dimensions are approximate even after scale calibration. This creates editable walls and openings, adds no furniture, and replaces the current layout. Undo restores the previous layout.</p>
     </>}
-    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={!draft.project || loading}>Create space</button></div>
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={!draft.project || loading}>Create editable room</button></div>
   </form></div>
+}
+
+function ExistingItemModal({ onClose, onCreate }: { onClose: () => void; onCreate: (item: CustomRoomItem) => void }) {
+  const [name, setName] = useState('Existing furniture')
+  const [width, setWidth] = useState('100'), [depth, setDepth] = useState('100'), [height, setHeight] = useState('100')
+  const [color, setColor] = useState('#bca58a'), [kind, setKind] = useState<CustomRoomItem['kind']>('furniture')
+  const submit = (event: FormEvent) => { event.preventDefault(); onCreate({ name: name.trim() || 'Existing furniture', width: clamp(Number(width), 1, 2000), depth: clamp(Number(depth), 1, 2000), height: clamp(Number(height), 1, 600), color, kind }) }
+  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close existing furniture dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Add existing furniture" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Your furniture</span><h2>Add an existing item</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><p className="catalog-intro">Create an editable measured placeholder. It remains outside the shopping basket.</p><label className="field-label">Name<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Type<select value={kind} onChange={(event) => setKind(event.target.value as CustomRoomItem['kind'])}><option value="furniture">Furniture</option><option value="rug">Rug</option></select></label><div className="form-grid"><label className="field-label">Width (cm)<input required type="number" min="1" max="2000" step="1" value={width} onChange={(event) => setWidth(event.target.value)} /></label><label className="field-label">Depth (cm)<input required type="number" min="1" max="2000" step="1" value={depth} onChange={(event) => setDepth(event.target.value)} /></label><label className="field-label">Height (cm)<input required type="number" min="1" max="600" step="1" value={height} onChange={(event) => setHeight(event.target.value)} /></label><label className="field-label">Color<input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Place in room <Icon name="arrow" /></button></div></form></div>
 }
 
 function App() {
@@ -866,9 +940,10 @@ function App() {
     refreshHistory((v) => v + 1)
   }
   const [renderOpen, setRenderOpen] = useState(false)
-  const [viewMode, setViewMode] = useState<ViewMode>('3d')
+  const [viewMode, setViewMode] = useState<ViewMode>(() => project.features.length ? '3d' : '2d')
   const [activeTool, setActiveTool] = useState<Tool>(() => project.features.length ? 'select' : 'wall')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [gridVisible, setGridVisible] = useState(true)
@@ -888,8 +963,12 @@ function App() {
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [requestOpen, setRequestOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [customItemOpen, setCustomItemOpen] = useState(false)
   const [leftPanelOpen, setLeftPanelOpen] = useState(() => window.innerWidth > 1000)
   const [rightPanelOpen, setRightPanelOpen] = useState(() => window.innerWidth > 1200)
+  const [inspectorExpanded, setInspectorExpanded] = useState(false)
+  const inspectorStartY = useRef<number | null>(null)
+  const inspectorWasDragged = useRef(false)
 
   useEffect(() => {
     if (needsRecovery) { setSaveStatus('Recovery mode · save manually'); return }
@@ -913,13 +992,13 @@ function App() {
   }, [notice])
 
   useEffect(() => {
-    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen) return
+    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !customItemOpen) return
     const previous = document.activeElement as HTMLElement | null
     const panel = document.querySelector<HTMLElement>('.modal-card, .shopping-drawer')
     const elements = () => Array.from(document.querySelector('.modal-card, .shopping-drawer')?.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, textarea') || [])
     const frame = requestAnimationFrame(() => (panel?.querySelector<HTMLElement>('input') || elements()[0])?.focus())
     const keys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(false); setRequestOpen(false); setImportOpen(false) }
+      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(false); setRequestOpen(false); setImportOpen(false); setCustomItemOpen(false) }
       if (event.key !== 'Tab') return
       const targets = elements(), first = targets[0], last = targets[targets.length - 1]
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
@@ -927,11 +1006,44 @@ function App() {
     }
     document.addEventListener('keydown', keys)
     return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', keys); previous?.focus() }
-  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen])
+  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen, customItemOpen])
 
-  const selectedObject = project.objects.find((object) => object.id === selectedId) ?? null
-  const selectedProduct = selectedObject ? productById.get(selectedObject.productId) ?? null : null
+  const selectedObjects = project.objects.filter((object) => selectedIds.includes(object.id))
+  const selectedProductObjects = selectedObjects.filter((object) => object.productId)
+  const allSelectedProductsInBasket = selectedProductObjects.length > 0 && selectedProductObjects.every((object) => object.inBasket)
+  const selectedObject = selectedIds.length === 1 ? selectedObjects[0] ?? null : null
+  const selectedProduct = selectedObject?.productId ? productById.get(selectedObject.productId) ?? null : null
+  const selectedCustom = selectedObject?.custom ?? null
+  const selectedCanMirror = Boolean(selectedProduct && /^(Corner sofa|Modular sofa)$/i.test(selectedProduct.category))
   const selectedFeature = project.features.find((feature) => feature.id === selectedFeatureId) ?? null
+  const similarProducts = useMemo(() => {
+    if (!selectedProduct) return []
+    const sofaFamily = /sofa/i.test(selectedProduct.category)
+    return products.filter((product) => product.id !== selectedProduct.id && (product.category === selectedProduct.category || (sofaFamily && /sofa/i.test(product.category))))
+      .sort((a, b) => Number(b.category === selectedProduct.category) - Number(a.category === selectedProduct.category)).slice(0, 4)
+  }, [selectedProduct])
+  const startInspectorGesture = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (window.innerWidth > 600 || event.button !== 0) return
+    inspectorStartY.current = event.clientY
+    inspectorWasDragged.current = false
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  const finishInspectorGesture = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (inspectorStartY.current === null) return
+    const delta = inspectorStartY.current - event.clientY
+    inspectorStartY.current = null
+    if (Math.abs(delta) < 28) return
+    inspectorWasDragged.current = true
+    if (delta > 0) { setRightPanelOpen(true); setInspectorExpanded(true) }
+    else if (inspectorExpanded) setInspectorExpanded(false)
+    else setRightPanelOpen(false)
+    window.setTimeout(() => { inspectorWasDragged.current = false }, 0)
+  }
+  const toggleInspector = () => {
+    if (inspectorWasDragged.current) { inspectorWasDragged.current = false; return }
+    if (!rightPanelOpen) { setRightPanelOpen(true); setInspectorExpanded(false) }
+    else setInspectorExpanded(!inspectorExpanded)
+  }
 
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -941,6 +1053,7 @@ function App() {
   const shoppingItems = useMemo(() => {
     const grouped = new Map<string, { product: Product; quantity: number; subtotal: number }>()
     project.objects.forEach((object) => {
+      if (!object.inBasket || !object.productId) return
       const product = productById.get(object.productId)
       if (!product) return
       const current = grouped.get(product.id)
@@ -955,29 +1068,34 @@ function App() {
   }, [project.objects])
 
   const estimatedTotal = shoppingItems.reduce((total, item) => total + item.subtotal, 0)
-  const itemCount = project.objects.length
+  const itemCount = project.objects.filter((object) => object.inBasket && object.productId).length
   const warnings = useMemo(() => placementWarnings(project), [project])
   const floors = useMemo(() => getFloorRegions(project.features), [project.features])
   const floorArea = floors.reduce((sum, region) => sum + region.area, 0)
 
   const clearSelection = () => {
     setSelectedId(null)
+    setSelectedIds([])
     setSelectedFeatureId(null)
+    if (window.innerWidth <= 600) { setRightPanelOpen(false); setInspectorExpanded(false) }
   }
 
-  const selectObject = (id: string) => {
+  const selectObject = (id: string, extend = false) => {
+    const nextIds = extend ? [...new Set([...selectedIds, id])] : [id]
     setSelectedId(id)
+    setSelectedIds(nextIds)
     setSelectedFeatureId(null)
     setActiveTool('select')
-    setRightPanelOpen(true)
+    if (window.innerWidth <= 600) { setRightPanelOpen(false); setInspectorExpanded(false) }
     if (window.innerWidth <= 1000) setLeftPanelOpen(false)
   }
 
   const selectFeature = (id: string) => {
     setSelectedFeatureId(id)
     setSelectedId(null)
+    setSelectedIds([])
     setActiveTool('select')
-    setRightPanelOpen(true)
+    if (window.innerWidth <= 600) { setRightPanelOpen(false); setInspectorExpanded(false) }
     if (window.innerWidth <= 1000) setLeftPanelOpen(false)
   }
 
@@ -996,7 +1114,7 @@ function App() {
     setDragProduct(null)
     if (!regions.length) { setNotice('Close a loop of walls first. The floor will fill automatically.'); return }
     const defaultVariantId = product.variants?.[0]?.id
-    let object = placeObject({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), x: x ?? 0, z: z ?? 0, rotation: 0 }, current, snap, wallSnap)
+    let object = placeObject({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), x: x ?? 0, z: z ?? 0, rotation: 0, inBasket: false }, current, snap, wallSnap)
     if (x === undefined) {
       const candidates: RoomObject[] = [object]
       for (let px = -current.width / 2; px <= current.width / 2; px += 0.25) for (let pz = -current.length / 2; pz <= current.length / 2; pz += 0.25) candidates.push(placeObject({ ...object, x: px, z: pz }, current, snap, wallSnap))
@@ -1010,6 +1128,21 @@ function App() {
     setNotice(`${product.name} added to your room`)
   }
 
+  const addCustomObject = (custom: CustomRoomItem) => {
+    const current = projectRef.current, regions = getFloorRegions(current.features)
+    setCustomItemOpen(false)
+    if (!regions.length) { setNotice('Close a loop of walls before adding existing furniture.'); return }
+    let object: RoomObject = { id: makeId('object'), custom, x: 0, z: 0, rotation: 0, inBasket: false }
+    const candidates: RoomObject[] = [object]
+    for (let x = -current.width / 2; x <= current.width / 2; x += 0.25) for (let z = -current.length / 2; z <= current.length / 2; z += 0.25) candidates.push(placeObject({ ...object, x, z }, current, snap, wallSnap))
+    const valid = candidates.filter((candidate) => fitsFloor(candidate, current, regions)).sort((a, b) => a.x ** 2 + a.z ** 2 - b.x ** 2 - b.z ** 2)
+    object = valid.find((candidate) => current.objects.every((existing) => !overlaps(candidate, existing))) || valid[0] || object
+    if (!fitsFloor(object, current, regions)) { setNotice('This item must fit inside an enclosed room.'); return }
+    setProject({ ...current, objects: [...current.objects, object] })
+    selectObject(object.id)
+    setNotice(`${custom.name} added as existing furniture; it is not in the basket.`)
+  }
+
   const patchObject = (patch: Partial<RoomObject>) => {
     if (!selectedId) return
     const current = projectRef.current, object = current.objects.find((o) => o.id === selectedId)
@@ -1019,26 +1152,86 @@ function App() {
     setProject({ ...current, objects: current.objects.map((o) => o.id === selectedId ? next : o) })
   }
 
+  const flipSelected = () => {
+    if (!selectedObject || !selectedCanMirror) return
+    patchObject({ mirrored: !selectedObject.mirrored })
+  }
+
+  const rotateSelection = () => {
+    if (selectedObject) { patchObject({ rotation: selectedObject.rotation + Math.PI / 12 }); return }
+    if (selectedObjects.length < 2) return
+    const current = projectRef.current, centre = selectedObjects.reduce((point, object) => ({ x: point.x + object.x / selectedObjects.length, z: point.z + object.z / selectedObjects.length }), { x: 0, z: 0 })
+    const cos = Math.cos(Math.PI / 12), sin = Math.sin(Math.PI / 12), ids = new Set(selectedObjects.map((object) => object.id))
+    const next = current.objects.map((object) => {
+      if (!ids.has(object.id)) return object
+      const x = object.x - centre.x, z = object.z - centre.z
+      return { ...object, x: centre.x + x * cos + z * sin, z: centre.z - x * sin + z * cos, rotation: object.rotation + Math.PI / 12 }
+    })
+    if (next.some((object) => ids.has(object.id) && !fitsFloor(object, current))) { setNotice('The group rotation would move an item outside the room.'); return }
+    setProject({ ...current, objects: next })
+  }
+
+  const moveSelectionBy = (dx: number, dz: number) => {
+    if (selectedObjects.length < 2) return
+    const current = projectRef.current, ids = new Set(selectedObjects.map((object) => object.id))
+    const next = current.objects.map((object) => ids.has(object.id) ? { ...object, x: object.x + dx, z: object.z + dz } : object)
+    if (next.some((object) => ids.has(object.id) && !fitsFloor(object, current))) { setNotice('The whole selection must stay inside the room.'); return }
+    setProject({ ...current, objects: next })
+  }
+
+  const replaceSelected = (productId: string) => {
+    if (!selectedObject) return
+    const product = productById.get(productId)
+    if (!product) return
+    const current = projectRef.current, previous = current.objects.find((object) => object.id === selectedObject.id)
+    if (!previous) return
+    const replacement = { ...previous, productId, variantId: product.variants?.[0]?.id, mirrored: /^(Corner sofa|Modular sofa)$/i.test(product.category) ? previous.mirrored : undefined }
+    setProject({ ...current, objects: current.objects.map((object) => object.id === previous.id ? replacement : object) })
+    setNotice(fitsFloor(replacement, current) ? `${product.name} replaced in place` : `${product.name} replaced in place; its new dimensions may not fit the room.`)
+  }
+
+  const toggleBasket = () => {
+    const items = project.objects.filter((object) => selectedIds.includes(object.id) && object.productId)
+    if (!items.length) return
+    const inBasket = !items.every((object) => object.inBasket)
+    const ids = new Set(items.map((object) => object.id))
+    setProject((current) => ({ ...current, objects: current.objects.map((object) => ids.has(object.id) ? { ...object, inBasket } : object) }))
+    setNotice(`${items.length === 1 ? selectedProduct?.name || 'Item' : `${items.length} products`} ${inBasket ? 'added to' : 'removed from'} basket`)
+  }
+
   const moveObject = (id: string, x: number, z: number) => {
-    setProject((current) => ({ ...current, objects: current.objects.map((candidate) => {
-      if (candidate.id !== id) return candidate
-      const next = placeObject({ ...candidate, x, z }, current, snap, wallSnap)
-      return fitsFloor(next, current, floors) ? next : candidate
-    }) }))
+    const current = projectRef.current, base = dragSnapshot.current || current, origin = base.objects.find((object) => object.id === id)
+    if (!origin) return
+    const ids = selectedIds.includes(id) ? selectedIds : [id], moved = new Map<string, RoomObject>()
+    for (const selected of ids) {
+      const original = base.objects.find((object) => object.id === selected), existing = current.objects.find((object) => object.id === selected)
+      if (!original || !existing) continue
+      const next = placeObject({ ...existing, x: original.x + x - origin.x, z: original.z + z - origin.z }, current, snap, wallSnap)
+      if (!fitsFloor(next, current, floors)) return
+      moved.set(selected, next)
+    }
+    if (moved.size) setProject({ ...current, objects: current.objects.map((object) => moved.get(object.id) || object) })
   }
 
   const duplicateSelected = () => {
-    if (!selectedObject) return
-    let duplicate = placeObject({ ...selectedObject, id: makeId('object'), x: selectedObject.x + 0.35, z: selectedObject.z + 0.35 }, project)
-    if (!fitsFloor(duplicate, project)) duplicate = { ...selectedObject, id: duplicate.id }
-    if (!fitsFloor(duplicate, project)) { setNotice('Repair the room boundary before duplicating this piece.'); return }
-    setProject((current) => ({ ...current, objects: [...current.objects, duplicate] }))
-    selectObject(duplicate.id)
+    const selected = project.objects.filter((object) => selectedIds.includes(object.id))
+    if (!selected.length) return
+    const duplicates = selected.map((object) => {
+      const id = makeId('object')
+      let duplicate = placeObject({ ...object, id, x: object.x + 0.35, z: object.z + 0.35, inBasket: false }, project)
+      if (!fitsFloor(duplicate, project)) duplicate = { ...object, id, inBasket: false }
+      return duplicate
+    })
+    if (duplicates.some((object) => !fitsFloor(object, project))) { setNotice('Repair the room boundary before duplicating these items.'); return }
+    setProject((current) => ({ ...current, objects: [...current.objects, ...duplicates] }))
+    const ids = duplicates.map((object) => object.id)
+    setSelectedIds(ids); setSelectedId(ids[ids.length - 1]); setSelectedFeatureId(null)
   }
 
   const deleteSelected = () => {
-    if (!selectedId) return
-    setProject((current) => ({ ...current, objects: current.objects.filter((object) => object.id !== selectedId) }))
+    const ids = new Set(selectedIds)
+    if (!ids.size) return
+    setProject((current) => ({ ...current, objects: current.objects.filter((object) => !ids.has(object.id)) }))
     clearSelection()
   }
 
@@ -1123,28 +1316,40 @@ function App() {
 
   const drawWall = (x: number, z: number, endX: number, endZ: number) => {
     const current = projectRef.current
-    if (current.features.length >= 200) { setNotice('This prototype supports up to 200 walls and openings.'); return }
+    if (current.features.length >= 200) { setNotice('This prototype supports up to 200 walls and openings.'); return false }
     const a = snapBuildPoint({ x, z }, current), b = snapBuildPoint({ x: endX, z: endZ }, current)
-    if (Math.hypot(a.x - b.x, a.z - b.z) < 0.25) return
+    if (Math.hypot(a.x - b.x, a.z - b.z) < 0.25) return false
     const same = (p: Point, q: Point) => Math.hypot(p.x - q.x, p.z - q.z) < 0.001
-    if (current.features.filter((f) => f.type === 'wall').some((f) => { const [c, d] = wallEndpoints(f); return (same(a, c) && same(b, d)) || (same(a, d) && same(b, c)) })) return
+    if (current.features.filter((f) => f.type === 'wall').some((f) => { const [c, d] = wallEndpoints(f); return (same(a, c) && same(b, d)) || (same(a, d) && same(b, c)) })) return false
     const wall = wallFromPoints(makeId('wall'), a, b, current.ceilingHeight)
     const next = { ...current, features: [...current.features, wall] }
-    if (getFloorRegions(next.features).length > getFloorRegions(current.features).length) setNotice('Room enclosed. Your floor is ready to furnish.')
+    const closesRoom = getFloorRegions(next.features).length > getFloorRegions(current.features).length
+    if (closesRoom) setNotice('Room enclosed. Your floor is ready to furnish.')
     setProject(next)
+    return closesRoom
   }
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen) return
+      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen || customItemOpen) return
       if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); endDrag(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject(); return }
       if (event.key === '/') { event.preventDefault(); setLeftPanelOpen(true); requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.search-field input')?.focus()); return }
       if (selectedFeatureId && (event.key === 'Delete' || event.key === 'Backspace')) { event.preventDefault(); deleteFeature(); return }
       if (event.key.toLowerCase() === 'w') { clearSelection(); setActiveTool('wall'); setViewMode('2d'); return }
+      if (selectedObjects.length > 1) {
+        if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelected(); return }
+        if (event.key.toLowerCase() === 'r') { rotateSelection(); return }
+        const delta = event.shiftKey ? 0.1 : 0.01
+        if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+          event.preventDefault()
+          moveSelectionBy(event.key === 'ArrowLeft' ? -delta : event.key === 'ArrowRight' ? delta : 0, event.key === 'ArrowUp' ? -delta : event.key === 'ArrowDown' ? delta : 0)
+        }
+        return
+      }
       if (!selectedObject) return
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelected() }
-      if (event.key.toLowerCase() === 'r') patchObject({ rotation: selectedObject.rotation + Math.PI / 12 })
+      if (event.key.toLowerCase() === 'r') rotateSelection()
       const delta = event.shiftKey ? 0.1 : 0.01
       if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
         event.preventDefault()
@@ -1164,7 +1369,7 @@ function App() {
     clearSelection()
     setNewProjectOpen(false)
     setViewMode('2d')
-    setActiveTool('wall')
+    setActiveTool(getFloorRegions(nextProject.features).length ? 'select' : 'wall')
     setGridVisible(true)
     setCameraVersion((value) => value + 1)
   }
@@ -1178,56 +1383,65 @@ function App() {
     setActiveTool('select')
     setGridVisible(true)
     setCameraVersion((value) => value + 1)
-    setNotice('WIP plan imported with estimated wall thicknesses and suggested openings. Furniture was not added.')
+    setNotice(`${nextProject.planImport?.provider === 'vertex-ai' ? 'AI' : 'Local fallback'} floor plan imported. Geometry and inferred dimensions remain approximate${nextProject.planImport?.scaleCalibrated ? '; scale calibrated' : ''}.`)
   }
 
   return (
     <div className="app-shell">
-      <header className="topbar" inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen}>
+      <header className="topbar" inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen}>
         <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /><span /></div><strong><a href="/" aria-label="Formivo home" style={{ color: 'inherit', textDecoration: 'none' }}>FORMIVO</a></strong><span className="brand-divider" /><button className="project-switcher" onClick={() => setNewProjectOpen(true)}><span>{project.name}</span><Icon name="chevron" size={14} /></button></div>
         <div className="save-indicator"><span className={`save-dot ${saveStatus === 'Unsaved changes' ? 'save-dot-dirty' : ''}`} />{saveStatus}</div>
-        <div className="top-actions"><button className="top-icon-button" title="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" /></button><button className="top-icon-button" title="Redo" disabled={!history.current.future.length} onClick={redo}><Icon name="redo" /></button><span className="top-divider" /><button className="top-action-button" aria-label="Share project" onClick={shareProject}><Icon name="share" /> Share</button><button className="top-action-button" aria-label="Shopping list" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> List <span className="action-count">{itemCount}</span></button><button className="top-action-button primary-top-action" aria-label="Save project" onClick={saveProject}><Icon name="save" /> Save</button><div className="avatar">V</div></div>
+        <div className="top-actions"><button className="top-icon-button" title="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" /></button><button className="top-icon-button" title="Redo" disabled={!history.current.future.length} onClick={redo}><Icon name="redo" /></button><span className="top-divider" /><button className="top-action-button" aria-label="Share project" onClick={shareProject}><Icon name="share" /> Share</button><button className="top-action-button" aria-label="Shopping list" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> Basket <span className="action-count">{itemCount}</span></button><button className="top-action-button primary-top-action" aria-label="Save project" onClick={saveProject}><Icon name="save" /> Save</button><div className="avatar">V</div></div>
       </header>
 
-      <div className={`editor-layout ${leftPanelOpen ? '' : 'left-collapsed'} ${rightPanelOpen ? '' : 'right-collapsed'}`} inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen}>
+      <div className={`editor-layout ${leftPanelOpen ? '' : 'left-collapsed'} ${rightPanelOpen ? '' : 'right-collapsed'}`} inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen}>
         <aside className="sidebar left-sidebar" aria-label="Catalogue and room tools" inert={!leftPanelOpen}>
           <div className="sidebar-scroll">
             <div className="panel-heading"><div><span className="eyebrow">Workspace</span><h1>Build your space</h1></div><button className="icon-button panel-collapse-button" onClick={() => setLeftPanelOpen(false)} title="Collapse tools"><Icon name="panel" /></button></div>
             <div className="tool-grid">
               {([['select', 'Select', 'cube'], ['wall', 'Wall', 'wall'], ['door', 'Door', 'box'], ['window', 'Window', 'window']] as [Tool, string, IconName][]).map(([tool, label, icon]) => <button key={tool} className={`tool-button ${activeTool === tool ? 'tool-button-active' : ''}`} aria-pressed={activeTool === tool} onClick={() => { clearSelection(); setActiveTool(tool); if (tool === 'wall') setViewMode('2d'); if (window.innerWidth <= 1000) setLeftPanelOpen(false) }}><span className="tool-icon"><Icon name={icon} /></span><span>{label}</span></button>)}
             </div>
-            {activeTool !== 'select' && <div className="tool-hint"><span className="hint-pip" /><span>{activeTool === 'wall' ? 'Drag on the grid to draw connected walls. Close a loop to fill the floor.' : `Click a drawn wall to add a ${activeTool}.`} Escape to cancel.</span></div>}
-            <div className="catalog-heading"><div><span className="eyebrow">Make yourself at home</span><h2>Furniture & objects</h2></div><span className="check-count">{products.length}</span></div><p className="catalog-intro">Drag a piece into your room, or use + to add it.</p>
+            {activeTool !== 'select' && <div className="tool-hint"><span className="hint-pip" /><span>{activeTool === 'wall' ? 'Tap/click a start point, then each corner to continue; dragging also draws. Close the loop to create the floor.' : `Click a drawn wall to add a ${activeTool}.`} Escape to cancel.</span></div>}
+            <div className="catalog-heading"><div><span className="eyebrow">Make yourself at home</span><h2>Furniture & objects</h2></div><span className="check-count">{products.length}</span></div><p className="catalog-intro">Tap a piece to add it, or drag it into the room.</p><button type="button" className="custom-item-launch secondary-button" onClick={() => setCustomItemOpen(true)}><Icon name="plus" /> Add existing furniture</button>
             <label className="search-field"><Icon name="search" /><input aria-label="Search products" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search products" /><kbd>/</kbd></label>
             <div className="category-row">{categories.map((item) => <button key={item} className={category === item ? 'category-active' : ''} aria-pressed={category === item} onClick={() => setCategory(item)}>{item}</button>)}</div>
             <div className="catalog-filters"><select aria-label="Retailer filter" value={retailer} onChange={(event) => setRetailer(event.target.value)}><option value="All">All retailers</option>{[...new Set(products.map((p) => p.retailer))].map((r) => <option key={r}>{r}</option>)}</select><select aria-label="Sort products" value={sort} onChange={(event) => setSort(event.target.value)}><option value="curated">Curated order</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option></select></div>
             <div className="catalog-results"><span>{filteredProducts.length} pieces</span><span>Sample collection</span></div>
             <div className="product-list">{filteredProducts.map((product) => <article className="product-card" key={product.id} draggable onDragStart={(event) => { event.dataTransfer.setData(PRODUCT_DRAG_TYPE, product.id); event.dataTransfer.effectAllowed = 'copy'; setDragProduct(product.id); setActiveTool('select') }} onDragEnd={() => setDragProduct(null)}>
-              <ProductThumb product={product} /><div className="product-card-body"><div><span>{product.category}</span><strong>{product.name}</strong><span>{product.retailer}</span><small>{product.width} × {product.depth} × {product.height} cm</small></div><div className="product-card-bottom"><strong>{formatPrice(product.price)}</strong><button className="add-product-button" onClick={() => addProduct(product.id)} title={`Add ${product.name} to room`}><Icon name="plus" size={15} /></button></div></div>
+              <button type="button" className="product-card-button" onClick={() => addProduct(product.id)} title={`Add ${product.name} to room`}><ProductThumb product={product} /><span className="product-card-body"><span className="product-card-info"><span>{product.category}</span><strong>{product.name}</strong><span>{product.retailer}</span><small>{product.width} × {product.depth} × {product.height} cm</small></span><span className="product-card-bottom"><strong>{formatPrice(product.price)}</strong><span className="add-product-button"><Icon name="plus" size={15} /></span></span></span></button>
             </article>)}</div>
             {filteredProducts.length === 0 && <div className="empty-search"><span>No products found</span><button className="text-button" onClick={() => { setSearch(''); setCategory('All'); setRetailer('All'); setSort('curated') }}>Clear filters</button></div>}
           </div>
-          <div className="sidebar-footer"><button className="footer-link" onClick={() => setNewProjectOpen(true)}><Icon name="plus" /> New project</button><button className="footer-link" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> Shopping list <span>{formatPrice(estimatedTotal)}</span></button></div>
+          <div className="sidebar-footer"><button className="footer-link" onClick={() => setNewProjectOpen(true)}><Icon name="plus" /> New project</button><button className="footer-link" onClick={() => setImportOpen(true)}><Icon name="upload" /> Import floor plan</button><button className="footer-link" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> Shopping list <span>{formatPrice(estimatedTotal)}</span></button></div>
         </aside>
 
         <main className="workspace">
           <div className="workspace-toolbar"><div className="workspace-context"><span className="live-dot" />{activeTool === 'wall' ? 'Build mode' : 'Your space'}<span className="context-separator">/</span><span>{floors.length} {floors.length === 1 ? 'room' : 'rooms'} · {floorArea.toFixed(1)} m²</span></div><div className="canvas-actions"><button className="render-launch" disabled={!floors.length} onClick={() => setRenderOpen(true)}>Render studio</button><button className="canvas-action-button" title="Toggle grid" aria-pressed={gridVisible} onClick={() => setGridVisible(!gridVisible)}><Icon name="grid" /> Grid <span className={`toggle ${gridVisible ? 'toggle-on' : ''}`}><span /></span></button><button className="canvas-action-button" title="Toggle wall cutaway" aria-pressed={wallsTransparent} onClick={() => setWallsTransparent(!wallsTransparent)}><Icon name="layers" /> Walls <span className={`toggle ${wallsTransparent ? 'toggle-on' : ''}`}><span /></span></button><label className="lighting-control" title="Editor lighting mode"><Icon name="sun" /><select aria-label="Editor lighting mode" value={lightingMode} onChange={(event) => setLightingMode(event.target.value as LightingMode)}><option value="default">Default</option><option value="day">Day</option><option value="night">Night</option></select></label><span className="canvas-action-divider" /><div className="view-switcher"><button className={viewMode === '3d' ? 'view-active' : ''} onClick={() => setViewMode('3d')}><Icon name="cube" size={14} /> 3D</button><button className={viewMode === '2d' ? 'view-active' : ''} onClick={() => setViewMode('2d')}><Icon name="box" size={14} /> 2D plan</button></div><button className="canvas-icon-button" onClick={() => setCameraVersion((value) => value + 1)} title="Reset camera"><Icon name="rotate" /></button><button className="workspace-collapse-button" onClick={() => setLeftPanelOpen(!leftPanelOpen)} title="Toggle catalogue"><Icon name="panel" /></button></div></div>
-          <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={project.features.filter((f) => f.type === 'wall').length}><RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedId={selectedId} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={clearSelection} onSelectObject={selectObject} onSelectFeature={selectFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} /><div className="canvas-label"><span className="canvas-label-number">01</span><span>{viewMode === '3d' ? '3D view' : 'Floor plan'}</span><span className="canvas-label-dot" /><span>{activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</span></div>{!project.features.length && !dragProduct && <div className="empty-build-hint"><strong>Your space starts here</strong><span>Drag your first wall on the grid.<br />Connect the walls to create a floor.</span></div>}{dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your space' : 'Close your walls before furnishing'}</div>}<div className="canvas-tip">{activeTool === 'wall' ? 'Drag to draw · Shift for straight walls · Esc to select' : activeTool !== 'select' ? `Click a wall to add a ${activeTool}` : selectedObject ? 'Drag to move · R to rotate · Arrows to nudge' : viewMode === '3d' ? 'Drag empty space to orbit · Right-drag to pan · Scroll to zoom' : 'Right-drag to pan · Scroll to zoom'}</div><div className="placement-controls">{activeTool === 'wall' ? <span className="build-grid-label">Wall grid · 25 cm · Corners snap together</span> : <><button aria-pressed={snap} onClick={() => setSnap(!snap)}>Snap · 10 cm <span className={`toggle ${snap ? 'toggle-on' : ''}`}><span /></span></button><button aria-pressed={wallSnap} onClick={() => setWallSnap(!wallSnap)}>To walls <span className={`toggle ${wallSnap ? 'toggle-on' : ''}`}><span /></span></button></>}</div>{selectedObject && <div className="selection-toolbar"><button title="Rotate selected product" onClick={() => patchObject({ rotation: selectedObject.rotation + Math.PI / 12 })}><Icon name="rotate" />15°</button><button title="Duplicate selected product" onClick={duplicateSelected}><Icon name="copy" /></button><button title="Delete selected product" onClick={deleteSelected}><Icon name="trash" /></button></div>}</div>
+          <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={project.features.filter((f) => f.type === 'wall').length}><RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={clearSelection} onSelectObject={selectObject} onSelectFeature={selectFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} /><div className="canvas-label"><span className="canvas-label-number">01</span><span>{viewMode === '3d' ? '3D view' : 'Floor plan'}</span><span className="canvas-label-dot" /><span>{activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</span></div>{!project.features.length && !dragProduct && <div className="empty-build-hint"><strong>Your space starts here</strong><span>Tap a start and the next corner, or drag a segment.<br />Keep drawing from each end to close the room.</span><div className="quick-start-actions"><button type="button" className="secondary-button empty-import-button" onClick={() => setImportOpen(true)}>Import floor plan</button><button type="button" className="secondary-button empty-import-button" onClick={() => setNewProjectOpen(true)}>Use a room template</button></div></div>}{dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your space' : 'Close your walls before furnishing'}</div>}<div className="canvas-tip">{activeTool === 'wall' ? 'Tap/click corners or drag · Shift for straight walls · Esc to select' : activeTool !== 'select' ? `Click a wall to add a ${activeTool}` : selectedObject ? 'Drag to move · R to rotate · Arrows to nudge' : viewMode === '3d' ? 'Drag empty space to orbit · Right-drag to pan · Scroll to zoom' : 'Right-drag to pan · Scroll to zoom'}</div><div className="placement-controls">{activeTool === 'wall' ? <span className="build-grid-label">Wall grid · 25 cm · Corners snap together</span> : <><button aria-pressed={snap} onClick={() => setSnap(!snap)}>Snap · 10 cm <span className={`toggle ${snap ? 'toggle-on' : ''}`}><span /></span></button><button aria-pressed={wallSnap} onClick={() => setWallSnap(!wallSnap)}>To walls <span className={`toggle ${wallSnap ? 'toggle-on' : ''}`}><span /></span></button></>}</div>{selectedObject && <div className="selection-toolbar"><button title="Rotate selected product" onClick={rotateSelection}><Icon name="rotate" />15°</button><button title="Duplicate selected product" onClick={duplicateSelected}><Icon name="copy" /></button><button title="Delete selected product" onClick={deleteSelected}><Icon name="trash" /></button></div>}</div>
         </main>
 
-        <aside className="sidebar right-sidebar" aria-label="Properties" inert={!rightPanelOpen}>
-          <div className="sidebar-scroll"><div className="inspector-topline"><span className="eyebrow">Inspector</span><button className="icon-button panel-collapse-button" onClick={() => setRightPanelOpen(false)} title="Collapse inspector"><Icon name="panel" /></button></div>{selectedProduct && selectedObject ? <ObjectProperties onClose={clearSelection} object={selectedObject} product={selectedProduct} onPatch={patchObject} onRotate={() => patchObject({ rotation: selectedObject.rotation + Math.PI / 12 })} onDuplicate={duplicateSelected} onDelete={deleteSelected} /> : selectedFeature ? <FeatureProperties project={project} feature={selectedFeature} onPatch={patchFeature} onDelete={deleteFeature} /> : <RoomProperties project={project} onPatch={patchProject} />}{selectedObject && warnings.length > 0 && <section className="inspector-section"><div className="section-label-row"><span>Placement checks</span></div>{warnings.map((warning, index) => <div className="health-row warning" key={index}>{warning.message}</div>)}</section>}</div>
+        <aside className={`sidebar right-sidebar ${inspectorExpanded ? 'inspector-expanded' : 'inspector-collapsed'}`} aria-label="Properties" inert={!rightPanelOpen}>
+          <div className="sidebar-scroll"><div className="inspector-topline"><span className="eyebrow">Inspector</span><button className="inspector-drag-handle" type="button" aria-label={inspectorExpanded ? 'Collapse inspector details' : 'Expand inspector details'} aria-expanded={inspectorExpanded} onPointerDown={startInspectorGesture} onPointerUp={finishInspectorGesture} onPointerCancel={() => { inspectorStartY.current = null }} onClick={toggleInspector}><span /></button><button className="icon-button panel-collapse-button" onClick={() => { setRightPanelOpen(false); setInspectorExpanded(false) }} title="Collapse inspector"><Icon name="panel" /></button></div>{selectedProduct && selectedObject ? <ObjectProperties onClose={clearSelection} object={selectedObject} product={selectedProduct} onPatch={patchObject} onRotate={rotateSelection} onDuplicate={duplicateSelected} onDelete={deleteSelected} /> : selectedCustom && selectedObject ? <CustomObjectProperties object={{ ...selectedObject, custom: selectedCustom }} onClose={clearSelection} onPatch={patchObject} onRotate={rotateSelection} onDuplicate={duplicateSelected} onDelete={deleteSelected} /> : selectedObjects.length > 1 ? <><div className="inspector-heading"><div><span className="eyebrow">Multi-selection</span><h2>{selectedObjects.length} items selected</h2></div><button className="icon-button" title="Clear selection" onClick={clearSelection}><Icon name="close" /></button></div><section className="inspector-section">{selectedObjects.map((object) => <div className="health-row" key={object.id}>{roomItemShape(object)?.name || 'Item'}{object.productId && object.inBasket ? ' · In basket' : ''}</div>)}</section><p className="muted">Shift-click items to select several. Drag any selected item to move the group.</p></> : selectedFeature ? <FeatureProperties project={project} feature={selectedFeature} onPatch={patchFeature} onDelete={deleteFeature} /> : <RoomProperties project={project} onPatch={patchProject} />}{selectedObject && warnings.length > 0 && <section className="inspector-section"><div className="section-label-row"><span>Placement checks</span></div>{warnings.map((warning, index) => <div className="health-row warning" key={index}>{warning.message}</div>)}</section>}</div>
           <div className="sidebar-footer inspector-footer"><button className="footer-link" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /><span>Review shopping list</span><strong>{formatPrice(estimatedTotal)}</strong></button></div>
         </aside>
       </div>
 
-      {!leftPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && <button className="floating-panel-button floating-left" onClick={() => { setLeftPanelOpen(true); if (window.innerWidth <= 1200) setRightPanelOpen(false) }} title="Open catalogue" aria-label="Open catalogue"><Icon name="panel" /><span>Catalogue</span></button>}
-      {!rightPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !renderOpen && <button className="floating-panel-button floating-right" onClick={() => setRightPanelOpen(true)} title="Open inspector" aria-label="Open inspector"><Icon name="panel" /><span>Inspector</span></button>}
+      {rightPanelOpen && inspectorExpanded && <button className="inspector-backdrop" aria-label="Close inspector" onClick={() => { setRightPanelOpen(false); setInspectorExpanded(false) }} />}
+      {selectedObjects.length > 1 && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}><div className="selection-toolbar" role="toolbar" aria-label="Multi-selection controls"><span className="selection-toolbar-title">{selectedObjects.length} items selected</span><button title="Rotate selection 15°" aria-label="Rotate selected items 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate</span></button><button title="Duplicate selected items" aria-label="Duplicate selected items" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button>{selectedObjects.some((object) => object.productId) && <button title={allSelectedProductsInBasket ? 'Remove selected products from basket' : 'Add selected products to basket'} aria-label={allSelectedProductsInBasket ? 'Remove selected products from basket' : 'Add selected products to basket'} aria-pressed={allSelectedProductsInBasket} onClick={toggleBasket}><Icon name="shopping" /><span>{allSelectedProductsInBasket ? 'In basket' : 'Add to basket'}</span></button>}<button title="Delete selected items" aria-label="Delete selected items" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button><button title="Open selection details" aria-label="Open selection details" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div></div>}
+      {selectedObject && selectedProduct && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}>
+        {similarProducts.length > 0 && <div className="similar-strip" role="group" aria-label={`Similar ${selectedProduct.category} products`}><span className="similar-heading">{/sofa/i.test(selectedProduct.category) ? 'Similar sofas' : `Similar ${selectedProduct.category.toLowerCase()}s`}</span>{similarProducts.map((product) => <button className="similar-product" key={product.id} title={`Replace with ${product.name}`} aria-label={`Replace with ${product.name}`} onClick={() => replaceSelected(product.id)}><ProductThumb product={product} compact /><span>{product.name}</span></button>)}</div>}
+        <div className="selection-toolbar" role="toolbar" aria-label="Selected furniture controls"><span className="selection-toolbar-title">{selectedProduct.name}</span><button title="Rotate 15°" aria-label="Rotate selected object 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate 15°</span></button>{selectedCanMirror && <button title="Flip sofa orientation" aria-label="Flip sofa orientation" aria-pressed={Boolean(selectedObject.mirrored)} onClick={flipSelected}><Icon name="arrow" /><span>Flip</span></button>}<button title="Duplicate" aria-label="Duplicate selected object" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button><button title={selectedObject.inBasket ? 'Remove from basket' : 'Add to basket'} aria-label={selectedObject.inBasket ? 'Remove selected object from basket' : 'Add selected object to basket'} aria-pressed={Boolean(selectedObject.inBasket)} onClick={toggleBasket}><Icon name="shopping" /><span>{selectedObject.inBasket ? 'In basket' : 'Add to basket'}</span></button><button title="Delete" aria-label="Delete selected object" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button><button title="Open detailed inspector" aria-label="Open detailed inspector" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div>
+      </div>}
+      {selectedObject && selectedCustom && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}><span className="custom-item-badge">Existing item · Not in basket</span><div className="selection-toolbar" role="toolbar" aria-label="Selected existing furniture controls"><span className="selection-toolbar-title">{selectedCustom.name} · Not for sale</span><button title="Rotate 15°" aria-label="Rotate selected object 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate 15°</span></button><button title="Duplicate" aria-label="Duplicate selected object" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button><button title="Delete" aria-label="Delete selected object" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button><button title="Open detailed inspector" aria-label="Open detailed inspector" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div></div>}
+      {selectedFeature && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}><div className="selection-toolbar" role="toolbar" aria-label="Selected architecture controls"><span className="selection-toolbar-title">{selectedFeature.type === 'wall' ? 'Wall' : selectedFeature.type === 'door' ? 'Door' : 'Window'}</span><button title={`Delete ${selectedFeature.type}`} aria-label={`Delete selected ${selectedFeature.type}`} onClick={deleteFeature}><Icon name="trash" /><span>Delete</span></button><button title="Open detailed inspector" aria-label="Open detailed inspector" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div></div>}
+      {!leftPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <button className="floating-panel-button floating-left" onClick={() => { setLeftPanelOpen(true); if (window.innerWidth <= 1200) { setRightPanelOpen(false); setInspectorExpanded(false) } }} title="Open catalogue" aria-label="Open catalogue"><Icon name="panel" /><span>Catalogue</span></button>}
+      {!rightPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !renderOpen && !customItemOpen && <button className="floating-panel-button floating-right" onPointerDown={startInspectorGesture} onPointerUp={finishInspectorGesture} onPointerCancel={() => { inspectorStartY.current = null }} onClick={toggleInspector} title="Open inspector" aria-label="Open inspector"><Icon name="panel" /><span>Inspector</span></button>}
       {renderOpen && <Suspense fallback={<div className="render-loading" role="status">Loading render studio… <button onClick={() => setRenderOpen(false)}>Back to editor</button></div>}><RenderStudio project={project} onClose={() => setRenderOpen(false)} /></Suspense>}
-      {!renderOpen && !importOpen && notice && <div className="toast" role="status">{notice}</div>}
+      {!renderOpen && !importOpen && !customItemOpen && notice && <div className={`toast ${selectedIds.length > 0 || selectedFeature ? 'toast-with-dock' : ''} ${rightPanelOpen && inspectorExpanded ? 'toast-inspector-expanded' : ''}`} role="status">{notice}</div>}
       {shoppingOpen && <ShoppingDrawer items={shoppingItems} total={estimatedTotal} onClose={() => setShoppingOpen(false)} onExport={exportList} onRequest={() => { setShoppingOpen(false); setRequestOpen(true) }} />}
       {newProjectOpen && <NewProjectModal onClose={() => setNewProjectOpen(false)} onCreate={createProject} />}
       {requestOpen && <PurchaseRequestModal project={project} total={estimatedTotal} onClose={() => setRequestOpen(false)} />}
+      {customItemOpen && <ExistingItemModal onClose={() => setCustomItemOpen(false)} onCreate={addCustomObject} />}
       {importOpen && <PlanImportModal onClose={() => setImportOpen(false)} onImport={importProject} />}
     </div>
   )

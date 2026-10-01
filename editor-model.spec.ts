@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test'
 import { attachOpening, emptyProject, getFloorRegions, fitsFloor, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState } from './src/editor'
 
 import { analyzePlanPixels, createProjectFromPlan, type PlanAnalysis } from './src/planImport'
+import { normalizePlanVisionResult } from './scripts/plan-vision'
 
 function planImage(rects: number[][]) {
   const width = 500, height = 400, data = new Uint8ClampedArray(width * height * 4).fill(255)
@@ -39,9 +40,57 @@ test('plan extraction retains an irregular footprint instead of filling its miss
   expect(project.objects).toEqual([])
   expect(isProject(project)).toBe(true)
   expect(getFloorRegions(project.features)[0].area).toBeLessThan(10 * 10)
-  expect(() => createProjectFromPlan(analysis, NaN, '')).toThrow('measured')
-  expect(() => createProjectFromPlan(analysis, 100, '')).toThrow('measured')
+  expect(() => createProjectFromPlan(analysis, NaN, '')).toThrow('known dimension')
+  expect(() => createProjectFromPlan(analysis, 100, '')).toThrow('known dimension')
   expect(createProjectFromPlan({ ...analysis, openings: [{ ...analysis.walls[0], type: 'unconfirmed' }] }, 10, '').features).toEqual(project.features)
+})
+
+test('Vertex plan output is bounded and retains confidence, room labels, and printed dimensions', () => {
+  const result = normalizePlanVisionResult({
+    walls: [
+      { a: { x: 20, y: 20 }, b: { x: 180, y: 20 }, thickness: 8, confidence: 0.95 },
+      { a: { x: 180, y: 20 }, b: { x: 180, y: 140 }, thickness: 8, confidence: 0.9 },
+      { a: { x: 180, y: 140 }, b: { x: 20, y: 140 }, thickness: 8, confidence: 0.92 },
+      { a: { x: 20, y: 140 }, b: { x: 20, y: 20 }, thickness: 8, confidence: 0.91 },
+    ],
+    openings: [{ a: { x: 60, y: 20 }, b: { x: 80, y: 20 }, thickness: 8, confidence: 0.84, type: 'door' }],
+    roomLabels: [{ name: 'Living room', x: 100, y: 80, confidence: 0.8 }],
+    knownDimensions: [{ a: { x: 20, y: 20 }, b: { x: 180, y: 20 }, meters: 8, label: '8 m', confidence: 0.99 }],
+    confidence: 0.9,
+    warnings: [],
+  }, 200, 160)
+  expect(result.walls).toHaveLength(4)
+  expect(result.openings[0].type).toBe('door')
+  expect(result.roomLabels[0].name).toBe('Living room')
+  expect(result.knownDimensions[0].meters).toBe(8)
+  expect(() => normalizePlanVisionResult({ ...result, walls: [{ ...result.walls[0], a: { x: 201, y: 20 } }] }, 200, 160)).toThrow('outside the image')
+})
+
+test('AI plan geometry stays editable and one known dimension calibrates the whole plan', () => {
+  const analysis: PlanAnalysis = {
+    previewUrl: '', sourceWidth: 200, sourceHeight: 160, pageCount: 1,
+    bounds: { minX: 20, minY: 20, maxX: 180, maxY: 140 },
+    walls: [
+      { a: { x: 20, y: 20 }, b: { x: 180, y: 20 }, horizontal: true, thickness: 8, confidence: 0.95 },
+      { a: { x: 180, y: 20 }, b: { x: 180, y: 140 }, horizontal: false, thickness: 8, confidence: 0.9 },
+      { a: { x: 180, y: 140 }, b: { x: 20, y: 140 }, horizontal: true, thickness: 8, confidence: 0.92 },
+      { a: { x: 20, y: 140 }, b: { x: 20, y: 20 }, horizontal: false, thickness: 8, confidence: 0.91 },
+    ],
+    openings: [{ a: { x: 60, y: 20 }, b: { x: 80, y: 20 }, horizontal: true, thickness: 8, type: 'door', confidence: 0.84 }],
+    roomLabels: [{ name: 'Living room', x: 100, y: 80, confidence: 0.8 }],
+    confidence: 0.9, provider: 'vertex-ai', warnings: [],
+  }
+  const project = createProjectFromPlan(analysis, 6, 'Calibrated plan', { a: { x: 180, y: 20 }, b: { x: 180, y: 140 } })
+  expect(project.planImport?.scaleCalibrated).toBe(true)
+  expect(project.planImport?.provider).toBe('vertex-ai')
+  expect(getFloorRegions(project.features)[0].area).toBeCloseTo(48)
+  expect(project.features.find((feature) => feature.type === 'door')?.wallId).toBeTruthy()
+  expect(project.roomLabels?.[0]).toMatchObject({ name: 'Living room', x: 0, z: 0 })
+  const corners: Point[] = [{ x: 100, z: 0 }, { x: 200, z: 100 }, { x: 100, z: 200 }, { x: 0, z: 100 }]
+  const sketch: PlanAnalysis = { ...analysis, bounds: { minX: 0, minY: 0, maxX: 200, maxY: 200 }, walls: corners.map((a, index) => { const b = corners[(index + 1) % corners.length]; return { a: { x: a.x, y: a.z }, b: { x: b.x, y: b.z }, horizontal: true, thickness: 8 } }), openings: [], roomLabels: [] }
+  const diagonalRoom = createProjectFromPlan(sketch, Math.SQRT2 * 100 / 25, 'Sketch', { a: { x: 100, y: 0 }, b: { x: 200, y: 100 } })
+  expect(getFloorRegions(diagonalRoom.features)).toHaveLength(1)
+  expect(diagonalRoom.features.some((feature) => feature.type === 'wall' && Math.abs(feature.rotation) > 0.1)).toBe(true)
 })
 
 test('plan openings use their actual supporting wall and preserve measured width', () => {
@@ -173,6 +222,15 @@ test('openings attach to a drawn wall and follow it when moved or rotated', () =
   expect(getFloorRegions([...p.features, door])).toHaveLength(1)
 })
 
+test('user-owned room objects fit by measured dimensions and stay outside the basket', () => {
+  const owned = { id: 'owned', custom: { name: 'Existing chair', width: 80, depth: 90, height: 85, color: '#bca58a', kind: 'furniture' as const }, x: 0, z: 0, rotation: 0, inBasket: false }
+  const project = { ...room(), objects: [owned] }
+  expect(isProject(project)).toBe(true)
+  expect(fitsFloor(owned, project)).toBe(true)
+  expect(overlaps(owned, { ...owned, id: 'other', x: 0.2 })).toBe(true)
+  expect(isProject({ ...project, objects: [{ ...owned, inBasket: true }] })).toBe(false)
+})
+
 test('furniture fits actual enclosed geometry and keeps authoritative dimensions', () => {
   const p = room()
   expect(fitsFloor(sofa, p)).toBe(true)
@@ -189,10 +247,20 @@ test('legacy rectangular projects migrate once and keep their furniture and open
   const old = { name: 'Saved room', roomType: 'Living room', width: 4, length: 5, ceilingHeight: 2.8, floorMaterial: 'Natural oak', wallMaterial: 'Warm white', objects: [sofa], features: [{ id: 'door', type: 'door' as const, x: 0, z: 2.5, rotation: 0, width: 0.9, height: 2.1 }] }
   const p = migrateProject(old)
   expect(area(p)).toBeCloseTo(20)
-  expect(p.objects).toEqual([sofa])
+  expect(p.objects).toEqual([{ ...sofa, inBasket: false }])
   expect(p.features.find((f) => f.id === 'door')?.wallId).toBeTruthy()
   expect(migrateProject(p)).toEqual(p)
   expect(isProject(p)).toBe(true)
   expect(isProject({ ...p, width: Infinity })).toBe(false)
   expect(isProject({ ...p, objects: [{ ...sofa, productId: 'unknown' }] })).toBe(false)
+})
+
+test('schema v2 room objects migrate as out of basket and preserve an explicit basket choice', () => {
+  const old = { ...room(), schemaVersion: 2 as const, objects: [sofa] }
+  const migrated = migrateProject(old)
+  expect(migrated.schemaVersion).toBe(3)
+  expect(migrated.objects[0].inBasket).toBe(false)
+  const optedIn = { ...migrated, objects: [{ ...migrated.objects[0], inBasket: true }] }
+  expect(migrateProject(optedIn).objects[0].inBasket).toBe(true)
+  expect(isProject({ ...migrated, objects: [{ ...migrated.objects[0], inBasket: 'yes' as never }] })).toBe(false)
 })

@@ -1,6 +1,6 @@
 import { Component, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Environment, OrbitControls, useTexture } from '@react-three/drei'
+import { Environment, OrbitControls, RoundedBox, useTexture } from '@react-three/drei'
 import { ACESFilmicToneMapping, Matrix4, Vector3 } from 'three'
 import { DenoiseMaterial, WebGLPathTracer } from 'three-gpu-pathtracer'
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js'
@@ -175,7 +175,12 @@ function Interior({ project, ceiling }: { project: ProjectState; ceiling: boolea
       const inside = regions.some((r) => pointInPolygon({ x: f.x + nx * 0.2, z: f.z + nz * 0.2 }, r.points)) ? 1 : -1
       return <rectAreaLight key={f.id} position={[f.x + nx * inside * offset, (f.sillHeight || 0) + f.height / 2, f.z + nz * inside * offset]} rotation={[0, f.rotation + (inside === 1 ? Math.PI : 0), 0]} width={f.width * 0.9} height={f.height * 0.9} intensity={5} color="#ffedcf" />
     })}
-    {project.objects.map((o) => <group key={o.id} position={[o.x, 0, o.z]} rotation={[0, o.rotation, 0]}><ProductModel product={productById.get(o.productId)!} variantId={o.variantId} /></group>)}
+    {project.objects.map((o) => {
+      const product = o.productId ? productById.get(o.productId) : null
+      if (product) return <group key={o.id} position={[o.x, 0, o.z]} rotation={[0, o.rotation, 0]} scale={[o.mirrored ? -1 : 1, 1, 1]}><ProductModel product={product} variantId={o.variantId} /></group>
+      if (!o.custom) return null
+      return <group key={o.id} position={[o.x, 0, o.z]} rotation={[0, o.rotation, 0]} scale={[o.mirrored ? -1 : 1, 1, 1]}><RoundedBox position={[0, o.custom.height / 200, 0]} args={[o.custom.width / 100, o.custom.height / 100, o.custom.depth / 100]} radius={Math.min(0.035, o.custom.height / 400)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={o.custom.color} roughness={0.9} /></RoundedBox></group>
+    })}
   </>
 }
 

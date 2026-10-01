@@ -3,7 +3,7 @@ import SurfaceMaterial from './SurfaceMaterial'
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import { Edges, Environment, Grid, Html, Line } from '@react-three/drei'
 import { DoubleSide, Path, Plane, Raycaster, Shape, Vector2, Vector3 } from 'three'
-import { fitsFloor, floorColors, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
+import { fitsFloor, floorColors, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
 
 const floor = new Plane(new Vector3(0, 1, 0), 0)
 const dragType = 'application/x-forma-product'
@@ -131,12 +131,12 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
         event.stopPropagation()
         const p = event.ray.intersectPlane(floor, new Vector3())
         if (!p) return
-        const next = { x: Math.max(-project.width / 2, Math.min(project.width / 2, Math.round(p.x * 4) / 4)), z: Math.max(-project.length / 2, Math.min(project.length / 2, Math.round(p.z * 4) / 4)) }
+        const next = snapBuildPoint({ x: p.x, z: p.z }, project, wall.id)
         if (project.features.filter((f) => f.type === 'wall').some((f) => { const ends = wallEndpoints(f); return ends.some((end, i) => Math.hypot(end.x - drag.current!.x, end.z - drag.current!.z) < 0.0001 && Math.hypot(ends[1 - i].x - next.x, ends[1 - i].z - next.z) < 0.25) })) return
         onMoveEndpoint(wall.id, drag.current, next)
         drag.current = next
       }} onPointerUp={finish} onPointerCancel={finish}>
-      <sphereGeometry args={[0.11, 12, 8]} /><meshBasicMaterial color="#5a8161" />
+      <sphereGeometry args={[0.18, 16, 12]} /><meshBasicMaterial color="#5a8161" />
     </mesh>)}
   </group>
 }
@@ -145,7 +145,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
   project: ProjectState; viewMode: '2d' | '3d'; gridVisible: boolean; tool: string; snap: boolean; wallSnap: boolean; lightingMode: EditorLightingMode
   onClear: () => void; onPlace: (type: 'wall' | 'door' | 'window', x: number, z: number) => void
   onDrop: (id: string, x: number, z: number) => void
-  onDrawWall: (x: number, z: number, endX: number, endZ: number) => void
+  onDrawWall: (x: number, z: number, endX: number, endZ: number) => boolean
 }) {
   const { camera, gl, invalidate } = useThree()
   const readyFrames = useRef(0)
@@ -160,7 +160,11 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
   const [ghost, setGhost] = useState<{ id: string; x: number; z: number; valid: boolean } | null>(null)
   const wallStart = useRef<Point | null>(null)
   const [wallEnd, setWallEnd] = useState<Point | null>(null)
+  const previewLength = wallStart.current && wallEnd ? Math.hypot(wallEnd.x - wallStart.current.x, wallEnd.z - wallStart.current.z) : 0
+  const previewWall = wallStart.current && wallEnd && previewLength >= 0.25 ? wallFromPoints('__preview__', wallStart.current, wallEnd, project.ceilingHeight) : null
+  const previewClosesRoom = previewWall ? getFloorRegions([...project.features, previewWall]).length > regions.length : false
   const capture = useRef<{ element: Element; id: number } | null>(null)
+  const wallGesture = useRef<{ anchorOnly: boolean; moved: boolean; x: number; y: number; id: number } | null>(null)
   const current = useRef({ project, snap, wallSnap, onDrop, regions })
   current.current = { project, snap, wallSnap, onDrop, regions }
   useEffect(() => {
@@ -195,7 +199,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     return () => { canvas.removeEventListener('dragover', over); canvas.removeEventListener('dragleave', leave); canvas.removeEventListener('drop', drop); window.removeEventListener('dragend', leave) }
   }, [camera, gl, invalidate])
   const cancelWall = () => {
-    wallStart.current = null; setWallEnd(null)
+    wallStart.current = null; wallGesture.current = null; setWallEnd(null)
     if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
   }
   useEffect(() => {
@@ -214,11 +218,17 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     return snapBuildPoint(p, project)
   }
   const finishWall = (event: ThreeEvent<PointerEvent>) => {
-    if (!wallStart.current) return
+    const gesture = wallGesture.current
+    if (!wallStart.current || !gesture || gesture.id !== event.pointerId) return
     event.stopPropagation()
     const start = wallStart.current, end = wallPoint(event)
-    if (end && Math.hypot(end.x - start.x, end.z - start.z) >= 0.25) onDrawWall(start.x, start.z, end.x, end.z)
-    cancelWall()
+    if ((!gesture.anchorOnly || gesture.moved) && end && Math.hypot(end.x - start.x, end.z - start.z) >= 0.25) {
+      onDrawWall(start.x, start.z, end.x, end.z)
+      wallStart.current = end
+      setWallEnd(end)
+    } else setWallEnd(start)
+    wallGesture.current = null
+    if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
   }
   return <>
     <color attach="background" args={[editor3d ? '#e8e4d9' : '#f4f3ef']} />
@@ -234,16 +244,32 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     })}
     <mesh position={[0, -0.035, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow
       onClick={(event) => { if (tool === 'select') { event.stopPropagation(); onClear() } else if (tool === 'door' || tool === 'window') { event.stopPropagation(); onPlace(tool, event.point.x, event.point.z) } }}
-      onPointerDown={(event) => { if (tool !== 'wall' || event.button !== 0) return; event.stopPropagation(); wallStart.current = wallPoint(event); setWallEnd(wallStart.current); capture.current = { element: event.target as Element, id: event.pointerId }; capture.current.element.setPointerCapture?.(event.pointerId) }}
-      onPointerMove={(event) => { if (wallStart.current) { event.stopPropagation(); setWallEnd(wallPoint(event)) } }} onPointerUp={finishWall} onPointerCancel={cancelWall}>
+      onPointerDown={(event) => {
+        if (tool !== 'wall' || event.button !== 0) return
+        const point = wallPoint(event)
+        if (!point) return
+        event.stopPropagation()
+        const anchorOnly = !wallStart.current
+        if (anchorOnly) wallStart.current = point
+        setWallEnd(point)
+        wallGesture.current = { anchorOnly, moved: false, x: event.clientX, y: event.clientY, id: event.pointerId }
+        capture.current = { element: event.target as Element, id: event.pointerId }
+        capture.current.element.setPointerCapture?.(event.pointerId)
+      }}
+      onPointerMove={(event) => {
+        const gesture = wallGesture.current
+        if (gesture?.id === event.pointerId && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 6) gesture.moved = true
+        if (wallStart.current) { event.stopPropagation(); setWallEnd(wallPoint(event)) }
+      }} onPointerUp={finishWall} onPointerCancel={cancelWall}>
       <planeGeometry args={[project.width, project.length]} /><meshStandardMaterial color="#eeeee7" roughness={1} />
     </mesh>
     {regions.map((region) => <FloorSurface key={region.id} region={region} color={floorColors[project.floorMaterial]} finish={viewMode === '3d' ? project.floorMaterial : undefined} />)}
+    {viewMode === '2d' && project.roomLabels?.map((label) => <Html key={label.id} center position={[label.x, 0.12, label.z]} style={{ pointerEvents: 'none' }}><span className="room-name-tag">{label.name}</span></Html>)}
     {(gridVisible || tool === 'wall' || !regions.length) && <Grid position={[0, 0.005, 0]} args={[project.width, project.length]} cellSize={0.25} sectionSize={1} cellThickness={0.5} sectionThickness={0.9} cellColor="#d0d4c8" sectionColor="#adb8a5" fadeDistance={70} fadeStrength={1} raycast={() => null} />}
     {wallStart.current && wallEnd && <>
-      <Line points={[[wallStart.current.x, 0.14, wallStart.current.z], [wallEnd.x, 0.14, wallEnd.z]]} color="#557e61" lineWidth={6} raycast={() => null} />
-      <mesh position={[wallEnd.x, 0.16, wallEnd.z]} raycast={() => null}><sphereGeometry args={[0.1, 12, 8]} /><meshBasicMaterial color="#557e61" /></mesh>
-      <Html center position={[(wallStart.current.x + wallEnd.x) / 2, 0.3, (wallStart.current.z + wallEnd.z) / 2]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{Math.hypot(wallEnd.x - wallStart.current.x, wallEnd.z - wallStart.current.z).toFixed(2)} m</span></Html>
+      <Line points={[[wallStart.current.x, 0.14, wallStart.current.z], [wallEnd.x, 0.14, wallEnd.z]]} color={previewClosesRoom ? '#32804c' : '#557e61'} lineWidth={6} raycast={() => null} />
+      <mesh position={[wallEnd.x, 0.16, wallEnd.z]} raycast={() => null}><sphereGeometry args={[0.1, 12, 8]} /><meshBasicMaterial color={previewClosesRoom ? '#32804c' : '#557e61'} /></mesh>
+      {previewLength >= 0.25 && <Html center position={[(wallStart.current.x + wallEnd.x) / 2, 0.3, (wallStart.current.z + wallEnd.z) / 2]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{previewLength.toFixed(2)} m{previewClosesRoom ? ' · Room closes' : ''}</span></Html>}
     </>}
     {ghost && (() => { const p = productById.get(ghost.id)!; return <group position={[ghost.x, 0.035, ghost.z]}><mesh raycast={() => null}><boxGeometry args={[p.width / 100, 0.025, p.depth / 100]} /><meshBasicMaterial color={ghost.valid ? '#729982' : '#bd7868'} transparent opacity={0.5} /></mesh><Html center position={[0, 0.4, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{ghost.valid ? `Release to place · ${p.width} × ${p.depth} cm` : 'Place inside a closed room'}</span></Html></group> })()}
   </>

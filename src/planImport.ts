@@ -2,8 +2,20 @@ import { attachOpening, clamp, emptyProject, isProject, wallFromPoints, type Poi
 
 export type PixelPoint = { x: number; y: number }
 type PixelBounds = { minX: number; minY: number; maxX: number; maxY: number }
-export type PixelWall = { a: PixelPoint; b: PixelPoint; horizontal: boolean; thickness: number }
+export type PixelWall = { a: PixelPoint; b: PixelPoint; horizontal: boolean; thickness: number; confidence?: number }
 export type PixelOpening = PixelWall & { type: 'door' | 'window' | 'unconfirmed' | 'ignore'; suggestedType?: 'door' | 'window' }
+export type PixelRoomLabel = { name: string; x: number; y: number; confidence: number }
+export type PixelKnownDimension = { a: PixelPoint; b: PixelPoint; meters: number; label: string; confidence: number }
+export type PlanDetectionRequest = { imageData: string; mimeType: 'image/png'; width: number; height: number }
+export type PlanDetectionResult = {
+  walls: Omit<PixelWall, 'horizontal'>[]
+  openings: (Omit<PixelWall, 'horizontal'> & { type: 'door' | 'window' | 'unconfirmed' })[]
+  roomLabels: PixelRoomLabel[]
+  knownDimensions: PixelKnownDimension[]
+  confidence: number
+  warnings: string[]
+}
+export type PlanDetectionProvider = (request: PlanDetectionRequest) => Promise<PlanDetectionResult>
 type Band = { coordinate: number; last: number; start: number; end: number }
 
 export type PlanAnalysis = {
@@ -14,6 +26,10 @@ export type PlanAnalysis = {
   bounds: PixelBounds
   walls: PixelWall[]
   openings: PixelOpening[]
+  roomLabels?: PixelRoomLabel[]
+  knownDimensions?: PixelKnownDimension[]
+  confidence?: number
+  provider?: 'local' | 'vertex-ai'
   warnings: string[]
 }
 
@@ -183,32 +199,89 @@ export function analyzePlanPixels(image: Pick<ImageData, 'data' | 'width' | 'hei
   }
   const points = walls.flatMap((wall) => [wall.a, wall.b])
   const bounds = { minX: Math.min(...points.map((p) => p.x)), minY: Math.min(...points.map((p) => p.y)), maxX: Math.max(...points.map((p) => p.x)), maxY: Math.max(...points.map((p) => p.y)) }
-  return { walls, openings, bounds, warnings: ['WIP: import the detected result as-is, or optionally adjust the overlay. Thin, faint partitions are recovered when connected to detected walls; diagonal and outline-only walls can still be missed.', 'Suggested doors/windows are used automatically. Gaps without a suggestion stay open. Tiny fragments are skipped, and openings are fitted to their supporting walls.', 'Enter the measured width between the dashed guides. Wall thickness is estimated from pixels at that scale (supported range 2–200 cm). Heights and sills use defaults. Furniture is excluded.'] }
+  return { walls, openings, bounds, warnings: ['WIP: import the detected result as-is, or optionally adjust the overlay. Thin, faint partitions are recovered when connected to detected walls; diagonal and outline-only walls can still be missed.', 'Suggested doors/windows are used automatically. Gaps without a suggestion stay open. Tiny fragments are skipped, and openings are fitted to their supporting walls.', 'Enter one known dimension. The full detected width between dashed guides is the default; Set scale can use any two points. Wall thickness is estimated from pixels at that scale (supported range 2–200 cm). Heights and sills use defaults. Furniture is excluded.'] }
 }
 
-export async function analyzePlanFile(file: File): Promise<PlanAnalysis> {
+function validateDetection(result: PlanDetectionResult, width: number, height: number) {
+  if (!result || !Array.isArray(result.walls) || !result.walls.length || result.walls.length > 120 || !Array.isArray(result.openings) || !Array.isArray(result.roomLabels) || !Array.isArray(result.knownDimensions)) throw new Error('The AI result did not contain a usable floor plan.')
+  const point = (value: PixelPoint) => {
+    if (![value?.x, value?.y].every(Number.isFinite) || value.x < 0 || value.y < 0 || value.x > width || value.y > height) throw new Error('The AI result contains a point outside the image.')
+    return { x: value.x, y: value.y }
+  }
+  const segment = (value: Omit<PixelWall, 'horizontal'>) => {
+    const a = point(value.a), b = point(value.b), size = Math.hypot(b.x - a.x, b.y - a.y)
+    if (size < 8) throw new Error('The AI result contains a segment shorter than 8 pixels.')
+    return { a, b, horizontal: Math.abs(b.x - a.x) >= Math.abs(b.y - a.y), thickness: clamp(value.thickness, 2, 200), confidence: clamp(value.confidence ?? result.confidence, 0, 1) }
+  }
+  const walls = result.walls.map(segment)
+  const openings = result.openings.map((opening) => ({ ...segment(opening), type: opening.type }))
+  const roomLabels = result.roomLabels.slice(0, 40).filter((label) => typeof label.name === 'string' && label.name.trim().length > 0 && label.name.length <= 80).map((label) => ({ ...point({ x: label.x, y: label.y }), name: label.name.trim(), confidence: clamp(label.confidence, 0, 1) }))
+  const knownDimensions = result.knownDimensions.slice(0, 20).map((dimension) => {
+    const a = point(dimension.a), b = point(dimension.b)
+    if (Math.hypot(b.x - a.x, b.y - a.y) < 8 || !Number.isFinite(dimension.meters) || dimension.meters < 0.25 || dimension.meters > 38 || typeof dimension.label !== 'string') throw new Error('The AI returned an invalid scale reference.')
+    return { a, b, meters: dimension.meters, label: dimension.label.slice(0, 80), confidence: clamp(dimension.confidence, 0, 1) }
+  })
+  const points = walls.flatMap((wall) => [wall.a, wall.b])
+  return { walls, openings, roomLabels, knownDimensions, bounds: { minX: Math.min(...points.map((p) => p.x)), minY: Math.min(...points.map((p) => p.y)), maxX: Math.max(...points.map((p) => p.x)), maxY: Math.max(...points.map((p) => p.y)) }, confidence: clamp(result.confidence, 0, 1), warnings: Array.isArray(result.warnings) ? result.warnings.filter((warning) => typeof warning === 'string').slice(0, 12) : [] }
+}
+
+export async function analyzePlanFile(file: File, provider?: PlanDetectionProvider): Promise<PlanAnalysis> {
   const { canvas, pageCount } = await fileCanvas(file)
-  const result = analyzePlanPixels(canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height))
-  return { ...result, previewUrl: canvas.toDataURL('image/png'), sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, warnings: [...result.warnings, ...(pageCount > 1 ? ['Only the first PDF page was analyzed.'] : [])] }
+  const previewUrl = canvas.toDataURL('image/png'), suffix = pageCount > 1 ? ['Only the first PDF page was analyzed.'] : []
+  if (provider) {
+    try {
+      const result = validateDetection(await provider({ imageData: previewUrl.slice(previewUrl.indexOf(',') + 1), mimeType: 'image/png', width: canvas.width, height: canvas.height }), canvas.width, canvas.height)
+      return { ...result, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'vertex-ai', warnings: [...result.warnings, 'AI-detected geometry and dimensions are approximate. Review the overlay and calibrate the scale.', ...suffix] }
+    } catch (reason) {
+      try {
+        const local = analyzePlanPixels(canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height))
+        const message = reason instanceof Error ? reason.message : 'AI detection is unavailable.'
+        return { ...local, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'local', warnings: [`AI detection unavailable; used the local axis-aligned fallback. ${message}`, ...local.warnings, ...suffix] }
+      } catch (fallbackError) {
+        throw new Error(`${reason instanceof Error ? reason.message : 'AI detection is unavailable.'} The local fallback could not detect this plan: ${fallbackError instanceof Error ? fallbackError.message : 'check the image.'}`)
+      }
+    }
+  }
+  const local = analyzePlanPixels(canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height))
+  return { ...local, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'local', warnings: [...local.warnings, ...suffix] }
 }
 
-export function createProjectFromPlan(analysis: PlanAnalysis, realWidth: number, name: string): ProjectState {
+export type PlanCalibration = { a: PixelPoint; b: PixelPoint }
+
+export function createProjectFromPlan(analysis: PlanAnalysis, realDistance: number, name: string, calibration?: PlanCalibration): ProjectState {
   const planWidth = analysis.bounds.maxX - analysis.bounds.minX, planHeight = analysis.bounds.maxY - analysis.bounds.minY
-  if (!Number.isFinite(realWidth) || realWidth < 2 || realWidth > 38 || planWidth <= 0 || planHeight <= 0) throw new Error('Enter a measured plan width between 2 and 38 metres.')
-  if (!analysis.walls.length || [...analysis.walls, ...analysis.openings].some((wall) => ![wall.a.x, wall.a.y, wall.b.x, wall.b.y, wall.thickness].every(Number.isFinite) || length(wall) < 8)) throw new Error('Every segment needs ordered endpoints at least 8 pixels apart.')
-  const scale = realWidth / planWidth, project = emptyProject(name || 'Imported plan')
-  if (planHeight * scale > 38) throw new Error('The scaled drawing exceeds the 40 m build grid. Import a smaller area.')
+  const pixelLength = (segment: PixelWall) => Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y)
+  const calibrationPixels = calibration ? Math.hypot(calibration.b.x - calibration.a.x, calibration.b.y - calibration.a.y) : planWidth
+  if (!Number.isFinite(realDistance) || realDistance < 0.25 || realDistance > 38 || calibrationPixels < 8 || planWidth <= 0 || planHeight <= 0) throw new Error('Enter a known dimension between 0.25 and 38 metres and select a clear measurement line.')
+  if (!analysis.walls.length || [...analysis.walls, ...analysis.openings].some((wall) => ![wall.a.x, wall.a.y, wall.b.x, wall.b.y, wall.thickness].every(Number.isFinite) || pixelLength(wall) < 8)) throw new Error('Every segment needs endpoints at least 8 pixels apart.')
+  const scale = realDistance / calibrationPixels, scaledWidth = planWidth * scale, scaledHeight = planHeight * scale, project = emptyProject(name || 'Imported plan')
+  if (scaledWidth > 38 || scaledHeight > 38) throw new Error('The calibrated drawing exceeds the 40 m build grid. Import a smaller area.')
   const toPoint = (p: PixelPoint): Point => ({ x: (p.x - (analysis.bounds.minX + analysis.bounds.maxX) / 2) * scale, z: (p.y - (analysis.bounds.minY + analysis.bounds.maxY) / 2) * scale })
-  project.width = Math.max(12, realWidth + 2); project.length = Math.max(12, planHeight * scale + 2)
+  project.width = Math.max(12, scaledWidth + 2); project.length = Math.max(12, scaledHeight + 2)
+  project.roomType = analysis.roomLabels?.[0]?.name || 'Imported plan'
+  project.planImport = { provider: analysis.provider || 'local', confidence: clamp(analysis.confidence ?? (analysis.provider === 'vertex-ai' ? 0.7 : 0.4), 0, 1), scaleCalibrated: true }
+  project.roomLabels = (analysis.roomLabels || []).map((label, index) => { const point = toPoint(label); return { id: `imported-room-label-${index}`, name: label.name, x: point.x, z: point.z, confidence: clamp(label.confidence, 0, 1) } }).filter((label) => Math.abs(label.x) <= project.width / 2 && Math.abs(label.z) <= project.length / 2)
   const accepted = analysis.openings.map((opening) => ({ ...opening, type: opening.type === 'unconfirmed' ? opening.suggestedType || 'ignore' : opening.type })).filter((opening) => opening.type === 'door' || opening.type === 'window')
-  const walls = joinSolidBands([...analysis.walls.map((wall) => ({ ...wall, a: { ...wall.a }, b: { ...wall.b } })), ...accepted.map((opening) => ({ ...opening }))]).filter((wall) => length(wall) * scale >= 0.25)
+  const walls = analysis.provider === 'vertex-ai'
+    ? analysis.walls.map((wall) => ({ ...wall, a: { ...wall.a }, b: { ...wall.b } })).filter((wall) => pixelLength(wall) * scale >= 0.25)
+    : joinSolidBands([...analysis.walls.map((wall) => ({ ...wall, a: { ...wall.a }, b: { ...wall.b } })), ...accepted.map((opening) => ({ ...opening }))]).filter((wall) => length(wall) * scale >= 0.25)
+  if (!walls.length) throw new Error('The selected scale makes every detected wall too short to import.')
   project.features = walls.map((wall, index) => ({ ...wallFromPoints(`imported-wall-${index}`, toPoint(wall.a), toPoint(wall.b), project.ceilingHeight), thickness: clamp(wall.thickness * scale, 0.02, 2) }))
-  for (const [index, opening] of accepted.entries()) {
-    const wallIndex = walls.findIndex((wall) => wall.horizontal === opening.horizontal && Math.abs(across(wall) - across(opening)) <= wall.thickness && along(opening, opening.a) >= along(wall, wall.a) - 1 && along(opening, opening.b) <= along(wall, wall.b) + 1)
-    if (wallIndex < 0 || project.features[wallIndex].width < 0.5 || project.features.length >= 200) continue
-    const wall = project.features[wallIndex], centre = toPoint({ x: (opening.a.x + opening.b.x) / 2, y: (opening.a.y + opening.b.y) / 2 })
-    const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', wallId: wall.id, x: centre.x, z: centre.z, rotation: wall.rotation, width: length(opening) * scale, height: opening.type === 'door' ? 2.1 : 1.35, sillHeight: opening.type === 'window' ? 0.85 : 0 }, project)
-    project.features.push(feature)
+  if (analysis.provider === 'vertex-ai') {
+    for (const [index, opening] of accepted.entries()) {
+      if (project.features.length >= 200) break
+      const centre = toPoint({ x: (opening.a.x + opening.b.x) / 2, y: (opening.a.y + opening.b.y) / 2 })
+      const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', x: centre.x, z: centre.z, rotation: 0, width: pixelLength(opening) * scale, height: opening.type === 'door' ? 2.1 : 1.35, sillHeight: opening.type === 'window' ? 0.85 : 0 }, project)
+      if (feature.wallId && Math.hypot(feature.x - centre.x, feature.z - centre.z) <= 0.65) project.features.push(feature)
+    }
+  } else {
+    for (const [index, opening] of accepted.entries()) {
+      const wallIndex = walls.findIndex((wall) => wall.horizontal === opening.horizontal && Math.abs(across(wall) - across(opening)) <= wall.thickness && along(opening, opening.a) >= along(wall, wall.a) - 1 && along(opening, opening.b) <= along(wall, wall.b) + 1)
+      if (wallIndex < 0 || project.features[wallIndex].width < 0.5 || project.features.length >= 200) continue
+      const wall = project.features[wallIndex], centre = toPoint({ x: (opening.a.x + opening.b.x) / 2, y: (opening.a.y + opening.b.y) / 2 })
+      const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', wallId: wall.id, x: centre.x, z: centre.z, rotation: wall.rotation, width: length(opening) * scale, height: opening.type === 'door' ? 2.1 : 1.35, sillHeight: opening.type === 'window' ? 0.85 : 0 }, project)
+      project.features.push(feature)
+    }
   }
   if (!isProject(project) || walls.some((wall) => [wall.a, wall.b].some((p) => { const v = toPoint(p); return Math.abs(v.x) > project.width / 2 || Math.abs(v.z) > project.length / 2 }))) throw new Error('The detected geometry exceeds editor limits. Check the scale or use a clearer drawing.')
   return project

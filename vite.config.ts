@@ -4,5 +4,5 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   optimizeDeps: { entries: ['index.html'] },
-  server: { proxy: { '/api/admin': 'http://127.0.0.1:8787' } },
+  server: { proxy: { '/api/admin': 'http://127.0.0.1:8787', '/api/planner': 'http://127.0.0.1:8787' } },
 })
