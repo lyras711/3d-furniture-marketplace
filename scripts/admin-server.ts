@@ -183,8 +183,10 @@ function recordId(raw: string) {
 function projectPayload(value: unknown): ProjectState {
   if (!isProject(value) || !value.name.trim() || value.name.trim().length > 80) throw new ApiError(400, 'A valid project is required; project names must be 1–80 characters.')
   const project = migrateProject({ ...value, name: value.name.trim() })
-  if (Buffer.byteLength(JSON.stringify(project)) > 850_000) throw new ApiError(413, 'This project is too large to save to your profile.')
-  return project
+  const serialized = JSON.stringify(project)
+  if (Buffer.byteLength(serialized) > 850_000) throw new ApiError(413, 'This project is too large to save to your profile.')
+  // Editor helpers clear fields by setting them to undefined; Firestore rejects undefined, so store the JSON form.
+  return JSON.parse(serialized) as ProjectState
 }
 
 function projectSummary(id: string, data: Record<string, unknown>) {
