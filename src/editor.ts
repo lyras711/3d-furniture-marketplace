@@ -1,12 +1,17 @@
 import { products, type Product } from './catalog'
 
 export type Point = { x: number; z: number }
-export type CustomRoomItem = { name: string; width: number; depth: number; height: number; color: string; kind: 'furniture' | 'rug' }
-export type RoomObject = { id: string; productId?: string; variantId?: string; custom?: CustomRoomItem; x: number; z: number; rotation: number; inBasket?: boolean; mirrored?: boolean }
+export type CustomRoomItem = { name: string; width: number; depth: number; height: number; color: string; kind: 'furniture' | 'rug' | 'wall' }
+/** Wall-mounted items also carry `wallId`/`wallOffset` (metres from the wall centre), `wallSide` (+1 = along the wall normal) and `elevation` (metres from floor to the item's bottom). Their x/z/rotation are derived from the wall. */
+export type RoomObject = { id: string; productId?: string; variantId?: string; custom?: CustomRoomItem; x: number; z: number; rotation: number; inBasket?: boolean; mirrored?: boolean; wallId?: string; wallOffset?: number; wallSide?: 1 | -1; elevation?: number }
+export type DoorStyle = 'hinged' | 'double' | 'sliding' | 'opening'
+export type WindowStyle = 'casement' | 'fixed' | 'balcony'
 export type RoomFeature = {
   id: string; type: 'wall' | 'door' | 'window'; x: number; z: number; rotation: number
   width: number; height: number; sillHeight?: number; wall?: 'north' | 'south' | 'east' | 'west'
   wallId?: string; wallOffset?: number; thickness?: number
+  /** Doors and windows only. Missing values mean a hinged door or a casement window. `hinge` is the wall-local end (left = −X); `swing` is relative to the room the opening belongs to. */
+  style?: DoorStyle | WindowStyle; hinge?: 'left' | 'right'; swing?: 'in' | 'out'
 }
 export type ProjectRoomLabel = { id: string; name: string; x: number; z: number; confidence: number }
 export type PlanImportInfo = { provider: 'local' | 'vertex-ai'; confidence: number; scaleCalibrated: boolean }
@@ -27,13 +32,14 @@ export function roomItemShape(object: RoomObject): RoomItemShape | null {
 function isCustomRoomItem(value: unknown): value is CustomRoomItem {
   if (!value || typeof value !== 'object') return false
   const item = value as CustomRoomItem
-  return typeof item.name === 'string' && item.name.trim().length > 0 && item.name.length <= 80 && [item.width, item.depth].every((dimension) => Number.isFinite(dimension) && dimension >= 1 && dimension <= 2000) && Number.isFinite(item.height) && item.height >= 1 && item.height <= 600 && /^#[\da-f]{6}$/i.test(item.color) && ['furniture', 'rug'].includes(item.kind)
+  return typeof item.name === 'string' && item.name.trim().length > 0 && item.name.length <= 80 && [item.width, item.depth].every((dimension) => Number.isFinite(dimension) && dimension >= 1 && dimension <= 2000) && Number.isFinite(item.height) && item.height >= 1 && item.height <= 600 && /^#[\da-f]{6}$/i.test(item.color) && ['furniture', 'rug', 'wall'].includes(item.kind)
 }
 function isRoomObject(value: unknown): value is RoomObject {
   if (!value || typeof value !== 'object') return false
   const item = value as RoomObject, catalogItem = typeof item.productId === 'string' && productById.has(item.productId) && item.custom === undefined && (item.variantId === undefined || typeof item.variantId === 'string')
   const customItem = item.productId === undefined && item.variantId === undefined && isCustomRoomItem(item.custom) && item.inBasket !== true
-  return typeof item.id === 'string' && (catalogItem || customItem) && (item.inBasket === undefined || typeof item.inBasket === 'boolean') && (item.mirrored === undefined || typeof item.mirrored === 'boolean') && [item.x, item.z, item.rotation].every(Number.isFinite)
+  const wallFields = (item.wallId === undefined || typeof item.wallId === 'string') && (item.wallOffset === undefined || Number.isFinite(item.wallOffset)) && (item.wallSide === undefined || item.wallSide === 1 || item.wallSide === -1) && (item.elevation === undefined || (Number.isFinite(item.elevation) && item.elevation >= 0 && item.elevation <= 6))
+  return typeof item.id === 'string' && (catalogItem || customItem) && wallFields && (item.inBasket === undefined || typeof item.inBasket === 'boolean') && (item.mirrored === undefined || typeof item.mirrored === 'boolean') && [item.x, item.z, item.rotation].every(Number.isFinite)
 }
 export const floorColors: Record<string, string> = { 'Natural oak': '#cfb58f', 'Pale oak': '#e1d3b8', 'Warm concrete': '#c9c6bd' }
 export const wallColors: Record<string, string> = { 'Warm white': '#f1eee6', 'Soft sage': '#c8d1c0', 'Sand': '#ded0bb' }
@@ -156,6 +162,7 @@ function crosses(a: Point, b: Point, c: Point, d: Point) {
 }
 export function fitsFloor(object: RoomObject, project: ProjectState, regions = getFloorRegions(project.features)) {
   if (!roomItemShape(object)) return false
+  if (isWallMounted(object)) return Boolean(object.wallId && project.features.some((wall) => wall.id === object.wallId))
   const points = corners(object, 0.005)
   const inside = regions.some((region) => points.every((p) => pointInPolygon(p, region.points) && !region.holes.some((h) => pointInPolygon(p, h))) && [region.points, ...region.holes].every((ring) => ring.every((p, i) => !points.some((q, j) => crosses(q, points[(j + 1) % 4], p, ring[(i + 1) % ring.length])))) && !region.holes.some((ring) => ring.some((p) => pointInPolygon(p, points))))
   return inside && !project.features.filter((f) => f.type === 'wall').some((wall) => {
@@ -182,9 +189,58 @@ export function placeObject(object: RoomObject, room: ProjectState, snap = false
   }
   return result
 }
-export function overlaps(a: RoomObject, b: RoomObject) {
-  const pa = roomItemShape(a), pb = roomItemShape(b)
-  if (!pa || !pb || pa.category === 'Rug' || pb.category === 'Rug') return false
+/** Rotates one item in place, or a group about its centre. Returns null when any rotated item would leave the floor. */
+export function rotateObjects(project: ProjectState, ids: string[], angle: number): ProjectState | null {
+  const selected = project.objects.filter((object) => ids.includes(object.id))
+  if (!selected.length || selected.some(isWallMounted)) return null
+  const centre = selected.length === 1 ? selected[0] : selected.reduce((point, object) => ({ x: point.x + object.x / selected.length, z: point.z + object.z / selected.length }), { x: 0, z: 0 })
+  const cos = Math.cos(angle), sin = Math.sin(angle)
+  const objects = project.objects.map((object) => {
+    if (!ids.includes(object.id)) return object
+    const x = object.x - centre.x, z = object.z - centre.z
+    return { ...object, x: centre.x + x * cos + z * sin, z: centre.z - x * sin + z * cos, rotation: object.rotation + angle }
+  })
+  const regions = getFloorRegions(project.features)
+  return objects.every((object) => !ids.includes(object.id) || fitsFloor(object, project, regions)) ? { ...project, objects } : null
+}
+export function isWallMounted(object: RoomObject) {
+  return object.custom ? object.custom.kind === 'wall' : productById.get(object.productId ?? '')?.mount === 'wall'
+}
+const defaultElevation = (object: RoomObject, shape: RoomItemShape) => object.custom ? Math.max(0, 1.5 - shape.height / 200) : (productById.get(object.productId ?? '')?.mountHeight ?? 120) / 100
+/**
+ * Hangs a wall item on its wall (or the wall nearest `point`), flush with the wall face.
+ * `point` picks the position along the wall and, when `pickSide` is set, which face it hangs on.
+ * Returns null when there is no wall long enough.
+ */
+export function hangOnWall(object: RoomObject, project: ProjectState, point?: Point, pickSide = false): RoomObject | null {
+  const shape = roomItemShape(object)
+  if (!shape) return null
+  const width = shape.width / 100, depth = shape.depth / 100, height = shape.height / 100
+  const walls = project.features.filter((f) => f.type === 'wall' && f.width >= width + 0.05)
+  const target = point ?? object
+  const wall = project.features.find((f) => f.type === 'wall' && f.id === object.wallId) ?? walls.sort((a, b) => distance(target, projection(target, ...wallEndpoints(a)).point) - distance(target, projection(target, ...wallEndpoints(b)).point))[0]
+  if (!wall) return null
+  const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
+  // A tap on a wall's face picks that face; a tap on its top (plan view) is ambiguous and falls back to the room side.
+  const across = point ? (point.x - wall.x) * nx + (point.z - wall.z) * nz : 0
+  const side = pickSide && point && Math.abs(across) > wallThickness(wall) / 4 ? (across > 0 ? 1 : -1) : object.wallId === wall.id && object.wallSide ? object.wallSide : wallInsideSign(wall, getFloorRegions(project.features)) as 1 | -1
+  const along = point ? (point.x - wall.x) * Math.cos(wall.rotation) - (point.z - wall.z) * Math.sin(wall.rotation) : object.wallId === wall.id ? object.wallOffset ?? 0 : 0
+  const slack = Math.max(0, (wall.width - width) / 2), wallOffset = clamp(along, -slack, slack)
+  const elevation = clamp(object.elevation ?? defaultElevation(object, shape), 0, Math.max(0, wall.height - height))
+  const out = wallThickness(wall) / 2 + depth / 2 + 0.005
+  return { ...object, wallId: wall.id, wallSide: side, wallOffset, elevation, rotation: wall.rotation + (side === 1 ? 0 : Math.PI), x: wall.x + wallOffset * Math.cos(wall.rotation) + nx * side * out, z: wall.z - wallOffset * Math.sin(wall.rotation) + nz * side * out }
+}
+/** Wall items that share a wall face and overlap along it and vertically; doors and windows block both faces. */
+function wallItemClashes(object: RoomObject, project: ProjectState) {
+  const shape = roomItemShape(object)
+  if (!shape || !object.wallId) return []
+  const width = shape.width / 100, bottom = object.elevation ?? 0, top = bottom + shape.height / 100, offset = object.wallOffset ?? 0
+  const clash = (otherOffset: number, otherWidth: number, otherBottom: number, otherTop: number) => Math.abs(otherOffset - offset) < (otherWidth + width) / 2 - 0.01 && otherBottom < top - 0.01 && otherTop > bottom + 0.01
+  const openings = project.features.filter((f) => f.wallId === object.wallId && f.type !== 'wall' && clash(f.wallOffset ?? 0, f.width, f.sillHeight ?? 0, (f.sillHeight ?? 0) + f.height)).map((f) => f.type === 'door' ? 'the door' : 'the window')
+  const items = project.objects.filter((other) => other.id !== object.id && other.wallId === object.wallId && other.wallSide === object.wallSide && isWallMounted(other)).filter((other) => { const s = roomItemShape(other)!; return clash(other.wallOffset ?? 0, s.width / 100, other.elevation ?? 0, (other.elevation ?? 0) + s.height / 100) }).map((other) => roomItemShape(other)!.name)
+  return [...openings, ...items]
+}
+function footprintsOverlap(a: RoomObject, b: RoomObject, pa: RoomItemShape, pb: RoomItemShape) {
   const axes = (r: number) => [[Math.cos(r), -Math.sin(r)], [Math.sin(r), Math.cos(r)]]
   const aa = axes(a.rotation), ba = axes(b.rotation)
   return [...aa, ...ba].every(([x, z]) => {
@@ -192,19 +248,61 @@ export function overlaps(a: RoomObject, b: RoomObject) {
     return Math.abs((a.x - b.x) * x + (a.z - b.z) * z) < radius(pa, aa) + radius(pb, ba) - 0.025
   })
 }
+export function overlaps(a: RoomObject, b: RoomObject) {
+  const pa = roomItemShape(a), pb = roomItemShape(b)
+  if (!pa || !pb || pa.category === 'Rug' || pb.category === 'Rug' || isWallMounted(a) || isWallMounted(b)) return false
+  return footprintsOverlap(a, b, pa, pb)
+}
 export function placementWarnings(project: ProjectState) {
   const warnings: { id: string; message: string }[] = [], regions = getFloorRegions(project.features)
   project.objects.forEach((object, index) => {
     const item = roomItemShape(object)
     if (!item) return
+    if (isWallMounted(object)) {
+      if (!fitsFloor(object, project, regions)) warnings.push({ id: object.id, message: `${item.name} is no longer on a wall. Drag it onto a wall or remove it.` })
+      wallItemClashes(object, project).forEach((name) => warnings.push({ id: object.id, message: `${item.name} overlaps ${name}.` }))
+      // Floor items standing in front of a wall item only matter if they reach up to it.
+      project.objects.forEach((other) => { const shape = roomItemShape(other); if (shape && other.id !== object.id && !isWallMounted(other) && shape.category !== 'Rug' && shape.height / 100 > (object.elevation ?? 0) + 0.02 && footprintsOverlap(object, other, item, shape)) warnings.push({ id: object.id, message: `${item.name} may hit ${shape.name}.` }) })
+      return
+    }
     if (!fitsFloor(object, project, regions)) warnings.push({ id: object.id, message: `${item.name} is outside an enclosed room or crosses a wall.` })
     project.objects.slice(index + 1).forEach((other) => { if (overlaps(object, other)) warnings.push({ id: object.id, message: `${item.name} overlaps ${roomItemShape(other)?.name || 'another item'}.` }) })
-    project.features.filter((f) => f.type === 'door').forEach((door) => {
+    project.features.filter((f) => f.type === 'door' || (f.type === 'window' && openingStyle(f) === 'balcony')).forEach((door) => {
       const dx = object.x - door.x, dz = object.z - door.z, extent = footprint(item, object.rotation - door.rotation)
-      if (item.category !== 'Rug' && Math.abs(dx * Math.cos(door.rotation) - dz * Math.sin(door.rotation)) < door.width / 2 + extent.x && Math.abs(dx * Math.sin(door.rotation) + dz * Math.cos(door.rotation)) < 0.65 + extent.z) warnings.push({ id: object.id, message: `${item.name} may block the door clearance.` })
+      const along = dx * Math.cos(door.rotation) - dz * Math.sin(door.rotation)
+      const across = (dx * Math.sin(door.rotation) + dz * Math.cos(door.rotation)) * (door.type === 'door' ? doorSwingSign(door, project.features.find((wall) => wall.id === door.wallId), regions) : 1)
+      // Clear floor: a walking passage on both sides, extended on the swing side to the leaf radius.
+      if (item.category !== 'Rug' && Math.abs(along) < door.width / 2 + extent.x && across > -(0.65 + extent.z) && across < (door.type === 'door' ? doorReach(door) : 0.65) + extent.z) warnings.push({ id: object.id, message: `${item.name} may block the door clearance.` })
     })
   })
   return warnings
+}
+export const doorStyles: DoorStyle[] = ['hinged', 'double', 'sliding', 'opening']
+export const windowStyles: WindowStyle[] = ['casement', 'fixed', 'balcony']
+export const openingStyle = (feature: RoomFeature) => feature.style ?? (feature.type === 'door' ? 'hinged' : 'casement')
+export type OpeningSize = { label: string; width: number; height: number; sillHeight: number }
+/** Common sizes per style, in metres. The first entry is the default when switching to that style. */
+export const openingSizes: Record<DoorStyle | WindowStyle, OpeningSize[]> = {
+  hinged: [{ label: 'Standard 80 cm', width: 0.8, height: 2.1, sillHeight: 0 }, { label: 'Narrow 70 cm', width: 0.7, height: 2.1, sillHeight: 0 }, { label: 'Wide 90 cm', width: 0.9, height: 2.1, sillHeight: 0 }],
+  double: [{ label: '140 cm', width: 1.4, height: 2.1, sillHeight: 0 }, { label: '120 cm', width: 1.2, height: 2.1, sillHeight: 0 }, { label: '160 cm', width: 1.6, height: 2.1, sillHeight: 0 }],
+  sliding: [{ label: '160 cm', width: 1.6, height: 2.1, sillHeight: 0 }, { label: '120 cm', width: 1.2, height: 2.1, sillHeight: 0 }, { label: '200 cm', width: 2, height: 2.1, sillHeight: 0 }],
+  opening: [{ label: '90 cm', width: 0.9, height: 2.1, sillHeight: 0 }, { label: '120 cm', width: 1.2, height: 2.1, sillHeight: 0 }, { label: '160 cm', width: 1.6, height: 2.1, sillHeight: 0 }],
+  casement: [{ label: 'Standard', width: 1.2, height: 1.4, sillHeight: 0.9 }, { label: 'Small', width: 0.6, height: 0.6, sillHeight: 1.1 }, { label: 'Large', width: 1.8, height: 1.5, sillHeight: 0.8 }],
+  fixed: [{ label: 'Standard', width: 1.2, height: 1.4, sillHeight: 0.9 }, { label: 'Small', width: 0.6, height: 0.6, sillHeight: 1.1 }, { label: 'Large', width: 1.8, height: 1.5, sillHeight: 0.8 }],
+  balcony: [{ label: '90 cm', width: 0.9, height: 2.2, sillHeight: 0 }, { label: 'Double 140 cm', width: 1.4, height: 2.2, sillHeight: 0 }, { label: 'Wide 180 cm', width: 1.8, height: 2.2, sillHeight: 0 }],
+}
+/** Which side of a wall (+1 = along its normal (sin r, cos r), −1 = against it) faces into a room; +1 when both or neither side does. */
+export function wallInsideSign(wall: RoomFeature, regions: FloorRegion[]) {
+  const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
+  const inside = (side: number) => regions.some((region) => pointInPolygon({ x: wall.x + nx * side * 0.15, z: wall.z + nz * side * 0.15 }, region.points))
+  return inside(-1) && !inside(1) ? -1 : 1
+}
+/** Side of the wall a door leaf swings into (same sign convention as `wallInsideSign`). */
+export const doorSwingSign = (door: RoomFeature, wall: RoomFeature | undefined, regions: FloorRegion[]) => (wall ? wallInsideSign(wall, regions) : 1) * (door.swing === 'out' ? -1 : 1)
+/** How far a door needs clear floor on its swing side: the leaf radius for hinged leaves, otherwise a walking passage. */
+export function doorReach(door: RoomFeature) {
+  const style = openingStyle(door)
+  return Math.max(0.65, style === 'hinged' ? door.width : style === 'double' ? door.width / 2 : 0)
 }
 export function attachOpening(feature: RoomFeature, room: ProjectState): RoomFeature {
   if (feature.type === 'wall') return { ...feature, height: clamp(feature.height, 0.3, 6) }
@@ -219,7 +317,9 @@ export function attachOpening(feature: RoomFeature, room: ProjectState): RoomFea
 }
 export function refreshOpenings(project: ProjectState): ProjectState {
   const walls = new Set(project.features.filter((f) => f.type === 'wall').map((f) => f.id))
-  return { ...project, features: project.features.filter((f) => f.type === 'wall' || !f.wallId || walls.has(f.wallId)).map((f) => attachOpening(f, project)) }
+  const refreshed = { ...project, features: project.features.filter((f) => f.type === 'wall' || !f.wallId || walls.has(f.wallId)).map((f) => attachOpening(f, project)) }
+  // Wall items follow their wall; if the wall is gone they stay put, detached, and get a warning.
+  return { ...refreshed, objects: project.objects.map((object) => !object.wallId ? object : walls.has(object.wallId) ? hangOnWall(object, refreshed) ?? object : { ...object, wallId: undefined }) }
 }
 export function moveWallEndpoint(project: ProjectState, id: string, previous: Point, next: Point): ProjectState {
   const bounded = { x: clamp(next.x, -project.width / 2, project.width / 2), z: clamp(next.z, -project.length / 2, project.length / 2) }
@@ -244,5 +344,5 @@ export function migrateProject(project: ProjectState): ProjectState {
 export function isProject(value: unknown): value is ProjectState {
   if (!value || typeof value !== 'object') return false
   const p = value as ProjectState
-  return (p.schemaVersion === undefined || p.schemaVersion === 2 || p.schemaVersion === 3) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && (p.roomLabels === undefined || (Array.isArray(p.roomLabels) && p.roomLabels.length <= 40 && p.roomLabels.every((label) => label && typeof label.id === 'string' && typeof label.name === 'string' && [label.x, label.z, label.confidence].every(Number.isFinite) && label.confidence >= 0 && label.confidence <= 1))) && (p.planImport === undefined || (typeof p.planImport === 'object' && p.planImport !== null && ['local', 'vertex-ai'].includes(p.planImport.provider) && Number.isFinite(p.planImport.confidence) && p.planImport.confidence >= 0 && p.planImport.confidence <= 1 && typeof p.planImport.scaleCalibrated === 'boolean')) && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => isRoomObject(o)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)) && (f.thickness === undefined || (Number.isFinite(f.thickness) && f.thickness >= 0.02 && f.thickness <= 2)))
+  return (p.schemaVersion === undefined || p.schemaVersion === 2 || p.schemaVersion === 3) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && (p.roomLabels === undefined || (Array.isArray(p.roomLabels) && p.roomLabels.length <= 40 && p.roomLabels.every((label) => label && typeof label.id === 'string' && typeof label.name === 'string' && [label.x, label.z, label.confidence].every(Number.isFinite) && label.confidence >= 0 && label.confidence <= 1))) && (p.planImport === undefined || (typeof p.planImport === 'object' && p.planImport !== null && ['local', 'vertex-ai'].includes(p.planImport.provider) && Number.isFinite(p.planImport.confidence) && p.planImport.confidence >= 0 && p.planImport.confidence <= 1 && typeof p.planImport.scaleCalibrated === 'boolean')) && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => isRoomObject(o)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)) && (f.thickness === undefined || (Number.isFinite(f.thickness) && f.thickness >= 0.02 && f.thickness <= 2)) && (f.style === undefined || (f.type === 'door' ? doorStyles : f.type === 'window' ? windowStyles : []).includes(f.style as never)) && (f.hinge === undefined || ['left', 'right'].includes(f.hinge)) && (f.swing === undefined || ['in', 'out'].includes(f.swing)))
 }

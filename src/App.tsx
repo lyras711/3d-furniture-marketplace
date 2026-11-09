@@ -2,59 +2,38 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import SurfaceMaterial from './SurfaceMaterial'
 
 const RenderStudio = lazy(() => import('./RenderStudio'))
-import { Canvas, useThree } from '@react-three/fiber'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF } from '@react-three/drei'
 import SceneEnvironment, { Architecture, type EditorLightingMode } from './SceneEnvironment'
+import MeasureRoom from './MeasureRoom'
+import AddItemSheet from './AddItemSheet'
+import OpeningOptions from './OpeningOptions'
+import { formatPrice, Icon, ProductThumb, type IconName } from './ui'
 import { analyzePlanFile, createProjectFromPlan, type PlanAnalysis, type PixelPoint, type PixelWall, type PixelOpening, type PlanCalibration, type PlanDetectionProvider } from './planImport'
-import { ACESFilmicToneMapping, CatmullRomCurve3, DoubleSide, MOUSE, OrthographicCamera, PerspectiveCamera as ThreePerspectiveCamera, Plane, Vector3 } from 'three'
+import { ACESFilmicToneMapping, CatmullRomCurve3, DoubleSide, Group, MOUSE, OrthographicCamera, PerspectiveCamera as ThreePerspectiveCamera, Plane, TOUCH, Vector3 } from 'three'
+import { activeTouchCount, angleStep, beyondSlop, cancelOnMultiTouch, classifyTwoFinger, fingerAngle, fingerMidpoint, fingerSpan, snapRotation, TAP_MAX_TRAVEL_PX, type ScreenPoint, type TwoFinger, type TwoFingerMode } from './gestures'
 import type { ThreeEvent } from '@react-three/fiber'
-import type { FormEvent, InputHTMLAttributes, PointerEvent as ReactPointerEvent } from 'react'
+import type { FormEvent, InputHTMLAttributes, ReactNode } from 'react'
 import { getToken } from 'firebase/app-check'
-import { signInAnonymously } from 'firebase/auth'
+import { onAuthStateChanged, signInAnonymously, type User } from 'firebase/auth'
+import { accountApi, AccountApiError, cloudProjectKey, type SavedProject, type SavedProjectDetails } from './account'
+import { purchaseItemId } from './purchase'
 import { appCheck, auth } from './firebase'
 import { products, type CategoryFilter, type Product } from './catalog'
-import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, productById, refreshOpenings, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
+import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, hangOnWall, isWallMounted, placeObject, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 type ViewMode = '3d' | '2d'
 type LightingMode = EditorLightingMode
 type Tool = 'select' | 'wall' | 'door' | 'window'
 type FeatureType = Exclude<Tool, 'select'>
+type Step = 'room' | 'furnish' | 'review'
 
-type IconName =
-  | 'arrow'
-  | 'box'
-  | 'chevron'
-  | 'close'
-  | 'copy'
-  | 'cube'
-  | 'download'
-  | 'grid'
-  | 'layers'
-  | 'panel'
-  | 'plus'
-  | 'redo'
-  | 'rotate'
-  | 'save'
-  | 'search'
-  | 'share'
-  | 'shopping'
-  | 'sun'
-  | 'trash'
-  | 'undo'
-  | 'upload'
-  | 'wall'
-  | 'window'
 
 const FLOOR = new Plane(new Vector3(0, 1, 0), 0)
 const PRODUCT_DRAG_TYPE = 'application/x-forma-product'
 
 const STORAGE_KEY = 'forma-room-planner-project'
 let needsRecovery = false
-const EURO = new Intl.NumberFormat('en-IE', {
-  style: 'currency',
-  currency: 'EUR',
-  maximumFractionDigits: 0,
-})
 
 const categories: CategoryFilter[] = ['All', 'Seating', 'Tables', 'Lighting', 'Decor', 'Storage', 'Bedroom', 'Kitchen', 'Bathroom']
 
@@ -77,13 +56,21 @@ function loadProject(): ProjectState {
   }
 }
 
+const COMPACT_QUERY = '(max-width: 900px)'
+function useCompactLayout() {
+  const [compact, setCompact] = useState(() => window.matchMedia(COMPACT_QUERY).matches)
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_QUERY), update = () => setCompact(media.matches)
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+  return compact
+}
+
 function makeId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 10000)}`
 }
 
-function formatPrice(value: number | null) {
-  return value === null ? 'Price unavailable' : EURO.format(value)
-}
 
 const requestPlanDetection: PlanDetectionProvider = async (request) => {
   if (!auth || !appCheck) throw new Error('Firebase Auth and App Check are not configured for AI plan detection.')
@@ -103,67 +90,29 @@ function downloadFile(name: string, content: string, type: string) {
   window.setTimeout(() => URL.revokeObjectURL(link.href), 1000)
 }
 
-function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
-  const paths: Record<IconName, string> = {
-    arrow: 'M5 12h14m-6-6 6 6-6 6',
-    box: 'm4 7 8-4 8 4-8 4-8-4Zm0 0v10l8 4 8-4V7M12 11v10',
-    chevron: 'm7 10 5 5 5-5',
-    close: 'M6 6l12 12M18 6 6 18',
-    copy: 'M8 8h11v11H8zM5 16H4V4h12v1',
-    cube: 'm12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 0v9m8-4.5-8 4.5m0 0L4 7.5',
-    download: 'M12 3v12m-5-5 5 5 5-5M5 20h14',
-    grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
-    layers: 'm4 8 8-4 8 4-8 4-8-4Zm0 4 8 4 8-4M4 16l8 4 8-4',
-    panel: 'M4 5h16v14H4zM15 5v14',
-    plus: 'M12 5v14M5 12h14',
-    redo: 'M19 12a7 7 0 0 0-12-5l-2 2m0 0h5m-5 0V4',
-    rotate: 'M5 8a7 7 0 1 1 1 8M5 8V4m0 4h4',
-    save: 'M5 4h12l2 2v14H5zM8 4v5h7V4M8 15h8v5H8z',
-    search: 'm20 20-4.5-4.5M10.5 17a6.5 6.5 0 1 1 0-13 6.5 6.5 0 0 1 0 13Z',
-    share: 'M15 8l-6 4 6 4M15 8V5l5 3-5 3M9 12H4m5 0v7l-5-3 5-3',
-    shopping: 'M5 7h14l-1 13H6L5 7Zm3 0a4 4 0 0 1 8 0M9 11v2m6-2v2',
-    sun: 'M12 3v2m0 14v2M3 12h2m14 0h2m-3.36-6.36-1.42 1.42m-8.44 8.44-1.42 1.42m0-11.28 1.42 1.42m8.44 8.44 1.42 1.42M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z',
-    trash: 'M5 7h14m-9 4v5m4-5v5M9 7V4h6v3m-9 0 1 13h10l1-13',
-    undo: 'M5 12a7 7 0 0 1 12-5l2 2m0 0h-5m5 0V4',
-    upload: 'M12 16V3m-5 5 5-5 5 5M5 20h14',
-    wall: 'M4 5h16v14H4zM9 5v14m6-14v14M4 10h5m6 0h5M4 15h5m6 0h5',
-    window: 'M4 4h16v16H4zM4 12h16M12 4v16',
-  }
 
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d={paths[name]} />
-    </svg>
-  )
+
+// Publishes the plan-view mapping (camera centre and pixels per metre) so browser tests can tap real plan coordinates.
+function PlanProbe({ viewMode }: { viewMode: ViewMode }) {
+  const { camera, gl } = useThree()
+  useFrame(() => {
+    const data = gl.domElement.dataset
+    if (viewMode === '2d' && camera instanceof OrthographicCamera) Object.assign(data, { planX: camera.position.x.toFixed(4), planZ: camera.position.z.toFixed(4), planZoom: camera.zoom.toFixed(4) })
+    else { delete data.planX; delete data.planZ; delete data.planZoom }
+  })
+  return null
 }
 
-function ProductThumb({ product, compact = false }: { product: Product; compact?: boolean }) {
-  const seating = product.group === 'Seating', table = product.group === 'Tables'
-  const className = `product-thumb ${compact ? 'product-thumb-compact' : ''}`
-  if (product.thumbnailPath) return <div className={className}><img className="product-thumb-image" src={product.thumbnailPath} alt={`${product.name} generated thumbnail`} /></div>
-  return <div className={className}>
-    <svg viewBox="0 0 180 130" role="img" aria-label={`${product.name} — illustrative preview`}>
-      <ellipse cx="92" cy="108" rx="65" ry="10" fill="#ddd7cb" opacity="0.45" />
-      <g stroke={product.accent} strokeWidth="1.3" strokeLinejoin="round">
-        {seating ? <g>
-          <path d="M38 91v17m92-18v18m-75-5v9m87-22v12" strokeWidth="4" />
-          <path d={(product.category === 'Sofa' || product.category === 'Corner sofa') ? 'M28 55 Q28 43 40 45 L135 35 Q145 35 145 48 L145 84 L30 94Z' : 'M64 30 L116 25 L119 76 L67 84Z'} fill={product.tone} />
-          <path d={(product.category === 'Sofa' || product.category === 'Corner sofa') ? 'M31 78 L125 65 L150 80 L56 99 L31 91Z' : 'M64 77 L113 68 L133 82 L84 95 L64 85Z'} fill={product.tone} />
-          {(product.category === 'Sofa' || product.category === 'Corner sofa') && <><path d="M29 68 Q21 64 22 74 L23 92 L40 99 L40 77Z M132 55 L147 53 L156 61 L155 83 L139 88 L138 65Z" fill={product.accent} /><path d="M61 53v23m35-26v22M42 80l94-14" fill="none" opacity="0.5" /></>}
-        </g> : table ? <g><path d="M44 64v39m89-50v37M63 80v31m85-45v39" strokeWidth="6" /><path d="M27 59 L115 36 L159 62 L69 91 L27 68Z" fill={product.accent} /><path d="M27 59 L115 36 L159 62 L69 84Z" fill={product.tone} /><path d="M42 60l72-18M54 67l71-19" opacity="0.35" /></g> : product.category === 'Rug' ? <g><path d="M23 79 L116 43 L163 78 L65 113Z" fill={product.tone} /><path d="M33 80l83-31 36 28-85 29Z" fill="none" /><path d="M43 81l70-26m-60 34 72-27m-60 34 71-28" opacity="0.3" /></g> : product.category === 'Floor lamp' ? <g><ellipse cx="91" cy="107" rx="24" ry="5" fill={product.accent} /><path d="M91 104V38" strokeWidth="3" /><path d="M75 23h31l19 34Q92 68 57 57Z" fill={product.tone} /><ellipse cx="91" cy="23" rx="16" ry="4" fill="#eee5d2" /></g> : product.category === 'Plant' ? <g><path d="M71 86h41l-7 26H78Z" fill="#b3a28c" stroke="#8b7964" /><path d="M92 90V30m0 34L68 47m24 32 22-23" fill="none" strokeWidth="3" /><ellipse cx="69" cy="41" rx="14" ry="23" transform="rotate(-35 69 41)" fill={product.tone} /><ellipse cx="112" cy="48" rx="15" ry="24" transform="rotate(25 112 48)" fill={product.accent} /><ellipse cx="91" cy="28" rx="13" ry="23" fill={product.tone} /></g> : product.group === 'Bedroom' ? <g><path d="M37 82h108v20H37Z" fill={product.accent} /><path d="M45 61h92v28H45Z" fill={product.tone} /><path d="M51 43h80v22H51Z" fill={product.accent} /><path d="M55 65h27v20H55Z" fill="#ece7dc" /><path d="M98 65h34v20H98Z" fill="#ece7dc" /></g> : product.group === 'Bathroom' ? product.category === 'Shower' ? <g><rect x="47" y="25" width="88" height="78" rx="4" fill={product.tone} opacity=".3" /><path d="M47 25h88v78H47M54 96h74M91 25v78" fill="none" /><circle cx="91" cy="42" r="11" fill="none" /></g> : product.category === 'Bathtub' ? <g><path d="M36 68h112v25H36Z" fill={product.tone} /><path d="M47 68V53q0-12 12-12h61q13 0 13 12v15" fill="none" strokeWidth="4" /><path d="M52 80h80" opacity=".4" /></g> : <g><path d="M52 43h76v45q0 18-38 18T52 88Z" fill={product.tone} /><path d="M60 42h60V27H60Z" fill={product.accent} /><ellipse cx="90" cy="80" rx="25" ry="7" fill="#f8f8f3" /></g> : product.group === 'Kitchen' ? product.category === 'Refrigerator' ? <g><path d="M58 21h66v86H58Z" fill={product.tone} /><path d="M60 61h62M113 35v17m0 28v14" fill="none" /></g> : <g><path d="M31 50h118v57H31Z" fill={product.tone} /><path d="M27 45h126v13H27Z" fill={product.accent} /><path d="M60 60v47m60-47v47M49 78h9m62 0h9" fill="none" strokeWidth="3" /></g> : <g><path d="M36 49 L123 31 L148 46 L61 66Z" fill={product.tone} /><path d="M36 49v44l25 16V66Z" fill={product.accent} /><path d="M61 66l87-20v44l-87 19Z" fill={product.tone} /><path d="M89 60v42m31-49v42M38 96v10m105-13v10" fill="none" strokeWidth="2" />{product.category === 'Shelving' && <path d="M64 80l82-19M64 95l82-19" strokeWidth="5" />}</g>}
-      </g>
-    </svg>
-  </div>
-}
-
-function CameraRig({ viewMode, cameraVersion, project }: { viewMode: ViewMode; cameraVersion: number; project: ProjectState }) {
+function CameraRig({ viewMode, cameraVersion, project, fitRooms, floorCount }: { viewMode: ViewMode; cameraVersion: number; project: ProjectState; fitRooms: boolean; floorCount: number }) {
   const { camera, size, controls, invalidate } = useThree()
   const latest = useRef(project)
   latest.current = project
   useEffect(() => {
     const orbit = controls as unknown as { target: Vector3; update: () => void } | null
     const points = latest.current.features.filter((f) => f.type === 'wall').flatMap(wallEndpoints)
-    const fitted = viewMode === '3d' && points.length > 0
+    // Plan view frames the drawn rooms, except while drawing walls, which needs the whole build grid.
+    const roomFit = viewMode === '2d' && fitRooms && points.length > 0
+    const fitted = (viewMode === '3d' || roomFit) && points.length > 0
     const minX = fitted ? Math.min(...points.map((p) => p.x)) : -project.width / 2, maxX = fitted ? Math.max(...points.map((p) => p.x)) : project.width / 2
     const minZ = fitted ? Math.min(...points.map((p) => p.z)) : -project.length / 2, maxZ = fitted ? Math.max(...points.map((p) => p.z)) : project.length / 2
     const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2, w = Math.max(3, maxX - minX), l = Math.max(3, maxZ - minZ)
@@ -180,14 +129,23 @@ function CameraRig({ viewMode, cameraVersion, project }: { viewMode: ViewMode; c
       camera.position.set(...(viewMode === '2d' ? [cx, 12, cz + 0.001] : [cx + 8, 7.5 + targetY, cz + 10]) as [number, number, number])
       camera.lookAt(cx, targetY, cz)
       const cam = camera as OrthographicCamera
+      if (roomFit) {
+        // Desktop keeps the right-hand strip free for the inspector card and shifts the room left; vertical margins clear the mobile top buttons and bottom bar.
+        const inspector = size.width >= 760 ? 380 : 0
+        cam.zoom = clamp(Math.min(Math.max(120, size.width - 48 - inspector) / (w + 1), Math.max(120, size.height - 190) / (l + 1)), 1, 250)
+        const shift = inspector / 2 / cam.zoom
+        camera.position.x += shift
+        orbit?.target.set(cx + shift, targetY, cz)
+      } else {
       const spanX = viewMode === '2d' ? project.width + 1.2 : (w + l) * 0.8 + 1
       const spanY = viewMode === '2d' ? project.length + 1.8 : (w + l) * 0.46 + project.ceilingHeight * 0.85 + 0.8
       cam.zoom = Math.min(size.width / spanX, size.height / spanY)
+      }
       cam.updateProjectionMatrix()
     }
     orbit?.update()
     invalidate()
-  }, [camera, controls, size.width, size.height, cameraVersion, viewMode, project.width, project.length, project.ceilingHeight, invalidate])
+  }, [camera, controls, size.width, size.height, cameraVersion, viewMode, project.width, project.length, project.ceilingHeight, invalidate, fitRooms, floorCount])
   return null
 }
 
@@ -403,6 +361,30 @@ export function ProductModel({ product, variantId }: { product: Product; variant
     )
   }
 
+  // Wall items: back face on the wall (−Z), front toward the room (+Z), bottom edge at Y = 0.
+  if (product.category === 'Wall art') return <group>
+    <RoundedBox args={[width, height, depth]} radius={0.006} smoothness={2} position={[0, height / 2, 0]} castShadow receiveShadow><meshStandardMaterial color={product.accent} roughness={0.55} /></RoundedBox>
+    <mesh position={[0, height / 2, depth / 2 + 0.001]}><planeGeometry args={[width - 0.07, height - 0.07]} /><meshStandardMaterial color="#f4efe4" roughness={0.9} /></mesh>
+    <mesh position={[0, height * 0.42, depth / 2 + 0.002]}><planeGeometry args={[width - 0.16, (height - 0.16) * 0.42]} /><meshStandardMaterial color={product.tone} roughness={0.85} /></mesh>
+    <mesh position={[0, height * 0.68, depth / 2 + 0.002]}><planeGeometry args={[width - 0.16, (height - 0.16) * 0.38]} /><meshStandardMaterial color="#c9d3cf" roughness={0.85} /></mesh>
+  </group>
+  if (product.category === 'Mirror') return <group position={[0, height / 2, 0]} rotation={[Math.PI / 2, 0, 0]}>
+    <mesh castShadow receiveShadow><cylinderGeometry args={[width / 2, width / 2, depth, 64]} /><meshStandardMaterial color={product.accent} roughness={0.35} metalness={0.7} /></mesh>
+    <mesh position={[0, depth / 2 + 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]}><circleGeometry args={[width / 2 - 0.025, 64]} /><meshStandardMaterial color={product.tone} roughness={0.04} metalness={1} /></mesh>
+  </group>
+  if (product.category === 'Wall shelf') return <RoundedBox args={[width, height, depth]} radius={0.008} smoothness={2} position={[0, height / 2, 0]} castShadow receiveShadow>{material}</RoundedBox>
+  if (product.category === 'Wall TV') return <group>
+    <RoundedBox args={[width, height, depth]} radius={0.008} smoothness={2} position={[0, height / 2, 0]} castShadow receiveShadow><meshStandardMaterial color={product.accent} roughness={0.4} metalness={0.3} /></RoundedBox>
+    <mesh position={[0, height / 2 + 0.01, depth / 2 + 0.001]}><planeGeometry args={[width - 0.03, height - 0.05]} /><meshStandardMaterial color={product.tone} roughness={0.12} metalness={0.2} /></mesh>
+  </group>
+  if (product.category === 'Wall cabinet') return <group>
+    <RoundedBox args={[width, height, depth * 0.94]} radius={0.01} smoothness={2} position={[0, height / 2, -depth * 0.03]} castShadow receiveShadow>{material}</RoundedBox>
+    {[-1, 1].map((side) => <group key={side}>
+      <RoundedBox args={[width / 2 - 0.006, height - 0.006, 0.02]} radius={0.004} smoothness={2} position={[side * width / 4, height / 2, depth / 2 - 0.01]} castShadow receiveShadow>{material}</RoundedBox>
+      <mesh position={[side * 0.035, 0.07, depth / 2 + 0.008]} castShadow><boxGeometry args={[0.012, 0.09, 0.012]} />{steelMaterial}</mesh>
+    </group>)}
+  </group>
+
   if (product.category === 'Plant') {
     return (
       <group>
@@ -443,9 +425,12 @@ function FurnitureObject({
   onDragStart,
   onDragMove,
   onDragEnd,
+  onDragCancel,
   viewMode,
   selectable,
+  cutaway,
 }: {
+  cutaway: boolean
   selectable: boolean
   viewMode: ViewMode
   object: RoomObject
@@ -453,34 +438,65 @@ function FurnitureObject({
   selected: boolean
   onSelect: (extend: boolean) => void
   onDragStart: () => void
-  onDragMove: (x: number, z: number) => void
+  onDragMove: (x: number, z: number, y?: number) => void
   onDragEnd: () => void
+  onDragCancel: () => void
 }) {
   const item = roomItemShape(object)!
+  const wallMounted = isWallMounted(object), elevation = object.elevation ?? 0
+  // With "lower front walls" on, a wall item whose wall stands between the camera and the item would float in mid-air, so hide it.
+  const groupRef = useRef<Group>(null)
+  useFrame(({ camera }) => {
+    const group = groupRef.current
+    if (!group) return
+    const behind = cutaway && wallMounted && viewMode === '3d' && (camera.position.x - object.x) * Math.sin(object.rotation) + (camera.position.z - object.z) * Math.cos(object.rotation) < 0
+    group.visible = !behind
+  })
   const width = item.width / 100, depth = item.depth / 100, height = item.height / 100
-  const drag = useRef<{ x: number; z: number } | null>(null)
+  // In 3D, wall items drag on their wall's vertical plane (along and up/down); everything else drags on the floor.
+  const drag = useRef<{ x: number; z: number; y: number; plane: Plane; start: ScreenPoint; moved: boolean; release: () => void } | null>(null)
+  const tapToSelect = useRef(false)
   const { controls, gl } = useThree()
+  const setControls = (enabled: boolean) => { if (controls) (controls as unknown as { enabled: boolean }).enabled = enabled }
   const finish = (event: ThreeEvent<PointerEvent>) => {
     if (!drag.current) return
     event.stopPropagation()
+    drag.current.release()
     drag.current = null
     ;(event.target as Element).releasePointerCapture?.(event.pointerId)
     gl.domElement.style.cursor = 'grab'
     onDragEnd()
   }
   return (
-    <group position={[object.x, 0, object.z]} rotation={[0, object.rotation, 0]} scale={[object.mirrored ? -1 : 1, 1, 1]}
-      onClick={(event) => { if (selectable) event.stopPropagation() }}
+    <group ref={groupRef} position={[object.x, viewMode === '3d' ? elevation : 0, object.z]} rotation={[0, object.rotation, 0]} scale={[object.mirrored ? -1 : 1, 1, 1]}
+      onClick={(event) => {
+        if (!selectable) return
+        event.stopPropagation()
+        if (tapToSelect.current && event.delta <= TAP_MAX_TRAVEL_PX) onSelect(false)
+        tapToSelect.current = false
+      }}
       onPointerOver={(event) => { if (selectable) { event.stopPropagation(); gl.domElement.style.cursor = 'grab' } }}
       onPointerOut={() => { if (!drag.current) gl.domElement.style.cursor = 'auto' }}
       onPointerDown={(event) => {
         if (event.button !== 0 || !selectable) return
-        const point = event.ray.intersectPlane(FLOOR, new Vector3())
+        const touch = event.pointerType === 'touch'
+        tapToSelect.current = touch && !selected
+        // Touch: the first tap only selects, and a finger on an unselected item moves the camera instead.
+        if (touch && (!selected || activeTouchCount() > 1)) return
+        const plane = wallMounted && viewMode === '3d' ? new Plane().setFromNormalAndCoplanarPoint(new Vector3(Math.sin(object.rotation), 0, Math.cos(object.rotation)), new Vector3(object.x, 0, object.z)) : FLOOR
+        const point = event.ray.intersectPlane(plane, new Vector3())
         if (!point) return
         event.stopPropagation()
-        drag.current = { x: point.x - object.x, z: point.z - object.z }
-        ;(event.target as Element).setPointerCapture?.(event.pointerId)
-        if (controls) (controls as unknown as { enabled: boolean }).enabled = false
+        const target = event.target as Element, pointerId = event.pointerId
+        const release = touch ? cancelOnMultiTouch(() => {
+          drag.current = null
+          target.releasePointerCapture?.(pointerId)
+          setControls(true)
+          onDragCancel()
+        }) : () => undefined
+        drag.current = { x: point.x - object.x, z: point.z - object.z, y: point.y - elevation, plane, start: { x: event.clientX, y: event.clientY }, moved: !touch, release }
+        target.setPointerCapture?.(pointerId)
+        setControls(false)
         gl.domElement.style.cursor = 'grabbing'
         onSelect(event.shiftKey || event.ctrlKey || event.metaKey)
         onDragStart()
@@ -488,12 +504,13 @@ function FurnitureObject({
       onPointerMove={(event) => {
         if (!drag.current) return
         event.stopPropagation()
-        const point = event.ray.intersectPlane(FLOOR, new Vector3())
-        if (point) onDragMove(point.x - drag.current.x, point.z - drag.current.z)
+        if (!drag.current.moved && !(drag.current.moved = beyondSlop(drag.current.start, { x: event.clientX, y: event.clientY }))) return
+        const point = event.ray.intersectPlane(drag.current.plane, new Vector3())
+        if (point) onDragMove(point.x - drag.current.x, point.z - drag.current.z, drag.current.plane === FLOOR ? undefined : point.y - drag.current.y)
       }}
       onPointerUp={finish} onPointerCancel={finish}
     >
-      {viewMode === '2d' ? <mesh position={[0, item.category === 'Rug' ? 0.015 : 0.06, 0]}><boxGeometry args={[width, 0.02, depth]} /><meshBasicMaterial color={item.tone} transparent opacity={item.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : product ? <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={item.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense> : <RoundedBox position={[0, height / 2, 0]} args={[width, height, depth]} radius={Math.min(0.035, height / 4)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={item.tone} roughness={0.9} /></RoundedBox>}
+      {viewMode === '2d' ? <mesh position={[0, item.category === 'Rug' ? 0.015 : wallMounted ? 0.13 : 0.06, wallMounted ? Math.max(0, 0.08 - depth) / 2 : 0]}><boxGeometry args={[width, 0.02, wallMounted ? Math.max(depth, 0.08) : depth]} /><meshBasicMaterial color={item.tone} transparent opacity={item.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : product ? <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={item.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense> : <RoundedBox position={[0, height / 2, 0]} args={[width, height, depth]} radius={Math.min(0.035, height / 4)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={item.tone} roughness={0.9} /></RoundedBox>}
       {selected && <>
         <Line points={[[-width / 2 - 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, -depth / 2 - 0.04]]} color="#517e68" lineWidth={2} raycast={() => null} />
         <Html position={[0, 0.05, depth / 2 + 0.18]} center style={{ pointerEvents: 'none' }}><span className="dimension-tag">{item.width} × {item.depth} cm</span></Html>
@@ -519,8 +536,14 @@ function RoomScene({
   onMoveObject,
   onDragStart,
   onDragEnd,
+  onDragCancel,
+  addPoint,
+  onAddAt,
   snap, wallSnap, lightingMode, onDropProduct, onDrawWall, onMoveEndpoint, onMoveOpening,
 }: {
+  onDragCancel: () => void
+  addPoint: Point | null
+  onAddAt: (x: number, z: number) => void
   onMoveEndpoint: (id: string, previous: Point, next: Point) => void
   onMoveOpening: (id: string, wallOffset: number) => void
   snap: boolean
@@ -539,22 +562,25 @@ function RoomScene({
   cameraVersion: number
   onClearSelection: () => void
   onSelectObject: (id: string, extend: boolean) => void
-  onSelectFeature: (id: string) => void
+  onSelectFeature: (id: string, point?: Point) => void
   onPlaceFeature: (type: FeatureType, x: number, z: number) => void
-  onMoveObject: (id: string, x: number, z: number) => void
+  onMoveObject: (id: string, x: number, z: number, y?: number) => void
   onDragStart: (id: string) => void
   onDragEnd: () => void
 }) {
+  const floorCount = useMemo(() => getFloorRegions(project.features).length, [project.features])
   return (
     <Canvas shadows orthographic frameloop="demand" dpr={[1, 1.5]}
       camera={{ position: [8, 8, 10], zoom: 65, near: 0.1, far: 150 }}
       gl={{ antialias: true, toneMapping: ACESFilmicToneMapping }} onPointerMissed={() => { if (!draggingId && activeTool === 'select') onClearSelection() }}>
       {viewMode === '3d' && <PerspectiveCamera makeDefault position={[8, 8, 10]} fov={50} near={0.03} far={150} />}
-      <OrbitControls makeDefault enabled={!draggingId} enableRotate={viewMode === '3d' && activeTool === 'select'} enableDamping dampingFactor={0.12} minDistance={0.2} maxDistance={100} minZoom={1} maxZoom={250} minPolarAngle={viewMode === '2d' ? 0 : 0.1} maxPolarAngle={Math.PI / 2.1} mouseButtons={{ LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }} />
-      <CameraRig project={project} viewMode={viewMode} cameraVersion={cameraVersion} />
-      <SceneEnvironment project={project} viewMode={viewMode} gridVisible={gridVisible} tool={activeTool} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onClear={onClearSelection} onPlace={onPlaceFeature} onDrop={onDropProduct} onDrawWall={onDrawWall} />
+      <OrbitControls makeDefault enabled={!draggingId} enableRotate={viewMode === '3d' && activeTool === 'select'} enableDamping dampingFactor={0.12} minDistance={0.2} maxDistance={100} minZoom={1} maxZoom={250} minPolarAngle={viewMode === '2d' ? 0 : 0.1} maxPolarAngle={Math.PI / 2.1} mouseButtons={{ LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }} touches={{ ONE: viewMode === '2d' && activeTool === 'select' ? TOUCH.PAN : TOUCH.ROTATE, TWO: TOUCH.DOLLY_PAN }} />
+      <CameraRig project={project} viewMode={viewMode} cameraVersion={cameraVersion} fitRooms={activeTool !== 'wall' && floorCount > 0} floorCount={floorCount} />
+      <PlanProbe viewMode={viewMode} />
+      <SceneEnvironment project={project} viewMode={viewMode} gridVisible={gridVisible} tool={activeTool} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onClear={onClearSelection} onPlace={onPlaceFeature} onDrop={onDropProduct} onDrawWall={onDrawWall} onAddAt={onAddAt} />
+      {addPoint && <mesh position={[addPoint.x, 0.03, addPoint.z]} rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}><ringGeometry args={[0.16, 0.24, 40]} /><meshBasicMaterial color="#2f5d46" transparent opacity={0.85} /></mesh>}
 
-      <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onMoveOpening={onMoveOpening} lightingMode={lightingMode} onDragStart={onDragStart} onDragEnd={onDragEnd} />
+      <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onMoveOpening={onMoveOpening} lightingMode={lightingMode} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel} />
       {project.objects.map((object) => {
         const product = object.productId ? productById.get(object.productId) ?? null : null
         if (!product && !object.custom) return null
@@ -568,8 +594,10 @@ function RoomScene({
             selected={selectedIds.includes(object.id)}
             onSelect={(extend) => onSelectObject(object.id, extend || (selectedIds.length > 1 && selectedIds.includes(object.id)))}
             onDragStart={() => onDragStart(object.id)}
-            onDragMove={(x, z) => onMoveObject(object.id, x, z)}
+            onDragMove={(x, z, y) => onMoveObject(object.id, x, z, y)}
             onDragEnd={onDragEnd}
+            onDragCancel={onDragCancel}
+            cutaway={wallsTransparent}
           />
         )
       })}
@@ -589,112 +617,195 @@ function NumberInput({ value, onCommit, ...props }: Omit<InputHTMLAttributes<HTM
   }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = String(value); setText(String(value)); event.currentTarget.blur() } }} />
 }
 
-function RoomProperties({ project, onPatch }: { project: ProjectState; onPatch: (patch: Partial<ProjectState>) => void }) {
-  const warnings = placementWarnings(project), regions = getFloorRegions(project.features)
+function rectangleWalls(width: number, length: number, height: number): RoomFeature[] {
+  const corners: Point[] = [{ x: -width / 2, z: -length / 2 }, { x: width / 2, z: -length / 2 }, { x: width / 2, z: length / 2 }, { x: -width / 2, z: length / 2 }]
+  return corners.map((point, index) => wallFromPoints(makeId('wall'), point, corners[(index + 1) % corners.length], height))
+}
+
+function PanelHeader({ step, title, intro, onCollapse }: { step: number; title: string; intro: string; onCollapse?: () => void }) {
+  return <div className="panel-header">
+    <div><span className="step-kicker">Step {step} of 3</span><h1>{title}</h1><p>{intro}</p></div>
+    {onCollapse && <button className="icon-button panel-collapse-button" onClick={onCollapse} title="Hide panel" aria-label="Hide panel"><Icon name="panel" /></button>}
+  </div>
+}
+
+function RoomPanel({ project, floors, activeTool, onTool, onPatch, onQuickRoom, onMeasure, onTemplates, onImport, onNewProject, onNext, onCollapse }: {
+  project: ProjectState; floors: ReturnType<typeof getFloorRegions>; activeTool: Tool
+  onTool: (tool: Tool) => void; onPatch: (patch: Partial<ProjectState>) => void; onQuickRoom: (width: number, length: number) => void
+  onMeasure: () => void; onTemplates: () => void; onImport: () => void; onNewProject: () => void; onNext: () => void; onCollapse?: () => void
+}) {
+  const [width, setWidth] = useState('5'), [length, setLength] = useState('4')
+  const walls = project.features.filter((f) => f.type === 'wall').length
+  const doors = project.features.filter((f) => f.type === 'door').length, windows = project.features.filter((f) => f.type === 'window').length
+  const area = floors.reduce((sum, region) => sum + region.area, 0)
+  const checklist: { tool: Tool; label: string; detail: string; done: boolean; icon: IconName }[] = [
+    { tool: 'wall', label: 'Draw walls', detail: floors.length ? `${floors.length} closed ${floors.length === 1 ? 'room' : 'rooms'} · ${area.toFixed(1)} m²` : walls ? 'Keep going until the outline closes' : 'Click corner to corner on the plan', done: floors.length > 0, icon: 'wall' },
+    { tool: 'door', label: 'Place a door', detail: doors ? `${doors} added · drag to slide along the wall` : 'Click any wall to add one', done: doors > 0, icon: 'door' },
+    { tool: 'window', label: 'Place a window', detail: windows ? `${windows} added · drag to slide along the wall` : 'Click any wall to add one', done: windows > 0, icon: 'window' },
+  ]
+  const submitQuickRoom = (event: FormEvent) => { event.preventDefault(); onQuickRoom(Number(width), Number(length)) }
+  return <>
+    <div className="panel-scroll">
+      <PanelHeader step={1} title="Build your room" intro="Outline your walls, then add doors and windows. Everything stays editable." onCollapse={onCollapse} />
+      {!walls && <section className="panel-card quick-room">
+        <button type="button" className="measure-start" onClick={onMeasure}><Icon name="wall" size={20} /><span><strong>Measure your room</strong><small>Walk around and measure wall by wall, with your phone camera or a tape. We build the walls.</small></span><Icon name="arrow" size={14} /></button>
+        <div className="panel-card-title"><strong>Start from a rectangle</strong><span>Enter the inside size of your room</span></div>
+        <form className="quick-room-form" onSubmit={submitQuickRoom}>
+          <label><span>Width</span><span className="unit-input"><input aria-label="Room width in metres" type="number" min="1" max="38" step="0.05" value={width} onChange={(event) => setWidth(event.target.value)} required /><em>m</em></span></label>
+          <span className="times" aria-hidden="true">×</span>
+          <label><span>Length</span><span className="unit-input"><input aria-label="Room length in metres" type="number" min="1" max="38" step="0.05" value={length} onChange={(event) => setLength(event.target.value)} required /><em>m</em></span></label>
+          <button type="submit" className="primary-button">Build this room</button>
+        </form>
+        <div className="quick-room-alt"><button type="button" className="ghost-button" onClick={onTemplates}><Icon name="home" /> Browse templates</button><button type="button" className="ghost-button" onClick={onImport}><Icon name="upload" /> Import a plan</button></div>
+      </section>}
+      <section className="panel-section">
+        <div className="section-title"><span>{walls ? 'Your progress' : 'Or draw it yourself'}</span></div>
+        <ol className="checklist">
+          {checklist.map((item) => <li key={item.tool}>
+            <button type="button" className={`checklist-item ${item.done ? 'checklist-done' : ''} ${activeTool === item.tool ? 'checklist-active' : ''}`} onClick={() => onTool(item.tool)} disabled={item.tool !== 'wall' && !walls}>
+              <span className="checklist-mark">{item.done ? <Icon name="check" size={14} /> : <Icon name={item.icon} size={15} />}</span>
+              <span className="checklist-text"><strong>{item.label}</strong><small>{item.detail}</small></span>
+              <Icon name="arrow" size={14} />
+            </button>
+          </li>)}
+        </ol>
+      </section>
+      {project.planImport && <div className="plan-import-result"><strong>Approximate imported plan</strong><span>{project.planImport.provider === 'vertex-ai' ? `AI confidence ${Math.round(project.planImport.confidence * 100)}%` : 'Local axis-aligned fallback'} · {project.planImport.scaleCalibrated ? 'scale calibrated' : 'scale estimated from full width'}</span><small>Review wall lengths, room boundaries and openings before furnishing.</small></div>}
+      <section className="panel-section">
+        <div className="section-title"><span>Finishes</span></div>
+        <div className="swatch-group" role="group" aria-label="Floor finish"><span className="swatch-label">Floor</span><div className="swatches">{Object.entries(floorColors).map(([name, color]) => <button type="button" key={name} className={`swatch ${project.floorMaterial === name ? 'swatch-active' : ''}`} aria-pressed={project.floorMaterial === name} onClick={() => onPatch({ floorMaterial: name })} title={name}><span style={{ background: color }} /><small>{name}</small></button>)}</div></div>
+        <div className="swatch-group" role="group" aria-label="Wall finish"><span className="swatch-label">Walls</span><div className="swatches">{Object.entries(wallColors).map(([name, color]) => <button type="button" key={name} className={`swatch ${project.wallMaterial === name ? 'swatch-active' : ''}`} aria-pressed={project.wallMaterial === name} onClick={() => onPatch({ wallMaterial: name })} title={name}><span style={{ background: color }} /><small>{name}</small></button>)}</div></div>
+      </section>
+      <details className="panel-details">
+        <summary>Room settings</summary>
+        <label className="field-label">New wall height (m)<NumberInput min="2" max="6" step="0.1" value={project.ceilingHeight} onCommit={(ceilingHeight) => onPatch({ ceilingHeight })} /></label>
+        <p className="muted">The build grid is the drawing area. Expand it without resizing your rooms.</p>
+        <div className="dimension-grid two-col"><label><span>Grid width · metres</span><NumberInput min={project.width} max="40" step="1" value={project.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Grid length · metres</span><NumberInput min={project.length} max="40" step="1" value={project.length} onCommit={(length) => onPatch({ length })} /></label></div>
+      </details>
+      <div className="panel-links"><button type="button" className="ghost-button" onClick={onNewProject}><Icon name="plus" /> New project</button>{walls > 0 && <><button type="button" className="ghost-button" onClick={onMeasure}><Icon name="wall" /> Measure a new room</button><button type="button" className="ghost-button" onClick={onImport}><Icon name="upload" /> Import a plan</button></>}</div>
+    </div>
+    <div className="panel-footer"><button type="button" className="primary-button wide" disabled={!floors.length} onClick={onNext}>{floors.length ? 'Next: furnish your room' : 'Close your walls to continue'} <Icon name="arrow" /></button></div>
+  </>
+}
+
+function ReviewPanel({ project, total, basketCount, warnings, onSelect, onToggle, onAddAll, onShopping, onExport, onRender, onShare, canRender, onCollapse }: {
+  project: ProjectState; total: number | null; basketCount: number; warnings: { id: string; message: string }[]
+  onSelect: (id: string) => void; onToggle: (id: string) => void; onAddAll: () => void; onShopping: () => void; onExport: () => void; onRender: () => void; onShare: () => void; canRender: boolean; onCollapse?: () => void
+}) {
+  const items = project.objects.map((object) => ({ object, product: object.productId ? productById.get(object.productId) ?? null : null, shape: roomItemShape(object) })).filter((item) => item.shape)
+  const catalogItems = items.filter((item) => item.product)
+  return <>
+    <div className="panel-scroll">
+      <PanelHeader step={3} title="Review & shop" intro="Choose what you want to buy. Formivo checks availability with each shop before anything is ordered." onCollapse={onCollapse} />
+      <div className="summary-cards"><div><strong>{items.length}</strong><span>In your room</span></div><div><strong>{basketCount}</strong><span>In basket</span></div><div><strong>{formatPrice(total)}</strong><span>Estimate</span></div></div>
+      <section className="panel-section">
+        <div className="section-title"><span>Items in your room</span>{catalogItems.some((item) => !item.object.inBasket) && <button type="button" className="text-button" onClick={onAddAll} aria-label="Add all products to basket">Add all</button>}</div>
+        {items.length === 0 ? <p className="empty-note">Nothing placed yet. Head back to Furnish to add pieces.</p> : <ul className="review-list">
+          {items.map(({ object, product, shape }) => {
+            const variant = product?.variants?.find((candidate) => candidate.id === object.variantId)
+            return <li key={object.id} className="review-item">
+              <button type="button" className="review-item-main" onClick={() => onSelect(object.id)} title={`Select ${shape!.name}`}>
+                {product ? <ProductThumb product={{ ...product, thumbnailPath: variant?.thumbnailPath || product.thumbnailPath }} compact /> : <span className="custom-swatch" style={{ background: shape!.tone }} />}
+                <span><strong>{shape!.name}</strong><small>{product ? `${variant ? `${variant.name} · ` : ''}${formatPrice(product.price)}` : 'Your own item · not for sale'}</small></span>
+              </button>
+              {product ? <button type="button" className={`basket-toggle ${object.inBasket ? 'basket-toggle-on' : ''}`} aria-pressed={Boolean(object.inBasket)} aria-label={object.inBasket ? `Remove ${shape!.name} from basket` : `Add ${shape!.name} to basket`} onClick={() => onToggle(object.id)}>{object.inBasket ? <><Icon name="check" size={14} /> In basket</> : <><Icon name="plus" size={14} /> Add</>}</button> : <span className="review-tag">Owned</span>}
+            </li>
+          })}
+        </ul>}
+      </section>
+      <section className="panel-section">
+        <div className="section-title"><span>Space check</span><span className={`check-pill ${warnings.length ? 'check-pill-warning' : ''}`}>{warnings.length ? `${warnings.length} to review` : 'All clear'}</span></div>
+        {warnings.length ? warnings.map((warning, i) => <div className="health-row warning" key={i}><span className="health-dot" />{warning.message}</div>) : <div className="health-row"><span className="health-dot" />No boundary, overlap or door-clearance warnings.</div>}
+        <p className="muted">Basic footprint checks. Verify circulation and delivery access before purchase.</p>
+      </section>
+      <section className="panel-section">
+        <div className="section-title"><span>Share & visualise</span></div>
+        <div className="action-tiles">
+          <button type="button" onClick={onRender} disabled={!canRender}><Icon name="image" size={18} /><span><strong>Create a render</strong><small>Photo-style view of your room</small></span></button>
+          <button type="button" onClick={onShare}><Icon name="share" size={18} /><span><strong>Copy share link</strong><small>Anyone with it can open a copy</small></span></button>
+          <button type="button" onClick={onExport}><Icon name="download" size={18} /><span><strong>Download CSV</strong><small>Shopping list for your records</small></span></button>
+        </div>
+      </section>
+    </div>
+    <div className="panel-footer"><button type="button" className="primary-button wide" onClick={onShopping}><Icon name="shopping" /> Review basket{basketCount ? ` (${basketCount})` : ''} <Icon name="arrow" /></button></div>
+  </>
+}
+
+function WallHeight({ object, onPatch }: { object: RoomObject; onPatch: (patch: Partial<RoomObject>) => void }) {
+  return <section className="inspector-section">
+    <div className="section-label-row"><span>On the wall</span><span className="muted">cm</span></div>
+    <label className="field-label"><span>Height above floor (cm)</span><NumberInput aria-label="Height above floor in centimetres" min="0" max="600" step="5" value={Math.round((object.elevation ?? 0) * 100)} onCommit={(cm) => onPatch({ elevation: cm / 100 })} /></label>
+    <p className="muted">Measured to the bottom edge. Drag the item to slide it along its wall.</p>
+  </section>
+}
+
+function ObjectProperties({ object, product, actions, similar, onPatch, onClose }: {
+  onClose: () => void
+  object: RoomObject
+  product: Product
+  actions: ReactNode
+  similar: ReactNode
+  onPatch: (patch: Partial<RoomObject>) => void
+}) {
+  const variant = product.variants?.find((candidate) => candidate.id === object.variantId)
   return (
     <>
       <div className="inspector-heading">
         <div>
-          <span className="eyebrow">Your own layout</span>
-          <h2>Space overview</h2>
-        </div>
-        <span className="status-pill">Metric</span>
-      </div>
-      <section className="inspector-section">
-        <div className="section-label-row"><span>Built by you</span><span className="muted">Live geometry</span></div>
-        <div className="spec-grid"><div><strong>{project.features.filter((f) => f.type === 'wall').length}</strong><span>Walls</span></div><div><strong>{regions.length}</strong><span>Closed rooms</span></div><div><strong>{regions.reduce((sum, r) => sum + r.area, 0).toFixed(1)}</strong><span>Floor m²</span></div></div>
-        <p className="muted">{regions.length ? 'Floors follow your walls. Move a corner to reshape connected walls, or delete a wall to open the room.' : 'Draw connected walls on the grid. The floor appears when the outline closes.'}</p>
-        {project.planImport && <div className="plan-import-result"><strong>Approximate imported plan</strong><span>{project.planImport.provider === 'vertex-ai' ? `AI confidence ${Math.round(project.planImport.confidence * 100)}%` : 'Local axis-aligned fallback'} · {project.planImport.scaleCalibrated ? 'scale calibrated' : 'scale estimated from full width'}</span><small>Review wall lengths, room boundaries and openings before furnishing.</small></div>}
-        <label className="field-label">New wall height (m)<NumberInput min="2" max="6" step="0.1" value={project.ceilingHeight} onCommit={(ceilingHeight) => onPatch({ ceilingHeight })} /></label>
-        <details className="build-grid-settings"><summary>Build grid settings</summary><p className="muted">Expand the canvas without resizing your rooms.</p><div className="dimension-grid"><label><span>Grid width</span><NumberInput min={project.width} max="40" step="1" value={project.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Grid length</span><NumberInput min={project.length} max="40" step="1" value={project.length} onCommit={(length) => onPatch({ length })} /></label></div></details>
-      </section>
-      <section className="inspector-section">
-        <div className="section-label-row"><span>Materials</span><span className="muted">Room finishes</span></div>
-        <label className="material-row"><span className="material-swatch" style={{ background: floorColors[project.floorMaterial] }} /><span className="field-label">Floor finish<select value={project.floorMaterial} onChange={(event) => onPatch({ floorMaterial: event.target.value })}>{Object.keys(floorColors).map((name) => <option key={name}>{name}</option>)}</select></span></label>
-        <label className="material-row"><span className="material-swatch" style={{ background: wallColors[project.wallMaterial] }} /><span className="field-label">Wall finish<select value={project.wallMaterial} onChange={(event) => onPatch({ wallMaterial: event.target.value })}>{Object.keys(wallColors).map((name) => <option key={name}>{name}</option>)}</select></span></label>
-      </section>
-      <section className="inspector-section room-health">
-        <div className="section-label-row"><span>Space check</span><span className="check-count">{project.objects.length} items</span></div>
-        {warnings.length ? warnings.map((warning, i) => <div className="health-row warning" key={i}><span className="health-dot" />{warning.message}</div>) : <div className="health-row"><span className="health-dot good" />No boundary or furniture overlap warnings</div>}
-        <p className="muted">Basic footprint checks. Verify circulation and delivery access before purchase.</p>
-      </section>
-      <div className="inspector-tip"><span className="tip-icon">i</span><span>Select an item to move, rotate, duplicate, delete, or add it to the basket. Open Details for exact dimensions.</span></div>
-    </>
-  )
-}
-
-function ObjectProperties({
-  object,
-  product,
-  onPatch,
-  onRotate,
-  onDuplicate,
-  onDelete,
-  onClose,
-}: {
-  onClose: () => void
-  object: RoomObject
-  product: Product
-  onPatch: (patch: Partial<RoomObject>) => void
-  onRotate: () => void
-  onDuplicate: () => void
-  onDelete: () => void
-}) {
-  return (
-    <>
-      <div className="inspector-heading inspector-heading-product">
-        <div>
-          <span className="eyebrow">Selected product</span>
+          <span className="eyebrow">{product.category}</span>
           <h2>{product.name}</h2>
         </div>
-        <button className="icon-button" title="Close selection" onClick={onClose}><Icon name="close" /></button>
+        <button className="icon-button" title="Close selection" aria-label="Close selection" onClick={onClose}><Icon name="close" /></button>
       </div>
-      <div className="selected-product-card"><ProductThumb product={{ ...product, thumbnailPath: product.variants?.find((variant) => variant.id === object.variantId)?.thumbnailPath || product.thumbnailPath }} compact /><div><strong>{product.brand}</strong><span>{product.retailer}</span><small>{product.sku}</small></div></div>
+      <div className="selected-product-card"><ProductThumb product={{ ...product, thumbnailPath: variant?.thumbnailPath || product.thumbnailPath }} compact /><div><strong>{formatPrice(product.price)}</strong><span>{product.brand} · {product.retailer}</span><small>{product.width} × {product.depth} × {product.height} cm</small></div></div>
+      {actions}
       {product.verification && <p className="muted">Photo-based reconstruction · visual review pending. Fabric and fine details are inferred, not manufacturer-verified.</p>}
-      <section className="inspector-section">
-        <div className="section-label-row"><span>Dimensions</span><span className="verified-label">{product.status.includes('Verified') ? 'Verified' : 'Check status'}</span></div>
-        <div className="spec-grid"><div><strong>{product.width}</strong><span>Length cm</span></div><div><strong>{product.depth}</strong><span>{product.cornerDepth ? 'Corner depth cm' : 'Depth cm'}</span></div><div><strong>{product.height}</strong><span>Height cm</span></div></div>
-      </section>
       {product.variants?.length ? <section className="inspector-section">
-        <div className="section-label-row"><span>Colour variant</span><span className="muted">Generated material</span></div>
-        <label className="field-label"><span>Finish</span><select aria-label="Product variant" value={object.variantId || product.variants[0].id} onChange={(event) => onPatch({ variantId: event.target.value })}>{product.variants.map((variant) => <option key={variant.id} value={variant.id}>{variant.name}{variant.sourceVariantName ? ` · ${variant.sourceVariantName}` : ''}</option>)}</select></label>
+        <div className="section-label-row"><span>Colour</span></div>
+        <label className="field-label"><span className="visually-hidden">Finish</span><select aria-label="Product variant" value={object.variantId || product.variants[0].id} onChange={(event) => onPatch({ variantId: event.target.value })}>{product.variants.map((item) => <option key={item.id} value={item.id}>{item.name}{item.sourceVariantName ? ` · ${item.sourceVariantName}` : ''}</option>)}</select></label>
       </section> : null}
-      <section className="inspector-section">
-        <div className="section-label-row"><span>Placement</span><span className="muted">metres / degrees</span></div>
+      {similar}
+      {isWallMounted(object) ? <WallHeight object={object} onPatch={onPatch} /> : <section className="inspector-section">
+        <div className="section-label-row"><span>Exact position</span><span className="muted">metres · degrees</span></div>
         <div className="dimension-grid placement-grid">
           <label><span>X</span><NumberInput step="0.05" value={object.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label>
-          <label><span>Rotation</span><NumberInput step="15" value={Math.round((object.rotation * 180) / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label>
           <label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label>
+          <label><span>Rotation</span><NumberInput step="15" value={Math.round((object.rotation * 180) / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label>
         </div>
-        <button className="rotate-button" onClick={onRotate}><Icon name="rotate" /> Rotate 15°</button>
+      </section>}
+      <section className="inspector-section">
+        <div className="section-label-row"><span>Size</span><span className="verified-label">{product.status.includes('Verified') ? 'Verified' : 'Check status'}</span></div>
+        <div className="spec-grid"><div><strong>{product.width}</strong><span>Length cm</span></div><div><strong>{product.depth}</strong><span>{product.cornerDepth ? 'Corner depth cm' : 'Depth cm'}</span></div><div><strong>{product.height}</strong><span>Height cm</span></div></div>
+        <p className="muted">{product.status}</p>
       </section>
-      <section className="inspector-section product-price-section"><div><span className="muted">Unit price</span><strong className="price-large">{formatPrice(product.price)}</strong></div><span className="price-status">{product.status}</span></section>
-      <div className="inspector-actions"><button className="secondary-button" onClick={onDuplicate}><Icon name="copy" /> Duplicate</button><button className="danger-button" onClick={onDelete}><Icon name="trash" /> Delete</button></div>
     </>
   )
 }
 
-function CustomObjectProperties({ object, onPatch, onRotate, onDuplicate, onDelete, onClose }: { object: RoomObject & { custom: CustomRoomItem }; onPatch: (patch: Partial<RoomObject>) => void; onRotate: () => void; onDuplicate: () => void; onDelete: () => void; onClose: () => void }) {
+function CustomObjectProperties({ object, actions, onPatch, onClose }: { object: RoomObject & { custom: CustomRoomItem }; actions: ReactNode; onPatch: (patch: Partial<RoomObject>) => void; onClose: () => void }) {
   const [name, setName] = useState(object.custom.name)
   useEffect(() => setName(object.custom.name), [object.custom.name])
   const patch = (value: Partial<CustomRoomItem>) => onPatch({ custom: { ...object.custom, ...value } })
   return <>
-    <div className="inspector-heading inspector-heading-product"><div><span className="eyebrow">Existing furniture</span><h2>{object.custom.name}</h2></div><button className="icon-button" title="Close selection" onClick={onClose}><Icon name="close" /></button></div>
-    <section className="inspector-section"><div className="section-label-row"><span>Measured dimensions</span><span className="muted">cm</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="1" max="2000" step="1" value={object.custom.width} onCommit={(width) => patch({ width })} /></label><label><span>Depth</span><NumberInput min="1" max="2000" step="1" value={object.custom.depth} onCommit={(depth) => patch({ depth })} /></label><label><span>Height</span><NumberInput min="1" max="600" step="1" value={object.custom.height} onCommit={(height) => patch({ height })} /></label></div></section>
-    <section className="inspector-section"><div className="section-label-row"><span>Appearance</span><span className="muted">Illustrative block</span></div><label className="field-label">Name<input value={name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim()) patch({ name: name.trim() }); else setName(object.custom.name) }} maxLength={80} /></label><label className="material-row"><span className="material-swatch" style={{ background: object.custom.color }} /><span className="field-label">Color<input type="color" value={object.custom.color} onChange={(event) => patch({ color: event.target.value })} /></span></label><label className="field-label">Type<select value={object.custom.kind} onChange={(event) => patch({ kind: event.target.value as CustomRoomItem['kind'] })}><option value="furniture">Furniture</option><option value="rug">Rug</option></select></label></section>
-    <section className="inspector-section"><div className="section-label-row"><span>Placement</span><span className="muted">metres / degrees</span></div><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={object.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round(object.rotation * 180 / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label><label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label></div><button className="rotate-button" onClick={onRotate}><Icon name="rotate" /> Rotate 15°</button></section>
-    <div className="inspector-tip"><span className="tip-icon">i</span><span>This item stays in the room but is never added to the shopping basket.</span></div>
-    <div className="inspector-actions"><button className="secondary-button" onClick={onDuplicate}><Icon name="copy" /> Duplicate</button><button className="danger-button" onClick={onDelete}><Icon name="trash" /> Delete</button></div>
+    <div className="inspector-heading"><div><span className="eyebrow">Your own item · not for sale</span><h2>{object.custom.name}</h2></div><button className="icon-button" title="Close selection" aria-label="Close selection" onClick={onClose}><Icon name="close" /></button></div>
+    {actions}
+    <section className="inspector-section"><div className="section-label-row"><span>Measured size</span><span className="muted">cm</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="1" max="2000" step="1" value={object.custom.width} onCommit={(width) => patch({ width })} /></label><label><span>Depth</span><NumberInput min="1" max="2000" step="1" value={object.custom.depth} onCommit={(depth) => patch({ depth })} /></label><label><span>Height</span><NumberInput min="1" max="600" step="1" value={object.custom.height} onCommit={(height) => patch({ height })} /></label></div></section>
+    <section className="inspector-section"><div className="section-label-row"><span>Appearance</span></div><label className="field-label">Name<input value={name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim()) patch({ name: name.trim() }); else setName(object.custom.name) }} maxLength={80} /></label><div className="form-grid"><label className="field-label">Colour<input type="color" value={object.custom.color} onChange={(event) => patch({ color: event.target.value })} /></label>{object.custom.kind !== 'wall' && <label className="field-label">Type<select value={object.custom.kind} onChange={(event) => patch({ kind: event.target.value as CustomRoomItem['kind'] })}><option value="furniture">Furniture</option><option value="rug">Rug</option></select></label>}</div></section>
+    {object.custom.kind === 'wall' ? <WallHeight object={object} onPatch={onPatch} /> : <section className="inspector-section"><div className="section-label-row"><span>Exact position</span><span className="muted">metres · degrees</span></div><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={object.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round(object.rotation * 180 / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label></div></section>}
+    <p className="muted">This item stays in your room plan but is never added to the shopping basket.</p>
   </>
 }
 
-function FeatureProperties({ project, feature, onPatch, onDelete }: { project: ProjectState; feature: RoomFeature; onPatch: (patch: Partial<RoomFeature>) => void; onDelete: () => void }) {
+function FeatureProperties({ project, feature, onPatch, onDelete, onClose }: { project: ProjectState; feature: RoomFeature; onPatch: (patch: Partial<RoomFeature>) => void; onDelete: () => void; onClose: () => void }) {
   const title = feature.type === 'wall' ? 'Wall' : feature.type === 'door' ? 'Door opening' : 'Window opening'
   return (
     <>
-      <div className="inspector-heading"><div><span className="eyebrow">Architecture</span><h2>{title}</h2></div><span className="status-pill">Editable</span></div>
-      <section className="inspector-section"><div className="section-label-row"><span>{feature.type === 'wall' ? 'Wall size' : 'Opening size'}</span><span className="muted">metres</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="0.3" max="20" step="0.05" value={feature.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Height</span><NumberInput min="0.3" max="6" step="0.05" value={feature.height} onCommit={(height) => onPatch({ height })} /></label>{feature.type === 'wall' && <label><span>Thickness</span><NumberInput min="0.02" max="2" step="0.01" value={wallThickness(feature).toFixed(3)} onCommit={(thickness) => onPatch({ thickness })} /></label>}{feature.type === 'window' && <label><span>Sill</span><NumberInput min="0" max="6" step="0.05" value={feature.sillHeight || 0} onCommit={(sillHeight) => onPatch({ sillHeight })} /></label>}</div></section>
-      <section className="inspector-section"><div className="section-label-row"><span>Position</span><span className="muted">metres / degrees</span></div>{feature.type === 'wall' ? <><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={feature.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round((feature.rotation * 180) / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label><label><span>Z</span><NumberInput step="0.05" value={feature.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label></div><p className="muted">Drag a green corner in 2D. Connected walls follow it; floors update automatically. Deleting this wall also removes its doors and windows.</p></> : <><label className="field-label">Attached wall<select value={feature.wallId} onChange={(event) => onPatch({ wallId: event.target.value, wallOffset: 0 })}>{project.features.filter((f) => f.type === 'wall' && f.width >= 0.5).map((wall, i) => <option key={wall.id} value={wall.id}>Wall {i + 1} · {wall.width.toFixed(2)} m</option>)}</select></label><label className="field-label">Position along wall (m)<NumberInput step="0.1" value={feature.wallOffset || 0} onCommit={(wallOffset) => onPatch({ wallOffset })} /></label><p className="muted">Measured from the wall centre. Openings follow their wall when you reshape the space.</p></>}</section>
+      <div className="inspector-heading"><div><span className="eyebrow">Architecture</span><h2>{title}</h2></div><button className="icon-button" title="Close selection" aria-label="Close selection" onClick={onClose}><Icon name="close" /></button></div>
+      <p className="inspector-hint">{feature.type === 'wall' ? 'Drag the round handles at either end to reshape. Connected walls and floors follow.' : 'Drag it along its wall to reposition. It follows the wall when you reshape the room.'}</p>
+      {feature.type !== 'wall' && <OpeningOptions feature={feature} onPatch={onPatch} />}
+      <section className="inspector-section"><div className="section-label-row"><span>{feature.type === 'wall' ? 'Size' : 'Exact size'}</span><span className="muted">metres</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="0.3" max="20" step="0.05" value={feature.width} onCommit={(width) => onPatch({ width })} /></label><label><span>Height</span><NumberInput min="0.3" max="6" step="0.05" value={feature.height} onCommit={(height) => onPatch({ height })} /></label>{feature.type === 'wall' && <label><span>Thickness</span><NumberInput min="0.02" max="2" step="0.01" value={wallThickness(feature).toFixed(3)} onCommit={(thickness) => onPatch({ thickness })} /></label>}{feature.type === 'window' && <label><span>Sill</span><NumberInput min="0" max="6" step="0.05" value={feature.sillHeight || 0} onCommit={(sillHeight) => onPatch({ sillHeight })} /></label>}</div></section>
+      <section className="inspector-section"><div className="section-label-row"><span>Position</span><span className="muted">metres · degrees</span></div>{feature.type === 'wall' ? <div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={feature.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Z</span><NumberInput step="0.05" value={feature.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round((feature.rotation * 180) / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label></div> : <><label className="field-label">Attached wall<select value={feature.wallId} onChange={(event) => onPatch({ wallId: event.target.value, wallOffset: 0 })}>{project.features.filter((f) => f.type === 'wall' && f.width >= 0.5).map((wall, i) => <option key={wall.id} value={wall.id}>Wall {i + 1} · {wall.width.toFixed(2)} m</option>)}</select></label><label className="field-label">Offset from wall centre (m)<NumberInput step="0.1" value={feature.wallOffset || 0} onCommit={(wallOffset) => onPatch({ wallOffset })} /></label></>}</section>
+      {feature.type === 'wall' && <p className="muted">Removing this wall also removes its doors and windows.</p>}
       <div className="inspector-actions"><button className="danger-button" onClick={onDelete}><Icon name="trash" /> Remove {feature.type}</button></div>
     </>
   )
@@ -707,8 +818,8 @@ function ShoppingDrawer({
   onExport,
   onRequest,
 }: {
-  items: { product: Product; quantity: number; subtotal: number }[]
-  total: number
+  items: { id: string; product: Product; variantName?: string; quantity: number; subtotal: number | null }[]
+  total: number | null
   onClose: () => void
   onExport: () => void
   onRequest: () => void
@@ -718,16 +829,16 @@ function ShoppingDrawer({
     <>
       <button className="drawer-backdrop" aria-label="Close shopping list" onClick={onClose} />
       <aside className="shopping-drawer" role="dialog" aria-modal="true" aria-label="Shopping list">
-        <div className="drawer-header"><div><span className="eyebrow">Purchase-ready list</span><h2>Shopping list</h2></div><button className="icon-button" onClick={onClose} title="Close shopping list"><Icon name="close" /></button></div>
+        <div className="drawer-header"><div><span className="eyebrow">Basket for manual review</span><h2>Shopping list</h2></div><button className="icon-button" onClick={onClose} title="Close shopping list"><Icon name="close" /></button></div>
         <div className="drawer-intro"><span className="drawer-check">✓</span><p>{items.length} products from {retailers} retailers<br /><small>Grouped by product and SKU</small></p></div>
         <div className="shopping-items">
-          {items.map(({ product, quantity, subtotal }) => (
-            <div className="shopping-item" key={product.id}><ProductThumb product={product} compact /><div className="shopping-item-info"><strong>{product.name}</strong><span>{product.retailer} · {product.sku}</span><small>{product.width} × {product.depth} × {product.height} cm · {formatPrice(product.price)} each</small><small>{product.status}</small></div><div className="shopping-item-price"><span>×{quantity}</span><strong>{formatPrice(subtotal)}</strong></div></div>
+          {items.map(({ id, product, variantName, quantity, subtotal }) => (
+            <div className="shopping-item" key={id}><ProductThumb product={product} compact /><div className="shopping-item-info"><strong>{product.name}{variantName ? ` · ${variantName}` : ''}</strong><span>{product.retailer} · {product.sku}</span><small>{product.width} × {product.depth} × {product.height} cm · {formatPrice(product.price)} each</small><small>{product.status}</small></div><div className="shopping-item-price"><span>×{quantity}</span><strong>{formatPrice(subtotal)}</strong></div></div>
           ))}
-          {items.length === 0 ? <div className="empty-search">No products in the basket yet. Add any room item when you are ready to consider buying it.</div> : <section className="retailer-summary"><h3>By retailer</h3>{[...new Set(items.map((item) => item.product.retailer))].map((name) => <div key={name}><span>{name}</span><strong>{formatPrice(items.filter((item) => item.product.retailer === name).reduce((sum, item) => sum + item.subtotal, 0))}</strong></div>)}</section>}
+          {items.length === 0 ? <div className="empty-search">No products in the basket yet. Add any room item when you are ready to consider buying it.</div> : <section className="retailer-summary"><h3>By retailer</h3>{[...new Set(items.map((item) => item.product.retailer))].map((name) => <div key={name}><span>{name}</span><strong>{formatPrice(items.filter((item) => item.product.retailer === name).some((item) => item.subtotal === null) ? null : items.filter((item) => item.product.retailer === name).reduce((sum, item) => sum + (item.subtotal ?? 0), 0))}</strong></div>)}</section>}
         </div>
-        <div className="drawer-total"><div><span>Estimated total</span><small>Prices and availability are subject to retailer confirmation.</small></div><strong>{formatPrice(total)}</strong></div>
-        <div className="drawer-actions"><button className="secondary-button" onClick={onExport}><Icon name="download" /> Export CSV</button><button className="primary-button" onClick={onRequest} disabled={!items.length}><Icon name="arrow" /> Request a quote</button></div>
+        <div className="drawer-total"><div><span>Estimated total</span><small>Prices and stock will be checked with the retailers.</small></div><strong>{formatPrice(total)}</strong></div>
+        <div className="drawer-actions"><button className="secondary-button" onClick={onExport}><Icon name="download" /> Export CSV</button><button className="primary-button" onClick={onRequest} disabled={!items.length}><Icon name="arrow" /> Request purchase</button></div>
       </aside>
     </>
   )
@@ -742,8 +853,7 @@ function roomTemplateProject(template: RoomTemplate, name: string) {
     : template === 'bedroom' ? { type: 'Bedroom', width: 4.6, length: 4.8, objects: [['bed-cloud', 0, -0.1], ['nightstand-form', -1.25, -0.7], ['nightstand-form', 1.25, -0.7]] as [string, number, number][] }
       : { type: 'Studio', width: 7, length: 5.5, objects: [['sofa-haven', -1, -1.3], ['table-arc', -0.7, 0.2], ['rug-loom', -0.7, 0.2], ['table-form', 1.7, 1.2]] as [string, number, number][] }
   project.roomType = room.type
-  const corners: Point[] = [{ x: -room.width / 2, z: -room.length / 2 }, { x: room.width / 2, z: -room.length / 2 }, { x: room.width / 2, z: room.length / 2 }, { x: -room.width / 2, z: room.length / 2 }]
-  project.features = corners.map((point, index) => wallFromPoints(makeId('wall'), point, corners[(index + 1) % corners.length], project.ceilingHeight))
+  project.features = rectangleWalls(room.width, room.length, project.ceilingHeight)
   project.objects = room.objects.map(([productId, x, z]) => {
     const variantId = productById.get(productId)?.variants?.[0]?.id
     return { id: makeId('object'), productId, ...(variantId ? { variantId } : {}), x, z, rotation: 0, inBasket: false }
@@ -751,31 +861,33 @@ function roomTemplateProject(template: RoomTemplate, name: string) {
   return project
 }
 
-function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate: (project: ProjectState) => void }) {
+function NewProjectModal({ onClose, onCreate, initialTemplate = 'empty' }: { onClose: () => void; onCreate: (project: ProjectState) => void; initialTemplate?: RoomTemplate }) {
   const [name, setName] = useState('My space')
-  const [template, setTemplate] = useState<RoomTemplate>('empty')
+  const [template, setTemplate] = useState<RoomTemplate>(initialTemplate)
   const submit = (event: FormEvent) => { event.preventDefault(); onCreate(roomTemplateProject(template, name.trim() || 'My space')) }
-  const templates: { id: RoomTemplate; name: string; detail: string }[] = [{ id: 'empty', name: 'Empty', detail: 'Draw your own room' }, { id: 'living-room', name: 'Living room', detail: 'Sofa, table, rug, lamp' }, { id: 'bedroom', name: 'Bedroom', detail: 'Bed and bedside tables' }, { id: 'studio', name: 'Studio', detail: 'Living and dining zones' }]
+  const templates: { id: RoomTemplate; name: string; detail: string; icon: IconName }[] = [{ id: 'empty', name: 'Empty', detail: 'Draw your own room', icon: 'wall' }, { id: 'living-room', name: 'Living room', detail: 'Sofa, table, rug, lamp', icon: 'sofa' }, { id: 'bedroom', name: 'Bedroom', detail: 'Bed and bedside tables', icon: 'home' }, { id: 'studio', name: 'Studio', detail: 'Living and dining zones', icon: 'grid' }]
   return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close new project dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Project dialog" onSubmit={submit}>
-    <div className="modal-header"><div><span className="eyebrow">Start with a room</span><h2>Create your space</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
+    <div className="modal-header"><div><span className="eyebrow">New project</span><h2>Create your space</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
     <label className="field-label">Project name<input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></label>
-    <div className="template-options" role="group" aria-label="Room template">{templates.map((item) => <button type="button" key={item.id} className={template === item.id ? 'template-option template-option-active' : 'template-option'} aria-pressed={template === item.id} onClick={() => setTemplate(item.id)}><strong>{item.name}</strong><span>{item.detail}</span></button>)}</div>
-    <p className="catalog-intro">Templates create editable walls and sample furniture. Sample products start outside the basket, so you can experiment freely.</p>
+    <div className="template-options" role="group" aria-label="Room template">{templates.map((item) => <button type="button" key={item.id} className={template === item.id ? 'template-option template-option-active' : 'template-option'} aria-pressed={template === item.id} onClick={() => setTemplate(item.id)}><Icon name={item.icon} size={20} /><strong>{item.name}</strong><span>{item.detail}</span></button>)}</div>
+    <p className="form-note">Templates create editable walls and sample furniture. Sample products start outside the basket, so you can experiment freely. Your current layout is replaced; Undo brings it back.</p>
     <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">{template === 'empty' ? 'Create space' : 'Create room'} <Icon name="arrow" /></button></div>
   </form></div>
 }
 
-function PurchaseRequestModal({ project, total, onClose }: { project: ProjectState; total: number; onClose: () => void }) {
-  const [submitted, setSubmitted] = useState(false)
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
-    const customer = Object.fromEntries(new FormData(event.currentTarget as HTMLFormElement))
-    const items = project.objects.filter((object) => object.inBasket && object.productId).map((object) => ({ objectId: object.id, product: productById.get(object.productId!) }))
-    downloadFile('formivo-quote-request.json', JSON.stringify({ createdAt: new Date().toISOString(), status: 'draft', customer, project, items, estimatedTotal: total, currency: 'EUR' }, null, 2), 'application/json')
-    setSubmitted(true)
+function PurchaseRequestModal({ total, onClose, onSubmit }: { total: number | null; onClose: () => void; onSubmit: (customer: { name: string; phone: string; city: string; notes: string }) => Promise<void> }) {
+  const [submitted, setSubmitted] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setBusy(true); setError('')
+    const form = new FormData(event.currentTarget)
+    try {
+      await onSubmit({ name: String(form.get('name') || ''), phone: String(form.get('phone') || ''), city: String(form.get('city') || ''), notes: String(form.get('notes') || '') })
+      setSubmitted(true)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'The request could not be sent.') }
+    finally { setBusy(false) }
   }
   return (
-    <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close purchase request" />{submitted ? <div className="modal-card success-card" role="dialog" aria-modal="true" aria-label="Quote draft exported"><div className="success-icon">✓</div><span className="eyebrow">Quote draft exported</span><h2>Your request is ready.</h2><p>Your downloaded file contains your contact details, room plan and product snapshots. Nothing has been sent to a retailer. Keep the file private and share it only with your chosen partner.</p><button className="primary-button" autoFocus onClick={onClose}>Back to room</button></div> : <form className="modal-card" role="dialog" aria-modal="true" aria-label="Project dialog" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Estimated total {formatPrice(total)}</span><h2>Request a quote</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><div className="form-grid"><label className="field-label">Full name<input name="name" required placeholder="Your name" /></label><label className="field-label">Email<input name="email" required type="email" placeholder="you@example.com" /></label><label className="field-label">Phone<input name="phone" type="tel" placeholder="+30 69..." /></label><label className="field-label">Delivery city<input name="city" required placeholder="Athens" /></label></div><label className="field-label">Notes<textarea name="notes" rows={3} placeholder="Anything we should know about delivery or installation?" /></label><p className="form-note">Demo: this downloads a quote draft, not a live submission. Sample prices, stock, delivery and installation require retailer confirmation.</p><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Download request <Icon name="download" /></button></div></form>}</div>
+    <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close purchase request" />{submitted ? <div className="modal-card success-card" role="dialog" aria-modal="true" aria-label="Purchase request submitted"><div className="success-icon">✓</div><span className="eyebrow">Request submitted</span><h2>Your request is with Formivo.</h2><p>We’ll check availability with each shop. Track progress in your profile. This request is not an order, and no payment has been taken.</p><button className="primary-button" autoFocus onClick={onClose}>Back to room</button></div> : <form className="modal-card" role="dialog" aria-modal="true" aria-label="Purchase request" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Estimated total {formatPrice(total)}</span><h2>Request purchase</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><div className="form-grid"><label className="field-label">Full name<input name="name" required placeholder="Your name" /></label><label className="field-label">Account email<input type="email" value={auth?.currentUser?.email || ''} disabled /></label><label className="field-label">Phone<input name="phone" type="tel" placeholder="+30 69..." /></label><label className="field-label">Delivery city<input name="city" required placeholder="Athens" /></label></div><label className="field-label">Notes<textarea name="notes" rows={3} placeholder="Anything we should know about delivery or installation?" /></label><p className="form-note">Your basket and delivery details go to Formivo for manual availability checks. This does not place an order or take payment.</p>{error && <p className="form-note" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Sending…' : 'Send purchase request'} <Icon name="arrow" /></button></div></form>}</div>
   )
 }
 
@@ -789,15 +901,21 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
   const [start, setStart] = useState<PixelPoint | null>(null)
   const [calibrationPoints, setCalibrationPoints] = useState<PixelPoint[]>([])
   const [allowAi, setAllowAi] = useState(false)
+  const [elevationFile, setElevationFile] = useState<File | null>(null)
+  const [elevationName, setElevationName] = useState('')
+  const [ceilingHeight, setCeilingHeight] = useState(2.8)
+  const [ceilingHeightEdited, setCeilingHeightEdited] = useState(false)
+  const sourceFile = useRef<File | null>(null)
   const request = useRef(0)
   const draft = useMemo(() => {
     if (!analysis || !realWidth || calibrationPoints.length === 1) return { project: null, error: '' }
     const calibration: PlanCalibration | undefined = calibrationPoints.length === 2 ? { a: calibrationPoints[0], b: calibrationPoints[1] } : undefined
-    try { return { project: createProjectFromPlan(analysis, Number(realWidth), name, calibration), error: '' } }
+    try { return { project: createProjectFromPlan(analysis, Number(realWidth), name, calibration, ceilingHeight), error: '' } }
     catch (reason) { return { project: null, error: reason instanceof Error ? reason.message : 'Check the drawing.' } }
-  }, [analysis, realWidth, name, calibrationPoints])
+  }, [analysis, realWidth, name, calibrationPoints, ceilingHeight])
   const update = (next: PlanAnalysis) => { setAnalysis(next) }
   const selectedSegment = selected && analysis ? analysis[selected.kind][selected.index] : null
+  const selectedOpening = selected?.kind === 'openings' && analysis ? analysis.openings[selected.index] : null
   const patchSegment = (patch: Partial<PixelOpening>) => {
     if (!selected || !analysis || !selectedSegment) return
     const next = { ...selectedSegment, ...patch, a: { ...(patch.a || selectedSegment.a) }, b: { ...(patch.b || selectedSegment.b) } }
@@ -808,15 +926,22 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
   }
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const choose = async (file: File | undefined) => {
+  const choose = async (file: File | undefined, nextElevation: File | null = elevationFile, useAi = allowAi) => {
     if (!file) return
+    sourceFile.current = file
     const version = ++request.current
     setFileName(file.name)
     setName(file.name.replace(/\.[^.]+$/, '') || 'Imported plan')
-    setError(''); setSelected(null); setStart(null); setCalibrationPoints([]); setRealWidth('')
+    setError(''); setSelected(null); setStart(null); setCalibrationPoints([]); setRealWidth(''); setCeilingHeight(2.8); setCeilingHeightEdited(false)
     setAnalysis(null)
     setLoading(true)
-    try { const result = await analyzePlanFile(file, allowAi ? requestPlanDetection : undefined); if (version === request.current) setAnalysis(result) } catch (reason) { if (version === request.current) setError(reason instanceof Error ? reason.message : 'The drawing could not be analyzed.') }
+    try {
+      const result = await analyzePlanFile(file, useAi ? requestPlanDetection : undefined, useAi ? nextElevation || undefined : undefined)
+      if (version === request.current) {
+        setAnalysis(result)
+        if (result.ceilingHeight !== undefined && (result.ceilingHeightConfidence ?? 0) >= 0.65) setCeilingHeight(result.ceilingHeight)
+      }
+    } catch (reason) { if (version === request.current) setError(reason instanceof Error ? reason.message : 'The drawing could not be analyzed.') }
     finally { if (version === request.current) setLoading(false) }
   }
   const submit = (event: FormEvent) => {
@@ -826,9 +951,10 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
   }
   return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close import dialog" /><form className="modal-card plan-import-card" role="dialog" aria-modal="true" aria-label="Import architectural drawing" onSubmit={submit}>
     <div className="modal-header"><div><span className="eyebrow">AI-assisted · approximate geometry</span><h2>Import a floor plan</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
-    <p className="catalog-intro">Upload an architectural plan, screenshot, or simple sketch. AI returns editable walls, rooms and suggested openings. Geometry and dimensions are approximate; review and calibrate the scale before furnishing. Room photos and video are not supported in this release.</p>
-    <label className="plan-ai-consent"><input type="checkbox" checked={allowAi} onChange={(event) => setAllowAi(event.target.checked)} /><span>Send this image to Google Vertex AI for detection. If unchecked, use the on-device detector. Do not upload layouts you are not comfortable processing with the selected provider.</span></label>
-    <label className="plan-import-file"><Icon name="upload" /><span>{fileName || 'Choose PNG, JPG, WebP, SVG, or PDF'}</span><input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,application/pdf" onChange={(event) => choose(event.currentTarget.files?.[0])} /></label>
+    <p className="catalog-intro">Upload a floor plan, screenshot, or simple sketch. Review and calibrate the detected walls before building the 3D room. Add an elevation to help estimate ceiling, door, and window heights. Room photos and video are not supported in this release.</p>
+    <label className="plan-ai-consent"><input type="checkbox" checked={allowAi} onChange={(event) => { const useAi = event.target.checked; setAllowAi(useAi); if (sourceFile.current) void choose(sourceFile.current, elevationFile, useAi) }} /><span>Send the plan and optional elevation to Google Vertex AI for detection. If unchecked, use the on-device plan detector; it cannot read elevation heights. Images are processed for this request and are not stored by the detection service.</span></label>
+    <label className="plan-import-file"><Icon name="upload" /><span>{fileName || 'Choose PNG, JPG, WebP, SVG, or PDF floor plan'}</span><input aria-label="Floor plan drawing" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,application/pdf" onChange={(event) => choose(event.currentTarget.files?.[0])} /></label>
+    {allowAi && <label className="plan-import-file"><Icon name="upload" /><span>{elevationName || 'Optional elevation drawing · PDF, PNG, JPG, or WebP'}</span><input aria-label="Elevation drawing" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" onChange={(event) => { const file = event.currentTarget.files?.[0] || null; setElevationFile(file); setElevationName(file?.name || ''); if (sourceFile.current) void choose(sourceFile.current, file, allowAi) }} /></label>}
     {loading && <div className="plan-import-status" role="status">{allowAi ? 'Sending the plan for AI detection…' : 'Analyzing locally…'}</div>}
     {error && <div className="plan-import-error" role="alert">{error}</div>}
     {analysis && <>
@@ -875,10 +1001,15 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
       <label className="field-label">Review detected segment<select aria-label="Review detected segment" value={selected ? `${selected.kind}:${selected.index}` : ''} onChange={(event) => { const [kind, index] = event.target.value.split(':'); setSelected(kind ? { kind: kind as 'walls' | 'openings', index: Number(index) } : null) }}><option value="">Select a segment</option>{(['walls', 'openings'] as const).flatMap((kind) => analysis[kind].map((item, i) => <option key={`${kind}:${i}`} value={`${kind}:${i}`}>{kind === 'walls' ? 'Wall' : (item as PixelOpening).type} {i + 1}</option>))}</select></label>
       {selected && selectedSegment && <div className="plan-segment-editor">
         {selected.kind === 'openings' && <label className="field-label">Opening type<select aria-label="Opening type" value={(selectedSegment as PixelOpening).type} onChange={(event) => patchSegment({ type: event.target.value as PixelOpening['type'] })}><option value="unconfirmed">Unconfirmed{(selectedSegment as PixelOpening).suggestedType ? ` · suggested ${(selectedSegment as PixelOpening).suggestedType}` : ''}</option><option value="door">Door</option><option value="window">Window</option><option value="ignore">Ignore gap / open passage</option></select></label>}
+        {selectedOpening && (selectedOpening.type === 'door' || selectedOpening.type === 'window') && <>
+          <label className="field-label">Opening height (m)<NumberInput min="0.3" max={ceilingHeight} step="0.05" value={selectedOpening.height ?? (selectedOpening.type === 'door' ? 2.1 : 1.35)} onCommit={(height) => patchSegment({ height, verticalConfidence: 1 })} /></label>
+          {selectedOpening.type === 'window' && <label className="field-label">Sill height (m)<NumberInput min="0" max={Math.max(0.3, ceilingHeight - 0.3)} step="0.05" value={selectedOpening.sillHeight ?? 0.85} onCommit={(sillHeight) => patchSegment({ sillHeight, verticalConfidence: 1 })} /></label>}
+          <small className="muted">{selectedOpening.verticalConfidence !== undefined && selectedOpening.verticalConfidence >= 0.65 ? `High-confidence or reviewed vertical values · ${Math.round(selectedOpening.verticalConfidence * 100)}%; applied to this import.` : selectedOpening.verticalConfidence !== undefined ? `Low-confidence elevation estimate · ${Math.round(selectedOpening.verticalConfidence * 100)}%; standard size is used until corrected.` : 'Standard size is used until you enter a measured value.'}</small>
+        </>}
         {(['a', 'b'] as const).map((end) => <div className="dimension-grid" key={end}>{(['x', 'y'] as const).map((axis) => <label key={axis}>{end.toUpperCase()} {axis} (px)<NumberInput disabled={analysis.provider !== 'vertex-ai' && end === 'b' && axis === (selectedSegment.horizontal ? 'y' : 'x')} min={0} max={axis === 'x' ? analysis.sourceWidth : analysis.sourceHeight} step={1} value={selectedSegment[end][axis]} onCommit={(value) => patchSegment({ [end]: { ...selectedSegment[end], [axis]: value } })} /></label>)}</div>)}
         <button type="button" className="danger-button" onClick={() => { update({ ...analysis, [selected.kind]: analysis[selected.kind].filter((_, i) => i !== selected.index) }); setSelected(null) }}>Remove segment</button>
       </div>}
-      <div className="form-grid"><label className="field-label">Project name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Known dimension (m)<input required type="number" min="0.25" max="38" step="any" placeholder="Enter the measured distance" value={realWidth} onChange={(event) => setRealWidth(event.target.value)} /><small className="muted">{calibrationPoints.length === 2 ? `Distance between selected points: ${Math.hypot(calibrationPoints[1].x - calibrationPoints[0].x, calibrationPoints[1].y - calibrationPoints[0].y).toFixed(0)} px` : 'By default this is the full detected width between dashed guides.'}</small></label></div>
+      <div className="form-grid"><label className="field-label">Project name<input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Known dimension (m)<input required type="number" min="0.25" max="38" step="any" placeholder="Enter the measured distance" value={realWidth} onChange={(event) => setRealWidth(event.target.value)} /><small className="muted">{calibrationPoints.length === 2 ? `Distance between selected points: ${Math.hypot(calibrationPoints[1].x - calibrationPoints[0].x, calibrationPoints[1].y - calibrationPoints[0].y).toFixed(0)} px` : 'By default this is the full detected width between dashed guides.'}</small></label><label className="field-label">Ceiling height (m)<NumberInput min="2" max="6" step="0.05" value={ceilingHeight} onCommit={(value) => { setCeilingHeight(value); setCeilingHeightEdited(true) }} /><small className="muted">{ceilingHeightEdited ? 'Manual height will be used for this import.' : analysis.ceilingHeight !== undefined ? (analysis.ceilingHeightConfidence || 0) >= 0.65 ? `Elevation estimate ${analysis.ceilingHeight.toFixed(2)} m · ${Math.round((analysis.ceilingHeightConfidence || 0) * 100)}% confidence; applied. Review or adjust.` : `Low-confidence elevation estimate ${analysis.ceilingHeight.toFixed(2)} m; using standard 2.8 m until corrected.` : 'No vertical measurement extracted; using standard 2.8 m unless you enter a known height.'}</small></label></div>
       <div className="plan-import-notes">{analysis.warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>
       {draft.error && <p role="alert" className="plan-import-error">{draft.error}</p>}
       <p className="plan-review-confirm">AI geometry and dimensions are approximate even after scale calibration. This creates editable walls and openings, adds no furniture, and replaces the current layout. Undo restores the previous layout.</p>
@@ -892,7 +1023,7 @@ function ExistingItemModal({ onClose, onCreate }: { onClose: () => void; onCreat
   const [width, setWidth] = useState('100'), [depth, setDepth] = useState('100'), [height, setHeight] = useState('100')
   const [color, setColor] = useState('#bca58a'), [kind, setKind] = useState<CustomRoomItem['kind']>('furniture')
   const submit = (event: FormEvent) => { event.preventDefault(); onCreate({ name: name.trim() || 'Existing furniture', width: clamp(Number(width), 1, 2000), depth: clamp(Number(depth), 1, 2000), height: clamp(Number(height), 1, 600), color, kind }) }
-  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close existing furniture dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Add existing furniture" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Your furniture</span><h2>Add an existing item</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><p className="catalog-intro">Create an editable measured placeholder. It remains outside the shopping basket.</p><label className="field-label">Name<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Type<select value={kind} onChange={(event) => setKind(event.target.value as CustomRoomItem['kind'])}><option value="furniture">Furniture</option><option value="rug">Rug</option></select></label><div className="form-grid"><label className="field-label">Width (cm)<input required type="number" min="1" max="2000" step="1" value={width} onChange={(event) => setWidth(event.target.value)} /></label><label className="field-label">Depth (cm)<input required type="number" min="1" max="2000" step="1" value={depth} onChange={(event) => setDepth(event.target.value)} /></label><label className="field-label">Height (cm)<input required type="number" min="1" max="600" step="1" value={height} onChange={(event) => setHeight(event.target.value)} /></label><label className="field-label">Color<input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Place in room <Icon name="arrow" /></button></div></form></div>
+  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close existing furniture dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Add existing furniture" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Your furniture</span><h2>Add an existing item</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><p className="catalog-intro">Create an editable measured placeholder. It remains outside the shopping basket.</p><label className="field-label">Name<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Type<select value={kind} onChange={(event) => setKind(event.target.value as CustomRoomItem['kind'])}><option value="furniture">Furniture</option><option value="rug">Rug</option><option value="wall">Wall item (picture, shelf, TV)</option></select></label><div className="form-grid"><label className="field-label">Width (cm)<input required type="number" min="1" max="2000" step="1" value={width} onChange={(event) => setWidth(event.target.value)} /></label><label className="field-label">Depth (cm)<input required type="number" min="1" max="2000" step="1" value={depth} onChange={(event) => setDepth(event.target.value)} /></label><label className="field-label">Height (cm)<input required type="number" min="1" max="600" step="1" value={height} onChange={(event) => setHeight(event.target.value)} /></label><label className="field-label">Color<input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Place in room <Icon name="arrow" /></button></div></form></div>
 }
 
 function App() {
@@ -902,6 +1033,13 @@ function App() {
   const history = useRef<{ past: ProjectState[]; future: ProjectState[] }>({ past: [], future: [] })
   const dragSnapshot = useRef<ProjectState | null>(null)
   const [, refreshHistory] = useState(0)
+  const [accountUser, setAccountUser] = useState<User | null>(null)
+  const [accountReady, setAccountReady] = useState(!auth)
+  const [cloudProjectId, setCloudProjectId] = useState<string | null>(null)
+  const cloudProjectIdRef = useRef<string | null>(null)
+  const cloudSavedProjectRef = useRef<string | null>(null)
+  const cloudSavePromiseRef = useRef<Promise<SavedProject> | null>(null)
+  const [cloudSaving, setCloudSaving] = useState(false)
   const setProject = (update: ProjectState | ((current: ProjectState) => ProjectState)) => {
     const current = projectRef.current
     const next = typeof update === 'function' ? update(current) : update
@@ -912,6 +1050,14 @@ function App() {
     }
     projectRef.current = next
     renderProject(next)
+  }
+  const setActiveCloudProject = (id: string | null) => {
+    cloudProjectIdRef.current = id
+    setCloudProjectId(id)
+  }
+  const detachCloudProject = () => {
+    cloudSavedProjectRef.current = null; setActiveCloudProject(null)
+    try { if (accountUser) localStorage.removeItem(cloudProjectKey(accountUser.uid)) } catch {}
   }
   const undo = () => {
     const previous = history.current.past.pop()
@@ -939,6 +1085,12 @@ function App() {
     setDraggingId(null)
     refreshHistory((v) => v + 1)
   }
+  const cancelDrag = () => {
+    const before = dragSnapshot.current
+    dragSnapshot.current = null
+    if (before) { projectRef.current = before; renderProject(before) }
+    setDraggingId(null)
+  }
   const [renderOpen, setRenderOpen] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>(() => project.features.length ? '3d' : '2d')
   const [activeTool, setActiveTool] = useState<Tool>(() => project.features.length ? 'select' : 'wall')
@@ -960,25 +1112,98 @@ function App() {
   const [search, setSearch] = useState('')
   const [saveStatus, setSaveStatus] = useState('Saved just now')
   const [shoppingOpen, setShoppingOpen] = useState(false)
-  const [newProjectOpen, setNewProjectOpen] = useState(false)
+  const [newProjectOpen, setNewProjectOpen] = useState<RoomTemplate | null>(null)
   const [requestOpen, setRequestOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [customItemOpen, setCustomItemOpen] = useState(false)
-  const [leftPanelOpen, setLeftPanelOpen] = useState(() => window.innerWidth > 1000)
-  const [rightPanelOpen, setRightPanelOpen] = useState(() => window.innerWidth > 1200)
-  const [inspectorExpanded, setInspectorExpanded] = useState(false)
-  const inspectorStartY = useRef<number | null>(null)
-  const inspectorWasDragged = useRef(false)
+  const [measureOpen, setMeasureOpen] = useState(false)
+  // A wall item waiting for the user to tap a wall, and the wall chosen from the mobile wall bar for the Add sheet.
+  const [hangItem, setHangItem] = useState<RoomObject | null>(null)
+  const [targetWallId, setTargetWallId] = useState<string | null>(null)
+  const [addPoint, setAddPoint] = useState<Point | null>(null)
+  const [twistLabel, setTwistLabel] = useState<(ScreenPoint & { degrees: number }) | null>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
+  const [welcomeDismissed, setWelcomeDismissed] = useState(false)
+  const compact = useCompactLayout()
+  const [step, setStep] = useState<Step>(() => getFloorRegions(project.features).length ? 'furnish' : 'room')
+  const [panelOpen, setPanelOpen] = useState(() => !window.matchMedia(COMPACT_QUERY).matches)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [viewMenuOpen, setViewMenuOpen] = useState(false)
+  const [projectName, setProjectName] = useState(project.name)
+  useEffect(() => setProjectName(project.name), [project.name])
+  useEffect(() => { setPanelOpen(!compact); setDetailsOpen(false) }, [compact])
+  useEffect(() => { if (compact ? !addOpen : !panelOpen || step !== 'furnish') setAddPoint(null) }, [compact, addOpen, panelOpen, step])
+  useEffect(() => { if (!compact) { setMenuOpen(false); setAddOpen(false) } }, [compact])
+  useEffect(() => { if (!addOpen) setTargetWallId(null) }, [addOpen])
+  const modalOpen = Boolean(shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen || measureOpen)
+  const openStep = (next: Step) => {
+    if (compact && panelOpen && step === next) { setPanelOpen(false); return }
+    setStep(next); setPanelOpen(true); setDetailsOpen(false); setViewMenuOpen(false)
+    if (next !== 'room' && activeTool !== 'select') setActiveTool('select')
+  }
+  const chooseTool = (tool: Tool) => {
+    clearSelection(); setActiveTool(tool); setViewMenuOpen(false)
+    if (tool === 'wall') setViewMode('2d')
+    if (compact) { setPanelOpen(false); setMenuOpen(false); setAddOpen(false); if (tool === 'wall') setWelcomeDismissed(true) }
+  }
+  const openMobilePanel = (next: Step) => { setMenuOpen(false); setAddOpen(false); setDetailsOpen(false); setStep(next); setPanelOpen(true) }
+  const openAddSheet = (wallId?: string) => {
+    if (!project.features.length) { setWelcomeDismissed(false); return }
+    if (!floors.length) { setNotice('Finish your walls first: tap the first corner again to close the room.'); return }
+    clearSelection(); setMenuOpen(false); setPanelOpen(false); setAddOpen(true); setHangItem(null); setTargetWallId(wallId ?? null)
+  }
+  const tapEmptyCanvas = () => { clearSelection(); setAddOpen(false); if (hangItem) setNotice(`${compact ? 'Tap' : 'Click'} a wall to hang the ${roomItemShape(hangItem)?.name || 'item'}, or cancel.`) }
+  const addOpeningToWall = (type: FeatureType) => {
+    const wall = selectedFeature
+    if (wall?.type !== 'wall') return
+    addFeature(type, wall.x, wall.z)
+  }
+
+  useEffect(() => {
+    if (!auth) { setAccountReady(true); return }
+    return onAuthStateChanged(auth, (next) => {
+      const current = next && !next.isAnonymous ? next : null
+      let storedId: string | null = null
+      try { if (current) storedId = localStorage.getItem(cloudProjectKey(current.uid)) } catch {}
+      setAccountUser(current); setAccountReady(true); setActiveCloudProject(storedId); cloudSavedProjectRef.current = null
+    })
+  }, [])
+
+  useEffect(() => {
+    const requestedId = new URLSearchParams(window.location.search).get('projectId')
+    if (!requestedId || !accountReady) return
+    if (!accountUser) { window.location.replace(`/profile?returnTo=${encodeURIComponent(`${window.location.pathname}${window.location.search}`)}`); return }
+    let current = true
+    const clearRequestedId = () => { const url = new URL(window.location.href); url.searchParams.delete('projectId'); window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`) }
+    setSaveStatus('Loading saved space…')
+    void accountApi<SavedProjectDetails>(`/projects/${encodeURIComponent(requestedId)}`).then((saved) => {
+      if (!current) return
+      if (needsRecovery) { try { const original = localStorage.getItem(STORAGE_KEY); if (original) localStorage.setItem(`${STORAGE_KEY}-recovery-${Date.now()}`, original) } catch {}; needsRecovery = false }
+      setProject(saved.project); history.current = { past: [], future: [] }; refreshHistory((value) => value + 1)
+      setSelectedId(null); setSelectedIds([]); setSelectedFeatureId(null); setViewMode(saved.project.features.length ? '3d' : '2d'); setActiveTool(saved.project.features.length ? 'select' : 'wall'); setStep(getFloorRegions(saved.project.features).length ? 'furnish' : 'room')
+      setActiveCloudProject(saved.id); cloudSavedProjectRef.current = JSON.stringify(saved.project)
+      try { localStorage.setItem(cloudProjectKey(accountUser.uid), saved.id) } catch {}
+      clearRequestedId(); setSaveStatus('Saved to profile')
+    }).catch((reason) => {
+      if (!current) return
+      clearRequestedId(); setSaveStatus('Could not load saved space'); setNotice(reason instanceof Error ? reason.message : 'Could not load this saved space.')
+    })
+    return () => { current = false }
+  }, [accountReady, accountUser])
 
   useEffect(() => {
     if (needsRecovery) { setSaveStatus('Recovery mode · save manually'); return }
     setSaveStatus('Unsaved changes')
     const timer = window.setTimeout(() => {
-      try { const serialized = JSON.stringify(project); localStorage.setItem(STORAGE_KEY, serialized); lastStored.current = serialized; setSaveStatus('Saved on this device') }
-      catch { setSaveStatus('Save unavailable — export a backup') }
+      try {
+        const serialized = JSON.stringify(project)
+        localStorage.setItem(STORAGE_KEY, serialized); lastStored.current = serialized
+        setSaveStatus(cloudSavedProjectRef.current === serialized ? 'Saved to profile' : accountUser && cloudProjectId ? 'Saved on device · profile changes need Save' : 'Saved on this device')
+      } catch { setSaveStatus('Save unavailable — export a backup') }
     }, 700)
     return () => clearTimeout(timer)
-  }, [project])
+  }, [project, accountUser, cloudProjectId])
   useEffect(() => {
     try { lastStored.current = localStorage.getItem(STORAGE_KEY) } catch {}
     const persist = () => { if (!needsRecovery) { try { if (localStorage.getItem(STORAGE_KEY) === lastStored.current) localStorage.setItem(STORAGE_KEY, JSON.stringify(projectRef.current)) } catch {} } }
@@ -992,13 +1217,13 @@ function App() {
   }, [notice])
 
   useEffect(() => {
-    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !customItemOpen) return
+    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !customItemOpen && !measureOpen) return
     const previous = document.activeElement as HTMLElement | null
     const panel = document.querySelector<HTMLElement>('.modal-card, .shopping-drawer')
     const elements = () => Array.from(document.querySelector('.modal-card, .shopping-drawer')?.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, textarea') || [])
     const frame = requestAnimationFrame(() => (panel?.querySelector<HTMLElement>('input') || elements()[0])?.focus())
     const keys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(false); setRequestOpen(false); setImportOpen(false); setCustomItemOpen(false) }
+      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(null); setRequestOpen(false); setImportOpen(false); setCustomItemOpen(false); setMeasureOpen(false) }
       if (event.key !== 'Tab') return
       const targets = elements(), first = targets[0], last = targets[targets.length - 1]
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
@@ -1006,7 +1231,7 @@ function App() {
     }
     document.addEventListener('keydown', keys)
     return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', keys); previous?.focus() }
-  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen, customItemOpen])
+  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen, customItemOpen, measureOpen])
 
   const selectedObjects = project.objects.filter((object) => selectedIds.includes(object.id))
   const selectedProductObjects = selectedObjects.filter((object) => object.productId)
@@ -1022,52 +1247,28 @@ function App() {
     return products.filter((product) => product.id !== selectedProduct.id && (product.category === selectedProduct.category || (sofaFamily && /sofa/i.test(product.category))))
       .sort((a, b) => Number(b.category === selectedProduct.category) - Number(a.category === selectedProduct.category)).slice(0, 4)
   }, [selectedProduct])
-  const startInspectorGesture = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (window.innerWidth > 600 || event.button !== 0) return
-    inspectorStartY.current = event.clientY
-    inspectorWasDragged.current = false
-    event.currentTarget.setPointerCapture(event.pointerId)
-  }
-  const finishInspectorGesture = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (inspectorStartY.current === null) return
-    const delta = inspectorStartY.current - event.clientY
-    inspectorStartY.current = null
-    if (Math.abs(delta) < 28) return
-    inspectorWasDragged.current = true
-    if (delta > 0) { setRightPanelOpen(true); setInspectorExpanded(true) }
-    else if (inspectorExpanded) setInspectorExpanded(false)
-    else setRightPanelOpen(false)
-    window.setTimeout(() => { inspectorWasDragged.current = false }, 0)
-  }
-  const toggleInspector = () => {
-    if (inspectorWasDragged.current) { inspectorWasDragged.current = false; return }
-    if (!rightPanelOpen) { setRightPanelOpen(true); setInspectorExpanded(false) }
-    else setInspectorExpanded(!inspectorExpanded)
-  }
-
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase()
     return products.filter((product) => (category === 'All' || product.group === category) && (retailer === 'All' || product.retailer === retailer) && (!query || `${product.name} ${product.brand} ${product.category} ${product.retailer} ${product.sku || ''}`.toLowerCase().includes(query))).sort((a, b) => sort === 'price-low' ? (a.price ?? Infinity) - (b.price ?? Infinity) : sort === 'price-high' ? (b.price ?? -Infinity) - (a.price ?? -Infinity) : 0)
   }, [category, search, retailer, sort])
 
   const shoppingItems = useMemo(() => {
-    const grouped = new Map<string, { product: Product; quantity: number; subtotal: number }>()
+    const grouped = new Map<string, { id: string; product: Product; variantName?: string; quantity: number; subtotal: number | null }>()
     project.objects.forEach((object) => {
       if (!object.inBasket || !object.productId) return
       const product = productById.get(object.productId)
       if (!product) return
-      const current = grouped.get(product.id)
+      const id = purchaseItemId(product.id, object.variantId), variantName = product.variants?.find((variant) => variant.id === object.variantId)?.name
+      const current = grouped.get(id)
       if (current) {
         current.quantity += 1
-        current.subtotal += product.price ?? 0
-      } else {
-        grouped.set(product.id, { product, quantity: 1, subtotal: product.price ?? 0 })
-      }
+        current.subtotal = current.subtotal === null || product.price === null ? null : current.subtotal + product.price
+      } else grouped.set(id, { id, product, ...(variantName ? { variantName } : {}), quantity: 1, subtotal: product.price })
     })
     return [...grouped.values()]
   }, [project.objects])
 
-  const estimatedTotal = shoppingItems.reduce((total, item) => total + item.subtotal, 0)
+  const estimatedTotal = shoppingItems.some((item) => item.subtotal === null) ? null : shoppingItems.reduce((total, item) => total + (item.subtotal ?? 0), 0)
   const itemCount = project.objects.filter((object) => object.inBasket && object.productId).length
   const warnings = useMemo(() => placementWarnings(project), [project])
   const floors = useMemo(() => getFloorRegions(project.features), [project.features])
@@ -1077,7 +1278,7 @@ function App() {
     setSelectedId(null)
     setSelectedIds([])
     setSelectedFeatureId(null)
-    if (window.innerWidth <= 600) { setRightPanelOpen(false); setInspectorExpanded(false) }
+    setDetailsOpen(false)
   }
 
   const selectObject = (id: string, extend = false) => {
@@ -1086,8 +1287,7 @@ function App() {
     setSelectedIds(nextIds)
     setSelectedFeatureId(null)
     setActiveTool('select')
-    if (window.innerWidth <= 600) { setRightPanelOpen(false); setInspectorExpanded(false) }
-    if (window.innerWidth <= 1000) setLeftPanelOpen(false)
+    if (compact) { setPanelOpen(false); setDetailsOpen(false); setAddOpen(false); setMenuOpen(false) }
   }
 
   const selectFeature = (id: string) => {
@@ -1095,8 +1295,7 @@ function App() {
     setSelectedId(null)
     setSelectedIds([])
     setActiveTool('select')
-    if (window.innerWidth <= 600) { setRightPanelOpen(false); setInspectorExpanded(false) }
-    if (window.innerWidth <= 1000) setLeftPanelOpen(false)
+    if (compact) { setPanelOpen(false); setDetailsOpen(false); setAddOpen(false); setMenuOpen(false) }
   }
 
   const patchProject = (patch: Partial<ProjectState>) => setProject((current) => {
@@ -1107,25 +1306,61 @@ function App() {
     return refreshOpenings(next)
   })
 
-  const addProduct = (productId: string, x?: number, z?: number) => {
+  const hangNewItem = (object: RoomObject, wallId?: string, point?: Point) => {
+    const current = projectRef.current, name = roomItemShape(object)?.name || 'Item'
+    const hung = hangOnWall({ ...object, wallId }, current, point, Boolean(point))
+    setHangItem(null); setTargetWallId(null); setAddOpen(false); setDragProduct(null); setAddPoint(null)
+    if (!hung || (point && !wallId && Math.hypot(hung.x - point.x, hung.z - point.z) > 1.6)) { setNotice(hung ? `${compact ? 'Tap' : 'Click'} closer to a wall to hang the ${name}.` : `No wall is wide enough for the ${name}.`); return }
+    setProject({ ...current, objects: [...current.objects, hung] })
+    selectObject(hung.id)
+    setNotice(`${name} hung on the wall. Drag it along the wall, or set its height in ${compact ? 'Details' : 'the panel'}.`)
+  }
+  // Wall items go on the chosen or selected wall, near a given point, or wait for the user to tap a wall.
+  const placeWallItem = (object: RoomObject, point?: Point) => {
+    const wallId = targetWallId ?? (selectedFeature?.type === 'wall' ? selectedFeature.id : undefined)
+    if (wallId || point) { hangNewItem(object, wallId, point); return }
+    clearSelection(); setAddOpen(false); setPanelOpen(!compact && panelOpen); setActiveTool('select'); setHangItem(object)
+    setNotice(`${compact ? 'Tap' : 'Click'} a wall to hang the ${roomItemShape(object)?.name || 'item'}.`)
+  }
+  const tapFeature = (id: string, point?: Point) => {
+    const feature = projectRef.current.features.find((candidate) => candidate.id === id)
+    if (hangItem && feature) { hangNewItem(hangItem, feature.type === 'wall' ? feature.id : feature.wallId, point); return }
+    selectFeature(id)
+  }
+
+  const addProduct = (productId: string, x?: number, z?: number, nearest = x === undefined) => {
     const product = productById.get(productId)
     if (!product) return
     const current = projectRef.current, regions = getFloorRegions(current.features)
     setDragProduct(null)
+    setAddPoint(null)
     if (!regions.length) { setNotice('Close a loop of walls first. The floor will fill automatically.'); return }
-    const defaultVariantId = product.variants?.[0]?.id
-    let object = placeObject({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), x: x ?? 0, z: z ?? 0, rotation: 0, inBasket: false }, current, snap, wallSnap)
-    if (x === undefined) {
+    const defaultVariantId = product.variants?.[0]?.id, target = { x: x ?? 0, z: z ?? 0 }
+    if (product.mount === 'wall') { placeWallItem({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), x: 0, z: 0, rotation: 0, inBasket: false }, x === undefined ? undefined : target); return }
+    let object = placeObject({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), ...target, rotation: 0, inBasket: false }, current, snap, wallSnap)
+    if (nearest) {
       const candidates: RoomObject[] = [object]
       for (let px = -current.width / 2; px <= current.width / 2; px += 0.25) for (let pz = -current.length / 2; pz <= current.length / 2; pz += 0.25) candidates.push(placeObject({ ...object, x: px, z: pz }, current, snap, wallSnap))
-      const valid = candidates.filter((candidate) => fitsFloor(candidate, current, regions)).sort((a, b) => a.x ** 2 + a.z ** 2 - b.x ** 2 - b.z ** 2)
+      const valid = candidates.filter((candidate) => fitsFloor(candidate, current, regions)).sort((a, b) => (a.x - target.x) ** 2 + (a.z - target.z) ** 2 - (b.x - target.x) ** 2 - (b.z - target.z) ** 2)
       object = valid.find((candidate) => current.objects.every((o) => !overlaps(candidate, o))) || valid[0] || object
     }
-    if (!fitsFloor(object, current, regions)) { setNotice('This piece must fit entirely inside an enclosed room.'); return }
+    if (!fitsFloor(object, current, regions)) { setNotice(nearest ? 'There is no free space for this piece in your room.' : 'This piece must fit entirely inside an enclosed room.'); return }
     setProject({ ...current, objects: [...current.objects, object] })
+    setAddOpen(false)
     selectObject(object.id)
     setDragProduct(null)
     setNotice(`${product.name} added to your room`)
+  }
+
+  const addAt = (x: number, z: number) => {
+    const regions = getFloorRegions(projectRef.current.features), point = { x, z }
+    if (!regions.length) { setNotice('Draw your walls first, then double-tap inside the room to add furniture.'); return }
+    if (!regions.some((region) => pointInPolygon(point, region.points) && !region.holes.some((hole) => pointInPolygon(point, hole)))) { setNotice(`${compact ? 'Double-tap' : 'Double-click'} inside a room to add furniture there.`); return }
+    clearSelection()
+    setAddPoint(point)
+    if (compact) { setPanelOpen(false); setMenuOpen(false); setAddOpen(true) }
+    else { setStep('furnish'); setPanelOpen(true); setViewMenuOpen(false) }
+    setNotice(compact ? 'Pick a piece to place it where you tapped.' : 'Pick a piece to place it on the marked spot.')
   }
 
   const addCustomObject = (custom: CustomRoomItem) => {
@@ -1133,6 +1368,7 @@ function App() {
     setCustomItemOpen(false)
     if (!regions.length) { setNotice('Close a loop of walls before adding existing furniture.'); return }
     let object: RoomObject = { id: makeId('object'), custom, x: 0, z: 0, rotation: 0, inBasket: false }
+    if (custom.kind === 'wall') { placeWallItem(object); return }
     const candidates: RoomObject[] = [object]
     for (let x = -current.width / 2; x <= current.width / 2; x += 0.25) for (let z = -current.length / 2; z <= current.length / 2; z += 0.25) candidates.push(placeObject({ ...object, x, z }, current, snap, wallSnap))
     const valid = candidates.filter((candidate) => fitsFloor(candidate, current, regions)).sort((a, b) => a.x ** 2 + a.z ** 2 - b.x ** 2 - b.z ** 2)
@@ -1147,8 +1383,8 @@ function App() {
     if (!selectedId) return
     const current = projectRef.current, object = current.objects.find((o) => o.id === selectedId)
     if (!object) return
-    const next = placeObject({ ...object, ...patch }, current)
-    if (!fitsFloor(next, current)) { setNotice('Keep the whole piece inside a closed room, clear of walls.'); return }
+    const next = isWallMounted(object) ? hangOnWall({ ...object, ...patch }, current) : placeObject({ ...object, ...patch }, current)
+    if (!next || !fitsFloor(next, current)) { setNotice(next ? 'Keep the whole piece inside a closed room, clear of walls.' : 'This item needs a wall to hang on.'); return }
     setProject({ ...current, objects: current.objects.map((o) => o.id === selectedId ? next : o) })
   }
 
@@ -1158,18 +1394,63 @@ function App() {
   }
 
   const rotateSelection = () => {
-    if (selectedObject) { patchObject({ rotation: selectedObject.rotation + Math.PI / 12 }); return }
-    if (selectedObjects.length < 2) return
-    const current = projectRef.current, centre = selectedObjects.reduce((point, object) => ({ x: point.x + object.x / selectedObjects.length, z: point.z + object.z / selectedObjects.length }), { x: 0, z: 0 })
-    const cos = Math.cos(Math.PI / 12), sin = Math.sin(Math.PI / 12), ids = new Set(selectedObjects.map((object) => object.id))
-    const next = current.objects.map((object) => {
-      if (!ids.has(object.id)) return object
-      const x = object.x - centre.x, z = object.z - centre.z
-      return { ...object, x: centre.x + x * cos + z * sin, z: centre.z - x * sin + z * cos, rotation: object.rotation + Math.PI / 12 }
-    })
-    if (next.some((object) => ids.has(object.id) && !fitsFloor(object, current))) { setNotice('The group rotation would move an item outside the room.'); return }
-    setProject({ ...current, objects: next })
+    if (!selectedObjects.length) return
+    const next = rotateObjects(projectRef.current, selectedObjects.map((object) => object.id), Math.PI / 12)
+    if (!next) { setNotice(selectedObjects.some(isWallMounted) ? 'Wall items turn with their wall. Drag them along it instead.' : selectedObjects.length > 1 ? 'The group rotation would move an item outside the room.' : 'Keep the whole piece inside a closed room, clear of walls.'); return }
+    setProject(next)
   }
+
+  // Two-finger twist on a selected item: rotate live from the gesture's starting snapshot, committed as one undo step.
+  const twistTo = (ids: string[], screenTwist: number, at: ScreenPoint) => {
+    const base = dragSnapshot.current ??= projectRef.current
+    const primary = base.objects.find((object) => object.id === ids[0])
+    if (!primary) return
+    // Seen from above, a clockwise twist on screen is a negative turn about +Y.
+    const target = snapRotation(primary.rotation - screenTwist), next = rotateObjects(base, ids, target - primary.rotation)
+    if (next) setProject(next)
+    setTwistLabel({ ...at, degrees: ((Math.round(target * 180 / Math.PI) % 360) + 360) % 360 })
+  }
+  const endTwist = () => { setTwistLabel(null); if (dragSnapshot.current) endDrag() }
+  const twistHandlers = useRef({ twistTo, endTwist, selectedIds, activeTool })
+  twistHandlers.current = { twistTo, endTwist, selectedIds, activeTool }
+  useEffect(() => {
+    const points = new Map<number, ScreenPoint>()
+    let gesture: { ids: string[]; start: TwoFinger; angle: number; twist: number; mode: TwoFingerMode } | null = null
+    const pair = () => [...points.values()].slice(0, 2) as TwoFinger
+    const finish = () => { if (gesture?.mode === 'rotate') twistHandlers.current.endTwist(); gesture = null }
+    const down = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+      if (event.isPrimary) { points.clear(); gesture = null }
+      if (!(event.target instanceof Element && event.target.closest('.canvas-frame'))) return
+      points.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      const { selectedIds: ids, activeTool: tool } = twistHandlers.current
+      if (points.size === 2 && ids.length && tool === 'select') { const start = pair(); gesture = { ids, start, angle: fingerAngle(start), twist: 0, mode: 'pending' } }
+      else if (points.size > 2) finish()
+    }
+    const move = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !points.has(event.pointerId)) return
+      points.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (!gesture || gesture.mode === 'zoom' || points.size !== 2) return
+      const current = pair(), angle = fingerAngle(current)
+      gesture.twist += angleStep(gesture.angle, angle); gesture.angle = angle
+      if (gesture.mode === 'pending') gesture.mode = classifyTwoFinger(gesture.twist, fingerSpan(current) / Math.max(1, fingerSpan(gesture.start)))
+      if (gesture.mode === 'zoom') return
+      // Hold the camera still (OrbitControls and R3F never see these moves) until the gesture is known, and for the whole rotate.
+      event.stopPropagation()
+      if (gesture.mode === 'rotate') twistHandlers.current.twistTo(gesture.ids, gesture.twist, fingerMidpoint(current))
+    }
+    const up = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+      points.delete(event.pointerId)
+      if (points.size < 2) finish()
+    }
+    window.addEventListener('pointerdown', down, true); window.addEventListener('pointermove', move, true)
+    window.addEventListener('pointerup', up, true); window.addEventListener('pointercancel', up, true)
+    return () => {
+      window.removeEventListener('pointerdown', down, true); window.removeEventListener('pointermove', move, true)
+      window.removeEventListener('pointerup', up, true); window.removeEventListener('pointercancel', up, true)
+    }
+  }, [])
 
   const moveSelectionBy = (dx: number, dz: number) => {
     if (selectedObjects.length < 2) return
@@ -1185,7 +1466,8 @@ function App() {
     if (!product) return
     const current = projectRef.current, previous = current.objects.find((object) => object.id === selectedObject.id)
     if (!previous) return
-    const replacement = { ...previous, productId, variantId: product.variants?.[0]?.id, mirrored: /^(Corner sofa|Modular sofa)$/i.test(product.category) ? previous.mirrored : undefined }
+    const swapped = { ...previous, productId, variantId: product.variants?.[0]?.id, mirrored: /^(Corner sofa|Modular sofa)$/i.test(product.category) ? previous.mirrored : undefined }
+    const replacement = isWallMounted(swapped) ? hangOnWall(swapped, current) ?? swapped : swapped
     setProject({ ...current, objects: current.objects.map((object) => object.id === previous.id ? replacement : object) })
     setNotice(fitsFloor(replacement, current) ? `${product.name} replaced in place` : `${product.name} replaced in place; its new dimensions may not fit the room.`)
   }
@@ -1199,13 +1481,20 @@ function App() {
     setNotice(`${items.length === 1 ? selectedProduct?.name || 'Item' : `${items.length} products`} ${inBasket ? 'added to' : 'removed from'} basket`)
   }
 
-  const moveObject = (id: string, x: number, z: number) => {
+  const moveObject = (id: string, x: number, z: number, y?: number) => {
     const current = projectRef.current, base = dragSnapshot.current || current, origin = base.objects.find((object) => object.id === id)
     if (!origin) return
+    if (isWallMounted(origin)) {
+      // Wall items slide along their own wall (and up/down in 3D); they never leave it by dragging.
+      const existing = current.objects.find((object) => object.id === id)
+      const hung = existing && hangOnWall({ ...existing, ...(y === undefined ? {} : { elevation: Math.max(0, y) }) }, current, { x, z })
+      if (hung) setProject({ ...current, objects: current.objects.map((object) => object.id === id ? hung : object) })
+      return
+    }
     const ids = selectedIds.includes(id) ? selectedIds : [id], moved = new Map<string, RoomObject>()
     for (const selected of ids) {
       const original = base.objects.find((object) => object.id === selected), existing = current.objects.find((object) => object.id === selected)
-      if (!original || !existing) continue
+      if (!original || !existing || isWallMounted(original)) continue
       const next = placeObject({ ...existing, x: original.x + x - origin.x, z: original.z + z - origin.z }, current, snap, wallSnap)
       if (!fitsFloor(next, current, floors)) return
       moved.set(selected, next)
@@ -1218,6 +1507,7 @@ function App() {
     if (!selected.length) return
     const duplicates = selected.map((object) => {
       const id = makeId('object')
+      if (isWallMounted(object)) return hangOnWall({ ...object, id, inBasket: false, wallOffset: (object.wallOffset ?? 0) + (roomItemShape(object)?.width ?? 0) / 100 + 0.1 }, project) ?? { ...object, id, inBasket: false }
       let duplicate = placeObject({ ...object, id, x: object.x + 0.35, z: object.z + 0.35, inBasket: false }, project)
       if (!fitsFloor(duplicate, project)) duplicate = { ...object, id, inBasket: false }
       return duplicate
@@ -1239,11 +1529,12 @@ function App() {
     if (type === 'wall') return
     const current = projectRef.current
     if (current.features.length >= 200) { setNotice('This prototype supports up to 200 walls and openings.'); return }
-    const feature = attachOpening({ id: makeId(type), type, x, z, rotation: 0, width: type === 'door' ? 0.9 : 1.5, height: type === 'door' ? 2.1 : 1.35, sillHeight: type === 'window' ? 0.85 : 0 }, current)
+    const feature = attachOpening({ id: makeId(type), type, x, z, rotation: 0, width: type === 'door' ? 0.8 : 1.2, height: type === 'door' ? 2.1 : 1.4, sillHeight: type === 'window' ? 0.9 : 0 }, current)
     if (!feature.wallId || Math.hypot(feature.x - x, feature.z - z) > 0.65) { setNotice(`Click a drawn wall to place the ${type}.`); return }
     setProject({ ...current, features: [...current.features, feature] })
+    // Placing one opening ends the tool, so the next drag moves the view instead of adding another.
     selectFeature(feature.id)
-    setActiveTool(type)
+    setNotice(`${type === 'door' ? 'Door' : 'Window'} added. Drag it along the wall, or choose its type and size in ${compact ? 'Details' : 'the panel'}.`)
   }
 
   const patchFeature = (patch: Partial<RoomFeature>) => {
@@ -1279,26 +1570,59 @@ function App() {
     clearSelection()
   }
 
+  const saveCloudProject = async (value: ProjectState) => {
+    const serialized = JSON.stringify(value)
+    if (cloudSavePromiseRef.current) {
+      try { await cloudSavePromiseRef.current } catch {}
+      if (cloudProjectIdRef.current && cloudSavedProjectRef.current === serialized) return cloudProjectIdRef.current
+    }
+    const operation = (async () => {
+      const user = auth?.currentUser
+      if (!user || user.isAnonymous) throw new Error('Sign in to save this space to your profile.')
+      const body = JSON.stringify({ project: value }), id = cloudProjectIdRef.current
+      let saved: SavedProject
+      if (id) {
+        try { saved = await accountApi<SavedProject>(`/projects/${encodeURIComponent(id)}`, { method: 'PUT', body }) }
+        catch (reason) {
+          if (!(reason instanceof AccountApiError) || reason.status !== 404) throw reason
+          saved = await accountApi<SavedProject>('/projects', { method: 'POST', body })
+        }
+      } else saved = await accountApi<SavedProject>('/projects', { method: 'POST', body })
+      setActiveCloudProject(saved.id); cloudSavedProjectRef.current = serialized
+      try { localStorage.setItem(cloudProjectKey(user.uid), saved.id) } catch {}
+      return saved
+    })()
+    cloudSavePromiseRef.current = operation
+    try { return (await operation).id }
+    finally { if (cloudSavePromiseRef.current === operation) cloudSavePromiseRef.current = null }
+  }
+
   const saveProject = () => {
+    const serialized = JSON.stringify(project)
     try {
       if (needsRecovery) {
         const original = localStorage.getItem(STORAGE_KEY)
         if (original) localStorage.setItem(`${STORAGE_KEY}-recovery-${Date.now()}`, original)
       }
-      const serialized = JSON.stringify(project)
       window.localStorage.setItem(STORAGE_KEY, serialized)
       lastStored.current = serialized
       needsRecovery = false
       if (window.location.hash.startsWith('#project=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
       setSaveStatus('Saved on this device')
-    } catch {
-      setSaveStatus('Save unavailable')
-    }
+    } catch { setSaveStatus('Save unavailable'); return }
+    if (!accountUser || cloudSaving) return
+    setCloudSaving(true); setSaveStatus('Saving to your profile…')
+    void saveCloudProject(project).then(() => {
+      setSaveStatus(JSON.stringify(projectRef.current) === serialized ? 'Saved to profile' : 'Newer changes remain on this device; save again to sync')
+    }).catch((reason) => {
+      setSaveStatus('Saved on this device · profile sync failed')
+      setNotice(reason instanceof Error ? reason.message : 'Could not sync this space to your profile.')
+    }).finally(() => setCloudSaving(false))
   }
 
   const exportList = () => {
-    const rows = [['Product', 'Brand', 'Retailer', 'SKU', 'Quantity', 'Width cm', 'Depth cm', 'Height cm', 'Unit price EUR', 'Subtotal EUR', 'Verification status']]
-    shoppingItems.forEach(({ product, quantity, subtotal }) => rows.push([product.name, product.brand, product.retailer, product.sku || '', String(quantity), String(product.width), String(product.depth), String(product.height), String(product.price ?? ''), String(subtotal), product.status]))
+    const rows = [['Product', 'Variant', 'Brand', 'Retailer', 'SKU', 'Quantity', 'Width cm', 'Depth cm', 'Height cm', 'Unit price EUR', 'Subtotal EUR', 'Verification status']]
+    shoppingItems.forEach(({ product, variantName, quantity, subtotal }) => rows.push([product.name, variantName || '', product.brand, product.retailer, product.sku || '', String(quantity), String(product.width), String(product.depth), String(product.height), String(product.price ?? ''), String(subtotal ?? ''), product.status]))
     const csv = rows.map((row) => row.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(',')).join('\n')
     downloadFile(`${project.name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')}-shopping-list.csv`, csv, 'text/csv;charset=utf-8')
   }
@@ -1314,6 +1638,12 @@ function App() {
     }
   }
 
+  const submitPurchaseRequest = async (customer: { name: string; phone: string; city: string; notes: string }) => {
+    const projectId = await saveCloudProject(projectRef.current)
+    await accountApi('/purchase-requests', { method: 'POST', body: JSON.stringify({ projectId, customer }) })
+    setNotice('Purchase request sent. Follow updates from your profile.')
+  }
+
   const drawWall = (x: number, z: number, endX: number, endZ: number) => {
     const current = projectRef.current
     if (current.features.length >= 200) { setNotice('This prototype supports up to 200 walls and openings.'); return false }
@@ -1324,19 +1654,21 @@ function App() {
     const wall = wallFromPoints(makeId('wall'), a, b, current.ceilingHeight)
     const next = { ...current, features: [...current.features, wall] }
     const closesRoom = getFloorRegions(next.features).length > getFloorRegions(current.features).length
-    if (closesRoom) setNotice('Room enclosed. Your floor is ready to furnish.')
+    if (closesRoom) setNotice(compact ? 'Room finished. Tap a wall to add a door or window, or tap Add furniture.' : 'Room enclosed. Your floor is ready to furnish.')
+    if (closesRoom && compact) setActiveTool('select')
     setProject(next)
     return closesRoom
   }
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen || customItemOpen) return
-      if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); endDrag(); return }
+      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen || customItemOpen || measureOpen) return
+      if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); setHangItem(null); endDrag(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject(); return }
-      if (event.key === '/') { event.preventDefault(); setLeftPanelOpen(true); requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.search-field input')?.focus()); return }
+      if (event.key === '/') { event.preventDefault(); setStep('furnish'); setPanelOpen(true); requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.search-field input')?.focus()); return }
       if (selectedFeatureId && (event.key === 'Delete' || event.key === 'Backspace')) { event.preventDefault(); deleteFeature(); return }
-      if (event.key.toLowerCase() === 'w') { clearSelection(); setActiveTool('wall'); setViewMode('2d'); return }
+      const shortcut = !event.metaKey && !event.ctrlKey && !event.altKey ? ({ v: 'select', w: 'wall', d: 'door', n: 'window' } as Record<string, Tool>)[event.key.toLowerCase()] : undefined
+      if (shortcut) { chooseTool(shortcut); return }
       if (selectedObjects.length > 1) {
         if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelected(); return }
         if (event.key.toLowerCase() === 'r') { rotateSelection(); return }
@@ -1365,84 +1697,281 @@ function App() {
 
   const createProject = (nextProject: ProjectState) => {
     if (window.location.hash.startsWith('#project=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    detachCloudProject()
     setProject(nextProject)
     clearSelection()
-    setNewProjectOpen(false)
+    setNewProjectOpen(null)
     setViewMode('2d')
-    setActiveTool(getFloorRegions(nextProject.features).length ? 'select' : 'wall')
+    const enclosed = getFloorRegions(nextProject.features).length > 0
+    setActiveTool(enclosed ? 'select' : 'wall')
+    setStep(enclosed ? 'furnish' : 'room')
+    if (!nextProject.features.length) setWelcomeDismissed(false)
+    setMenuOpen(false); setAddOpen(false)
     setGridVisible(true)
     setCameraVersion((value) => value + 1)
   }
 
+  const createQuickRoom = (width: number, length: number) => {
+    if (![width, length].every((value) => Number.isFinite(value) && value >= 1 && value <= 38)) { setNotice('Enter a width and length between 1 and 38 m.'); return }
+    const w = Math.round(width * 20) / 20, l = Math.round(length * 20) / 20
+    setProject((current) => ({ ...current, width: Math.max(current.width, Math.ceil(w + 2)), length: Math.max(current.length, Math.ceil(l + 2)), features: rectangleWalls(w, l, current.ceilingHeight) }))
+    clearSelection(); setActiveTool('select'); setCameraVersion((value) => value + 1)
+    if (compact) setPanelOpen(false)
+    setNotice(`${w} × ${l} m room created. Drag a corner to reshape it, or add doors and windows.`)
+  }
+
+  const buildMeasuredRoom = (nextProject: ProjectState, summary: string) => {
+    if (window.location.hash.startsWith('#project=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    detachCloudProject()
+    setProject(nextProject)
+    clearSelection()
+    setMeasureOpen(false)
+    setViewMode('3d')
+    setActiveTool('select')
+    setStep('room')
+    if (compact) setPanelOpen(false)
+    setCameraVersion((value) => value + 1)
+    setNotice(summary)
+  }
+
+  const toggleObjectBasket = (id: string) => setProject((current) => ({ ...current, objects: current.objects.map((object) => object.id === id && object.productId ? { ...object, inBasket: !object.inBasket } : object) }))
+  const addAllToBasket = () => setProject((current) => ({ ...current, objects: current.objects.map((object) => object.productId ? { ...object, inBasket: true } : object) }))
+  const commitProjectName = () => {
+    const name = projectName.trim().slice(0, 80)
+    if (!name) { setProjectName(project.name); return }
+    if (name !== project.name) setProject((current) => ({ ...current, name }))
+  }
+
   const importProject = (nextProject: ProjectState) => {
     if (window.location.hash.startsWith('#project=')) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    detachCloudProject()
     setProject(nextProject)
     clearSelection()
     setImportOpen(false)
     setViewMode('2d')
     setActiveTool('select')
+    setStep('room')
     setGridVisible(true)
     setCameraVersion((value) => value + 1)
     setNotice(`${nextProject.planImport?.provider === 'vertex-ai' ? 'AI' : 'Local fallback'} floor plan imported. Geometry and inferred dimensions remain approximate${nextProject.planImport?.scaleCalibrated ? '; scale calibrated' : ''}.`)
   }
 
-  return (
-    <div className="app-shell">
-      <header className="topbar" inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen}>
-        <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /><span /></div><strong><a href="/" aria-label="Formivo home" style={{ color: 'inherit', textDecoration: 'none' }}>FORMIVO</a></strong><span className="brand-divider" /><button className="project-switcher" onClick={() => setNewProjectOpen(true)}><span>{project.name}</span><Icon name="chevron" size={14} /></button></div>
-        <div className="save-indicator"><span className={`save-dot ${saveStatus === 'Unsaved changes' ? 'save-dot-dirty' : ''}`} />{saveStatus}</div>
-        <div className="top-actions"><button className="top-icon-button" title="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" /></button><button className="top-icon-button" title="Redo" disabled={!history.current.future.length} onClick={redo}><Icon name="redo" /></button><span className="top-divider" /><button className="top-action-button" aria-label="Share project" onClick={shareProject}><Icon name="share" /> Share</button><button className="top-action-button" aria-label="Shopping list" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> Basket <span className="action-count">{itemCount}</span></button><button className="top-action-button primary-top-action" aria-label="Save project" onClick={saveProject}><Icon name="save" /> Save</button><div className="avatar">V</div></div>
-      </header>
+  const hasSelection = selectedObjects.length > 0 || Boolean(selectedFeature)
+  const wallCount = project.features.filter((f) => f.type === 'wall').length
+  const selectionWarnings = warnings.filter((warning) => selectedIds.includes(warning.id))
+  const placedCounts = useMemo(() => project.objects.reduce((counts, object) => object.productId ? counts.set(object.productId, (counts.get(object.productId) || 0) + 1) : counts, new Map<string, number>()), [project.objects])
+  const stepDone: Record<Step, boolean> = { room: floors.length > 0, furnish: project.objects.length > 0, review: itemCount > 0 }
+  const steps: { id: Step; label: string; meta: string }[] = [
+    { id: 'room', label: 'Room', meta: floors.length ? `${floorArea.toFixed(1)} m²` : 'Draw walls' },
+    { id: 'furnish', label: 'Furnish', meta: project.objects.length ? `${project.objects.length} ${project.objects.length === 1 ? 'item' : 'items'}` : 'Add pieces' },
+    { id: 'review', label: 'Review', meta: itemCount ? `${itemCount} in basket` : 'Shop' },
+  ]
+  const stepNav = (className: string) => <nav className={className} aria-label="Planner steps">{steps.map((item, index) => <button key={item.id} type="button" className={`step-button ${step === item.id && panelOpen ? 'step-active' : ''} ${stepDone[item.id] ? 'step-done' : ''}`} aria-current={step === item.id ? 'step' : undefined} aria-label={`${item.label} step`} onClick={() => openStep(item.id)}><span className="step-index">{stepDone[item.id] ? <Icon name="check" size={12} /> : index + 1}</span><span className="step-text"><strong>{item.label}</strong><small>{item.meta}</small></span></button>)}</nav>
+  const collapsePanel = compact ? undefined : () => setPanelOpen(false)
+  const tools: [Tool, string, IconName, string][] = [['select', 'Select', 'pointer', 'V'], ['wall', 'Wall', 'wall', 'W'], ['door', 'Door', 'door', 'D'], ['window', 'Window', 'window', 'N']]
+  const tap = compact ? 'Tap' : 'Click'
+  const canvasTip = hangItem ? `Click the wall where the ${roomItemShape(hangItem)?.name || 'item'} should go · Esc cancels` : activeTool === 'wall' ? compact ? 'Tap each corner in turn · drag to draw a single wall' : 'Click each corner in turn · drag to draw one wall · Shift keeps it straight · Esc stops'
+    : activeTool !== 'select' ? `${tap} any wall to place a ${activeTool}`
+      : selectedObject && isWallMounted(selectedObject) ? 'Drag to slide it along the wall · set its height in the panel · Delete removes'
+      : selectedObject ? compact ? 'Drag to move · use the toolbar to rotate or remove' : 'Drag to move · R rotates · arrow keys nudge · Delete removes'
+        : selectedFeature?.type === 'wall' ? 'Drag the round handles to reshape this wall'
+          : selectedFeature ? 'Drag the opening along its wall'
+            : viewMode === '3d' ? compact ? 'Drag to orbit · pinch to zoom' : 'Drag to orbit · right-drag to pan · scroll to zoom'
+              : compact ? 'Tap an item or wall to edit it' : `Click an item or wall to edit it · right-drag to pan · scroll to zoom`
 
-      <div className={`editor-layout ${leftPanelOpen ? '' : 'left-collapsed'} ${rightPanelOpen ? '' : 'right-collapsed'}`} inert={renderOpen || shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen}>
-        <aside className="sidebar left-sidebar" aria-label="Catalogue and room tools" inert={!leftPanelOpen}>
-          <div className="sidebar-scroll">
-            <div className="panel-heading"><div><span className="eyebrow">Workspace</span><h1>Build your space</h1></div><button className="icon-button panel-collapse-button" onClick={() => setLeftPanelOpen(false)} title="Collapse tools"><Icon name="panel" /></button></div>
-            <div className="tool-grid">
-              {([['select', 'Select', 'cube'], ['wall', 'Wall', 'wall'], ['door', 'Door', 'box'], ['window', 'Window', 'window']] as [Tool, string, IconName][]).map(([tool, label, icon]) => <button key={tool} className={`tool-button ${activeTool === tool ? 'tool-button-active' : ''}`} aria-pressed={activeTool === tool} onClick={() => { clearSelection(); setActiveTool(tool); if (tool === 'wall') setViewMode('2d'); if (window.innerWidth <= 1000) setLeftPanelOpen(false) }}><span className="tool-icon"><Icon name={icon} /></span><span>{label}</span></button>)}
-            </div>
-            {activeTool !== 'select' && <div className="tool-hint"><span className="hint-pip" /><span>{activeTool === 'wall' ? 'Tap/click a start point, then each corner to continue; dragging also draws. Close the loop to create the floor.' : `Click a drawn wall to add a ${activeTool}.`} Escape to cancel.</span></div>}
-            <div className="catalog-heading"><div><span className="eyebrow">Make yourself at home</span><h2>Furniture & objects</h2></div><span className="check-count">{products.length}</span></div><p className="catalog-intro">Tap a piece to add it, or drag it into the room.</p><button type="button" className="custom-item-launch secondary-button" onClick={() => setCustomItemOpen(true)}><Icon name="plus" /> Add existing furniture</button>
-            <label className="search-field"><Icon name="search" /><input aria-label="Search products" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search products" /><kbd>/</kbd></label>
-            <div className="category-row">{categories.map((item) => <button key={item} className={category === item ? 'category-active' : ''} aria-pressed={category === item} onClick={() => setCategory(item)}>{item}</button>)}</div>
-            <div className="catalog-filters"><select aria-label="Retailer filter" value={retailer} onChange={(event) => setRetailer(event.target.value)}><option value="All">All retailers</option>{[...new Set(products.map((p) => p.retailer))].map((r) => <option key={r}>{r}</option>)}</select><select aria-label="Sort products" value={sort} onChange={(event) => setSort(event.target.value)}><option value="curated">Curated order</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option></select></div>
-            <div className="catalog-results"><span>{filteredProducts.length} pieces</span><span>Sample collection</span></div>
-            <div className="product-list">{filteredProducts.map((product) => <article className="product-card" key={product.id} draggable onDragStart={(event) => { event.dataTransfer.setData(PRODUCT_DRAG_TYPE, product.id); event.dataTransfer.effectAllowed = 'copy'; setDragProduct(product.id); setActiveTool('select') }} onDragEnd={() => setDragProduct(null)}>
-              <button type="button" className="product-card-button" onClick={() => addProduct(product.id)} title={`Add ${product.name} to room`}><ProductThumb product={product} /><span className="product-card-body"><span className="product-card-info"><span>{product.category}</span><strong>{product.name}</strong><span>{product.retailer}</span><small>{product.width} × {product.depth} × {product.height} cm</small></span><span className="product-card-bottom"><strong>{formatPrice(product.price)}</strong><span className="add-product-button"><Icon name="plus" size={15} /></span></span></span></button>
-            </article>)}</div>
-            {filteredProducts.length === 0 && <div className="empty-search"><span>No products found</span><button className="text-button" onClick={() => { setSearch(''); setCategory('All'); setRetailer('All'); setSort('curated') }}>Clear filters</button></div>}
-          </div>
-          <div className="sidebar-footer"><button className="footer-link" onClick={() => setNewProjectOpen(true)}><Icon name="plus" /> New project</button><button className="footer-link" onClick={() => setImportOpen(true)}><Icon name="upload" /> Import floor plan</button><button className="footer-link" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /> Shopping list <span>{formatPrice(estimatedTotal)}</span></button></div>
-        </aside>
+  const similarStrip = selectedProduct && similarProducts.length > 0 ? <div className="similar-strip" role="group" aria-label={`Similar ${selectedProduct.category} products`}>
+    <span className="similar-heading">Swap for something similar</span>
+    <div className="similar-list">{similarProducts.map((product) => <button className="similar-product" key={product.id} title={`Replace with ${product.name}`} aria-label={`Replace with ${product.name}`} onClick={() => replaceSelected(product.id)}><ProductThumb product={product} compact /><span>{product.name}<small>{formatPrice(product.price)}</small></span></button>)}</div>
+  </div> : null
+
+  const selectionActions = selectedObjects.length > 1 ? <div className="selection-toolbar" role="toolbar" aria-label="Multi-selection controls">
+    <button title="Rotate 15° (R)" aria-label="Rotate selected items 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate</span></button>
+    <button title="Duplicate" aria-label="Duplicate selected items" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button>
+    {selectedProductObjects.length > 0 && <button className={`basket-action ${allSelectedProductsInBasket ? 'basket-action-on' : ''}`} title={allSelectedProductsInBasket ? 'Remove from basket' : 'Add to basket'} aria-label={allSelectedProductsInBasket ? 'Remove selected products from basket' : 'Add selected products to basket'} aria-pressed={allSelectedProductsInBasket} onClick={toggleBasket}><Icon name={allSelectedProductsInBasket ? 'check' : 'shopping'} /><span>{allSelectedProductsInBasket ? 'In basket' : 'Add to basket'}</span></button>}
+    <button className="delete-action" title="Delete (Del)" aria-label="Delete selected items" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button>
+  </div> : selectedObject ? <div className="selection-toolbar" role="toolbar" aria-label={selectedCustom ? 'Selected existing furniture controls' : 'Selected furniture controls'}>
+    {!isWallMounted(selectedObject) && <button title="Rotate 15° (R)" aria-label="Rotate selected object 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate</span></button>}
+    {selectedCanMirror && <button title="Flip left/right" aria-label="Flip sofa orientation" aria-pressed={Boolean(selectedObject.mirrored)} onClick={flipSelected}><Icon name="flip" /><span>Flip</span></button>}
+    <button title="Duplicate" aria-label="Duplicate selected object" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button>
+    {selectedProduct && <button className={`basket-action ${selectedObject.inBasket ? 'basket-action-on' : ''}`} title={selectedObject.inBasket ? 'Remove from basket' : 'Add to basket'} aria-label={selectedObject.inBasket ? 'Remove selected object from basket' : 'Add selected object to basket'} aria-pressed={Boolean(selectedObject.inBasket)} onClick={toggleBasket}><Icon name={selectedObject.inBasket ? 'check' : 'shopping'} /><span>{selectedObject.inBasket ? 'In basket' : 'Add to basket'}</span></button>}
+    <button className="delete-action" title="Delete (Del)" aria-label="Delete selected object" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button>
+  </div> : selectedFeature ? <div className="selection-toolbar" role="toolbar" aria-label="Selected architecture controls">
+    {compact && selectedFeature.type === 'wall' && <>
+      <button aria-label="Add a door to this wall" onClick={() => addOpeningToWall('door')}><Icon name="door" /><span>Add door</span></button>
+      <button aria-label="Add a window to this wall" onClick={() => addOpeningToWall('window')}><Icon name="window" /><span>Add window</span></button>
+      <button aria-label="Hang something on this wall" onClick={() => openAddSheet(selectedFeature.id)}><Icon name="image" /><span>Wall item</span></button>
+    </>}
+    <button className="delete-action" title={`Delete ${selectedFeature.type}`} aria-label={`Delete selected ${selectedFeature.type}`} onClick={deleteFeature}><Icon name="trash" /><span>Delete</span></button>
+  </div> : null
+
+  const inspectorContent = selectedProduct && selectedObject ? <ObjectProperties onClose={clearSelection} object={selectedObject} product={selectedProduct} actions={selectionActions} similar={similarStrip} onPatch={patchObject} />
+    : selectedCustom && selectedObject ? <CustomObjectProperties object={{ ...selectedObject, custom: selectedCustom }} actions={selectionActions} onClose={clearSelection} onPatch={patchObject} />
+      : selectedObjects.length > 1 ? <><div className="inspector-heading"><div><span className="eyebrow">Group</span><h2>{selectedObjects.length} items selected</h2></div><button className="icon-button" title="Clear selection" aria-label="Clear selection" onClick={clearSelection}><Icon name="close" /></button></div>{selectionActions}<ul className="group-list">{selectedObjects.map((object) => <li key={object.id}>{roomItemShape(object)?.name || 'Item'}{object.productId && object.inBasket ? <span>In basket</span> : null}</li>)}</ul><p className="muted">Shift-click items to add them to the group. Drag any selected item to move them all.</p></>
+        : selectedFeature ? <FeatureProperties project={project} feature={selectedFeature} onPatch={patchFeature} onDelete={deleteFeature} onClose={clearSelection} /> : null
+
+  const furnishPanel = <>
+    <div className="panel-scroll">
+      <PanelHeader step={2} title="Furnish your room" intro={compact ? 'Tap a piece to place it in your room.' : 'Click a piece to place it, or drag it onto the plan.'} onCollapse={collapsePanel} />
+      {!floors.length && <div className="callout"><strong>Close your walls first</strong><span>Furniture needs a finished floor. Draw a closed outline, or enter a room size.</span><button type="button" className="secondary-button" onClick={() => openStep('room')}>Go to Room</button></div>}
+      <label className="search-field"><Icon name="search" /><input aria-label="Search products" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search products" />{!compact && <kbd>/</kbd>}</label>
+      <div className="category-row" role="group" aria-label="Categories">{categories.map((item) => <button key={item} className={category === item ? 'category-active' : ''} aria-pressed={category === item} onClick={() => setCategory(item)}>{item}</button>)}</div>
+      <div className="catalog-filters"><select aria-label="Retailer filter" value={retailer} onChange={(event) => setRetailer(event.target.value)}><option value="All">All retailers</option>{[...new Set(products.map((p) => p.retailer))].map((r) => <option key={r}>{r}</option>)}</select><select aria-label="Sort products" value={sort} onChange={(event) => setSort(event.target.value)}><option value="curated">Curated order</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option></select></div>
+      <div className="catalog-results"><span>{filteredProducts.length} {filteredProducts.length === 1 ? 'piece' : 'pieces'}</span><span>Sample collection</span></div>
+      <div className="product-list">{filteredProducts.map((product) => <article className="product-card" key={product.id} draggable onDragStart={(event) => { event.dataTransfer.setData(PRODUCT_DRAG_TYPE, product.id); event.dataTransfer.effectAllowed = 'copy'; setDragProduct(product.id); setActiveTool('select') }} onDragEnd={() => setDragProduct(null)}>
+        <button type="button" className="product-card-button" onClick={() => addPoint ? addProduct(product.id, addPoint.x, addPoint.z, true) : addProduct(product.id)} title={`Add ${product.name} to room`}><ProductThumb product={product} />{placedCounts.get(product.id) ? <span className="placed-badge">{placedCounts.get(product.id)} in room</span> : null}<span className="product-card-body"><span className="product-card-info"><span>{product.category}</span><strong>{product.name}</strong><small>{product.width} × {product.depth} × {product.height} cm</small></span><span className="product-card-bottom"><strong>{formatPrice(product.price)}</strong><span className="add-product-button"><Icon name="plus" size={15} /></span></span></span></button>
+      </article>)}</div>
+      {filteredProducts.length === 0 && <div className="empty-search"><span>No products found</span><button className="text-button" onClick={() => { setSearch(''); setCategory('All'); setRetailer('All'); setSort('curated') }}>Clear filters</button></div>}
+      <div className="own-item-card"><div><strong>Keeping something you own?</strong><span>Add a measured block so the plan reflects it. It never enters the basket.</span></div><button type="button" className="secondary-button" onClick={() => setCustomItemOpen(true)}><Icon name="plus" /> Add existing furniture</button></div>
+    </div>
+    <div className="panel-footer"><button type="button" className="primary-button wide" disabled={!project.objects.length} onClick={() => openStep('review')}>{project.objects.length ? 'Next: review & shop' : 'Place a piece to continue'} <Icon name="arrow" /></button></div>
+  </>
+
+  const panelContent = step === 'room' ? <RoomPanel project={project} floors={floors} activeTool={activeTool} onTool={chooseTool} onPatch={patchProject} onQuickRoom={createQuickRoom} onMeasure={() => setMeasureOpen(true)} onTemplates={() => setNewProjectOpen('living-room')} onImport={() => setImportOpen(true)} onNewProject={() => setNewProjectOpen('empty')} onNext={compact ? () => { setPanelOpen(false); setAddOpen(true) } : () => openStep('furnish')} onCollapse={collapsePanel} />
+    : step === 'furnish' ? furnishPanel
+      : <ReviewPanel project={project} total={estimatedTotal} basketCount={itemCount} warnings={warnings} onSelect={(id) => selectObject(id)} onToggle={toggleObjectBasket} onAddAll={addAllToBasket} onShopping={() => setShoppingOpen(true)} onExport={exportList} onRender={() => setRenderOpen(true)} onShare={shareProject} canRender={floors.length > 0} onCollapse={collapsePanel} />
+
+  const projectTitle = <div className="project-title">
+    <input aria-label="Project title" title="Rename project" value={projectName} maxLength={80} onChange={(event) => setProjectName(event.target.value)} onBlur={commitProjectName} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { setProjectName(project.name); requestAnimationFrame(() => (event.target as HTMLInputElement).blur()) } }} />
+    <span className="save-indicator"><span className={`save-dot ${saveStatus === 'Unsaved changes' ? 'save-dot-dirty' : ''}`} />{saveStatus}</span>
+  </div>
+  const viewToggles = <>
+    <span className="menu-heading">Display</span>
+    <button role="switch" aria-checked={gridVisible} className="menu-toggle" onClick={() => setGridVisible(!gridVisible)}><Icon name="grid" /><span>Grid</span><span className={`toggle ${gridVisible ? 'toggle-on' : ''}`}><span /></span></button>
+    <button role="switch" aria-checked={wallsTransparent} className="menu-toggle" onClick={() => setWallsTransparent(!wallsTransparent)}><Icon name="layers" /><span>Lower front walls in 3D</span><span className={`toggle ${wallsTransparent ? 'toggle-on' : ''}`}><span /></span></button>
+    <label className="menu-select"><Icon name="sun" /><span>Lighting</span><select aria-label="Editor lighting mode" value={lightingMode} onChange={(event) => setLightingMode(event.target.value as LightingMode)}><option value="default">Default</option><option value="day">Day</option><option value="night">Night</option></select></label>
+    <span className="menu-heading">Furniture snapping</span>
+    <button role="switch" aria-checked={snap} className="menu-toggle" onClick={() => setSnap(!snap)}><Icon name="grid" /><span>Snap to 10 cm</span><span className={`toggle ${snap ? 'toggle-on' : ''}`}><span /></span></button>
+    <button role="switch" aria-checked={wallSnap} className="menu-toggle" onClick={() => setWallSnap(!wallSnap)}><Icon name="wall" /><span>Snap against walls</span><span className={`toggle ${wallSnap ? 'toggle-on' : ''}`}><span /></span></button>
+  </>
+  const showWelcome = compact && !project.features.length && !welcomeDismissed
+  const menuAction = (action: () => void) => () => { setMenuOpen(false); action() }
+  const mobileMenu = <>
+    <button type="button" className="m-backdrop" aria-label="Dismiss menu" onClick={() => setMenuOpen(false)} />
+    <section className="m-menu" aria-label="Menu">
+      <div className="m-menu-head">{projectTitle}<button type="button" className="add-sheet-icon" aria-label="Close menu" onClick={() => setMenuOpen(false)}><Icon name="close" size={20} /></button></div>
+      <div className="m-menu-group">
+        <button type="button" className="m-row" aria-label="Save project" disabled={cloudSaving} onClick={menuAction(saveProject)}><Icon name="save" size={20} /><span>{cloudSaving ? 'Saving…' : 'Save'}</span></button>
+        <button type="button" className="m-row" aria-label="Shopping list" onClick={menuAction(() => setShoppingOpen(true))}><Icon name="shopping" size={20} /><span>Basket</span>{itemCount > 0 && <span className="action-count">{itemCount}</span>}</button>
+        <button type="button" className="m-row" onClick={() => openMobilePanel('review')}><Icon name="check" size={20} /><span>Review &amp; shop</span></button>
+        <button type="button" className="m-row" aria-label="Share project" onClick={menuAction(shareProject)}><Icon name="share" size={20} /><span>Share</span></button>
+        <button type="button" className="m-row" aria-label="Render studio" disabled={!floors.length} onClick={menuAction(() => setRenderOpen(true))}><Icon name="image" size={20} /><span>Photo-style view</span></button>
+      </div>
+      <span className="menu-heading">Your home</span>
+      <div className="m-menu-group">
+        <button type="button" className="m-row" onClick={menuAction(() => setMeasureOpen(true))}><Icon name="wall" size={20} /><span>Measure a room</span></button>
+        <button type="button" className="m-row" onClick={() => chooseTool('wall')}><Icon name="pointer" size={20} /><span>Draw walls</span></button>
+        <button type="button" className="m-row" onClick={() => openMobilePanel('room')}><Icon name="sliders" size={20} /><span>Room size &amp; finishes</span></button>
+        <button type="button" className="m-row" onClick={menuAction(() => setImportOpen(true))}><Icon name="upload" size={20} /><span>Import a floor plan</span></button>
+        <button type="button" className="m-row" onClick={menuAction(() => setNewProjectOpen('living-room'))}><Icon name="home" size={20} /><span>Example rooms</span></button>
+        <button type="button" className="m-row" onClick={menuAction(() => setNewProjectOpen('empty'))}><Icon name="plus" size={20} /><span>Start a new plan</span></button>
+      </div>
+      <div className="m-menu-group m-menu-view">{viewToggles}</div>
+      <a className="m-row m-profile" href="/profile" aria-label="Open profile"><Icon name="user" size={20} /><span>{accountUser?.email || 'Sign in · my saved designs'}</span></a>
+    </section>
+  </>
+  const welcome = <section className="m-welcome" aria-label="Start your plan" inert={modalOpen}>
+    <div className="m-welcome-brand"><span className="brand-mark"><span /><span /><span /><span /></span><strong>FORMIVO</strong></div>
+    <h1>Let’s draw your home</h1>
+    <p>Start with one room. Doors, windows and furniture come next, and you can change everything later.</p>
+    <div className="m-welcome-options">
+      <button type="button" className="m-option m-option-primary" onClick={() => setMeasureOpen(true)}><Icon name="wall" size={26} /><span><strong>Measure my room</strong><small>Walk along each wall with your phone or a tape measure</small></span></button>
+      <button type="button" className="m-option" onClick={() => chooseTool('wall')}><Icon name="pointer" size={26} /><span><strong>Draw it on screen</strong><small>Tap each corner of the room on a grid</small></span></button>
+      <button type="button" className="m-option" onClick={() => openMobilePanel('room')}><Icon name="grid" size={26} /><span><strong>Enter a room size</strong><small>Type the width and length of a simple room</small></span></button>
+      <button type="button" className="m-option" onClick={() => setNewProjectOpen('living-room')}><Icon name="home" size={26} /><span><strong>Use an example room</strong><small>Start from a ready-made living room</small></span></button>
+    </div>
+    <div className="m-welcome-links"><button type="button" className="text-button" onClick={() => setImportOpen(true)}>Import a floor plan</button><a className="text-button" href="/profile">My saved designs</a></div>
+  </section>
+  const drawingHint = activeTool === 'wall' ? 'Tap each corner of the room in turn. Tap the first corner again to finish.' : `Tap a wall to place the ${activeTool}.`
+
+  return (
+    <div className={`app-shell ${compact ? 'app-compact' : panelOpen ? 'panel-open' : ''}`}>
+      {!compact && <header className="topbar" inert={renderOpen || modalOpen}>
+        <div className="topbar-left">
+          <a className="brand" href="/" aria-label="Formivo home"><span className="brand-mark"><span /><span /><span /><span /></span><strong>FORMIVO</strong></a>
+          {projectTitle}
+        </div>
+        {stepNav('step-nav')}
+        <div className="top-actions">
+          <div className="history-buttons"><button className="top-icon-button" title="Undo" aria-label="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" size={18} /></button><button className="top-icon-button" title="Redo" aria-label="Redo" disabled={!history.current.future.length} onClick={redo}><Icon name="redo" size={18} /></button></div>
+          <button className="top-action-button share-button" aria-label="Share project" title="Copy a share link" onClick={shareProject}><Icon name="share" /><span>Share</span></button>
+          <button className="top-action-button basket-button" aria-label="Shopping list" title="Shopping list" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /><span>Basket</span>{itemCount > 0 && <span className="action-count">{itemCount}</span>}</button>
+          <button className="top-action-button primary-top-action" aria-label="Save project" title="Save (⌘S)" onClick={saveProject} disabled={cloudSaving}><Icon name="save" /><span>{cloudSaving ? 'Saving…' : 'Save'}</span></button>
+          <a className="avatar" href="/profile" title={accountUser?.email || 'Sign in or open your profile'} aria-label="Open profile">{accountUser?.email?.[0]?.toUpperCase() || <Icon name="user" size={16} />}</a>
+        </div>
+      </header>}
+
+      <div className={`editor-layout ${panelOpen && !compact ? '' : 'panel-collapsed'}`} inert={renderOpen || modalOpen || showWelcome}>
+        {!compact && <aside className="side-panel" aria-label={`${steps.find((item) => item.id === step)!.label} panel`} inert={!panelOpen}>{panelContent}</aside>}
 
         <main className="workspace">
-          <div className="workspace-toolbar"><div className="workspace-context"><span className="live-dot" />{activeTool === 'wall' ? 'Build mode' : 'Your space'}<span className="context-separator">/</span><span>{floors.length} {floors.length === 1 ? 'room' : 'rooms'} · {floorArea.toFixed(1)} m²</span></div><div className="canvas-actions"><button className="render-launch" disabled={!floors.length} onClick={() => setRenderOpen(true)}>Render studio</button><button className="canvas-action-button" title="Toggle grid" aria-pressed={gridVisible} onClick={() => setGridVisible(!gridVisible)}><Icon name="grid" /> Grid <span className={`toggle ${gridVisible ? 'toggle-on' : ''}`}><span /></span></button><button className="canvas-action-button" title="Toggle wall cutaway" aria-pressed={wallsTransparent} onClick={() => setWallsTransparent(!wallsTransparent)}><Icon name="layers" /> Walls <span className={`toggle ${wallsTransparent ? 'toggle-on' : ''}`}><span /></span></button><label className="lighting-control" title="Editor lighting mode"><Icon name="sun" /><select aria-label="Editor lighting mode" value={lightingMode} onChange={(event) => setLightingMode(event.target.value as LightingMode)}><option value="default">Default</option><option value="day">Day</option><option value="night">Night</option></select></label><span className="canvas-action-divider" /><div className="view-switcher"><button className={viewMode === '3d' ? 'view-active' : ''} onClick={() => setViewMode('3d')}><Icon name="cube" size={14} /> 3D</button><button className={viewMode === '2d' ? 'view-active' : ''} onClick={() => setViewMode('2d')}><Icon name="box" size={14} /> 2D plan</button></div><button className="canvas-icon-button" onClick={() => setCameraVersion((value) => value + 1)} title="Reset camera"><Icon name="rotate" /></button><button className="workspace-collapse-button" onClick={() => setLeftPanelOpen(!leftPanelOpen)} title="Toggle catalogue"><Icon name="panel" /></button></div></div>
-          <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={project.features.filter((f) => f.type === 'wall').length}><RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={clearSelection} onSelectObject={selectObject} onSelectFeature={selectFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} /><div className="canvas-label"><span className="canvas-label-number">01</span><span>{viewMode === '3d' ? '3D view' : 'Floor plan'}</span><span className="canvas-label-dot" /><span>{activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</span></div>{!project.features.length && !dragProduct && <div className="empty-build-hint"><strong>Your space starts here</strong><span>Tap a start and the next corner, or drag a segment.<br />Keep drawing from each end to close the room.</span><div className="quick-start-actions"><button type="button" className="secondary-button empty-import-button" onClick={() => setImportOpen(true)}>Import floor plan</button><button type="button" className="secondary-button empty-import-button" onClick={() => setNewProjectOpen(true)}>Use a room template</button></div></div>}{dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your space' : 'Close your walls before furnishing'}</div>}<div className="canvas-tip">{activeTool === 'wall' ? 'Tap/click corners or drag · Shift for straight walls · Esc to select' : activeTool !== 'select' ? `Click a wall to add a ${activeTool}` : selectedObject ? 'Drag to move · R to rotate · Arrows to nudge' : viewMode === '3d' ? 'Drag empty space to orbit · Right-drag to pan · Scroll to zoom' : 'Right-drag to pan · Scroll to zoom'}</div><div className="placement-controls">{activeTool === 'wall' ? <span className="build-grid-label">Wall grid · 25 cm · Corners snap together</span> : <><button aria-pressed={snap} onClick={() => setSnap(!snap)}>Snap · 10 cm <span className={`toggle ${snap ? 'toggle-on' : ''}`}><span /></span></button><button aria-pressed={wallSnap} onClick={() => setWallSnap(!wallSnap)}>To walls <span className={`toggle ${wallSnap ? 'toggle-on' : ''}`}><span /></span></button></>}</div>{selectedObject && <div className="selection-toolbar"><button title="Rotate selected product" onClick={rotateSelection}><Icon name="rotate" />15°</button><button title="Duplicate selected product" onClick={duplicateSelected}><Icon name="copy" /></button><button title="Delete selected product" onClick={deleteSelected}><Icon name="trash" /></button></div>}</div>
-        </main>
+          <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={wallCount}>
+            <RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={tapEmptyCanvas} onSelectObject={selectObject} onSelectFeature={tapFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} onDragCancel={cancelDrag} addPoint={addPoint} onAddAt={addAt} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} />
+            <div className="canvas-label">{viewMode === '3d' ? '3D view' : 'Floor plan'} · {activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</div>
+          </div>
 
-        <aside className={`sidebar right-sidebar ${inspectorExpanded ? 'inspector-expanded' : 'inspector-collapsed'}`} aria-label="Properties" inert={!rightPanelOpen}>
-          <div className="sidebar-scroll"><div className="inspector-topline"><span className="eyebrow">Inspector</span><button className="inspector-drag-handle" type="button" aria-label={inspectorExpanded ? 'Collapse inspector details' : 'Expand inspector details'} aria-expanded={inspectorExpanded} onPointerDown={startInspectorGesture} onPointerUp={finishInspectorGesture} onPointerCancel={() => { inspectorStartY.current = null }} onClick={toggleInspector}><span /></button><button className="icon-button panel-collapse-button" onClick={() => { setRightPanelOpen(false); setInspectorExpanded(false) }} title="Collapse inspector"><Icon name="panel" /></button></div>{selectedProduct && selectedObject ? <ObjectProperties onClose={clearSelection} object={selectedObject} product={selectedProduct} onPatch={patchObject} onRotate={rotateSelection} onDuplicate={duplicateSelected} onDelete={deleteSelected} /> : selectedCustom && selectedObject ? <CustomObjectProperties object={{ ...selectedObject, custom: selectedCustom }} onClose={clearSelection} onPatch={patchObject} onRotate={rotateSelection} onDuplicate={duplicateSelected} onDelete={deleteSelected} /> : selectedObjects.length > 1 ? <><div className="inspector-heading"><div><span className="eyebrow">Multi-selection</span><h2>{selectedObjects.length} items selected</h2></div><button className="icon-button" title="Clear selection" onClick={clearSelection}><Icon name="close" /></button></div><section className="inspector-section">{selectedObjects.map((object) => <div className="health-row" key={object.id}>{roomItemShape(object)?.name || 'Item'}{object.productId && object.inBasket ? ' · In basket' : ''}</div>)}</section><p className="muted">Shift-click items to select several. Drag any selected item to move the group.</p></> : selectedFeature ? <FeatureProperties project={project} feature={selectedFeature} onPatch={patchFeature} onDelete={deleteFeature} /> : <RoomProperties project={project} onPatch={patchProject} />}{selectedObject && warnings.length > 0 && <section className="inspector-section"><div className="section-label-row"><span>Placement checks</span></div>{warnings.map((warning, index) => <div className="health-row warning" key={index}>{warning.message}</div>)}</section>}</div>
-          <div className="sidebar-footer inspector-footer"><button className="footer-link" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /><span>Review shopping list</span><strong>{formatPrice(estimatedTotal)}</strong></button></div>
-        </aside>
+          {!compact && <>
+            {!panelOpen && <button className="show-panel-button" onClick={() => setPanelOpen(true)} aria-label="Show panel" title="Show panel"><Icon name="panel" /></button>}
+            <div className={`canvas-toolbar ${activeTool !== 'select' ? 'toolbar-drawing' : ''}`} role="toolbar" aria-label="Drawing tools">
+              {tools.map(([tool, label, icon, key]) => <button key={tool} className={`tool-button ${activeTool === tool ? 'tool-button-active' : ''}`} aria-pressed={activeTool === tool} title={`${label} (${key})`} onClick={() => chooseTool(tool)}><Icon name={icon} size={18} /><span>{label}</span></button>)}
+              <span className="toolbar-divider" />
+              <div className="view-switcher" role="group" aria-label="View mode"><button className={viewMode === '2d' ? 'view-active' : ''} aria-pressed={viewMode === '2d'} onClick={() => setViewMode('2d')}>2D</button><button className={viewMode === '3d' ? 'view-active' : ''} aria-pressed={viewMode === '3d'} onClick={() => setViewMode('3d')}>3D</button></div>
+              {activeTool !== 'select' && <button type="button" className="tool-done" title="Finish (Esc)" onClick={() => chooseTool('select')}><Icon name="check" size={15} /><span>Done</span></button>}
+            </div>
+            <div className="canvas-actions">
+              <button className="render-launch" aria-label="Render studio" title={floors.length ? 'Open a photo-style render of your room' : 'Close a room to render it'} disabled={!floors.length} onClick={() => setRenderOpen(true)}><Icon name="image" /><span>Render studio</span></button>
+              <div className="view-menu-wrap">
+                <button className={`canvas-icon-button ${viewMenuOpen ? 'canvas-icon-button-active' : ''}`} aria-label="View options" title="View options" aria-expanded={viewMenuOpen} onClick={() => setViewMenuOpen(!viewMenuOpen)}><Icon name="sliders" /></button>
+                {viewMenuOpen && <div className="view-menu" role="group" aria-label="View settings">{viewToggles}</div>}
+              </div>
+              <button className="canvas-icon-button" aria-label="Reset camera" title="Recentre the view" onClick={() => setCameraVersion((value) => value + 1)}><Icon name="focus" /></button>
+            </div>
+            {!project.features.length && !dragProduct && <div className="empty-build-hint">
+              <span className="empty-icon"><Icon name="wall" size={22} /></span>
+              <strong>Your space starts here</strong>
+              <span>Click to place your first corner, then each next corner. Close the outline to create the floor — or enter a size in the panel.</span>
+              <div className="quick-start-actions"><button type="button" className="secondary-button" onClick={() => setMeasureOpen(true)}><Icon name="wall" /> Measure my room</button><button type="button" className="secondary-button empty-import-button" onClick={() => setImportOpen(true)}><Icon name="upload" /> Import floor plan</button><button type="button" className="secondary-button empty-import-button" onClick={() => setNewProjectOpen('living-room')}><Icon name="home" /> Use a room template</button></div>
+            </div>}
+            <div className="canvas-tip">{canvasTip}</div>
+            {hasSelection && <aside className="inspector-card" aria-label="Selection details">{inspectorContent}{selectedObject && selectionWarnings.length > 0 && <section className="inspector-section"><div className="section-label-row"><span>Placement checks</span></div>{selectionWarnings.map((warning, index) => <div className="health-row warning" key={index}><span className="health-dot" />{warning.message}</div>)}</section>}</aside>}
+          </>}
+          {dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your room' : 'Close your walls before furnishing'}</div>}
+        </main>
       </div>
 
-      {rightPanelOpen && inspectorExpanded && <button className="inspector-backdrop" aria-label="Close inspector" onClick={() => { setRightPanelOpen(false); setInspectorExpanded(false) }} />}
-      {selectedObjects.length > 1 && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}><div className="selection-toolbar" role="toolbar" aria-label="Multi-selection controls"><span className="selection-toolbar-title">{selectedObjects.length} items selected</span><button title="Rotate selection 15°" aria-label="Rotate selected items 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate</span></button><button title="Duplicate selected items" aria-label="Duplicate selected items" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button>{selectedObjects.some((object) => object.productId) && <button title={allSelectedProductsInBasket ? 'Remove selected products from basket' : 'Add selected products to basket'} aria-label={allSelectedProductsInBasket ? 'Remove selected products from basket' : 'Add selected products to basket'} aria-pressed={allSelectedProductsInBasket} onClick={toggleBasket}><Icon name="shopping" /><span>{allSelectedProductsInBasket ? 'In basket' : 'Add to basket'}</span></button>}<button title="Delete selected items" aria-label="Delete selected items" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button><button title="Open selection details" aria-label="Open selection details" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div></div>}
-      {selectedObject && selectedProduct && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}>
-        {similarProducts.length > 0 && <div className="similar-strip" role="group" aria-label={`Similar ${selectedProduct.category} products`}><span className="similar-heading">{/sofa/i.test(selectedProduct.category) ? 'Similar sofas' : `Similar ${selectedProduct.category.toLowerCase()}s`}</span>{similarProducts.map((product) => <button className="similar-product" key={product.id} title={`Replace with ${product.name}`} aria-label={`Replace with ${product.name}`} onClick={() => replaceSelected(product.id)}><ProductThumb product={product} compact /><span>{product.name}</span></button>)}</div>}
-        <div className="selection-toolbar" role="toolbar" aria-label="Selected furniture controls"><span className="selection-toolbar-title">{selectedProduct.name}</span><button title="Rotate 15°" aria-label="Rotate selected object 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate 15°</span></button>{selectedCanMirror && <button title="Flip sofa orientation" aria-label="Flip sofa orientation" aria-pressed={Boolean(selectedObject.mirrored)} onClick={flipSelected}><Icon name="arrow" /><span>Flip</span></button>}<button title="Duplicate" aria-label="Duplicate selected object" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button><button title={selectedObject.inBasket ? 'Remove from basket' : 'Add to basket'} aria-label={selectedObject.inBasket ? 'Remove selected object from basket' : 'Add selected object to basket'} aria-pressed={Boolean(selectedObject.inBasket)} onClick={toggleBasket}><Icon name="shopping" /><span>{selectedObject.inBasket ? 'In basket' : 'Add to basket'}</span></button><button title="Delete" aria-label="Delete selected object" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button><button title="Open detailed inspector" aria-label="Open detailed inspector" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div>
-      </div>}
-      {selectedObject && selectedCustom && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}><span className="custom-item-badge">Existing item · Not in basket</span><div className="selection-toolbar" role="toolbar" aria-label="Selected existing furniture controls"><span className="selection-toolbar-title">{selectedCustom.name} · Not for sale</span><button title="Rotate 15°" aria-label="Rotate selected object 15 degrees" onClick={rotateSelection}><Icon name="rotate" /><span>Rotate 15°</span></button><button title="Duplicate" aria-label="Duplicate selected object" onClick={duplicateSelected}><Icon name="copy" /><span>Duplicate</span></button><button title="Delete" aria-label="Delete selected object" onClick={deleteSelected}><Icon name="trash" /><span>Delete</span></button><button title="Open detailed inspector" aria-label="Open detailed inspector" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div></div>}
-      {selectedFeature && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <div className={`selection-dock ${rightPanelOpen && inspectorExpanded ? 'selection-dock-raised' : ''}`}><div className="selection-toolbar" role="toolbar" aria-label="Selected architecture controls"><span className="selection-toolbar-title">{selectedFeature.type === 'wall' ? 'Wall' : selectedFeature.type === 'door' ? 'Door' : 'Window'}</span><button title={`Delete ${selectedFeature.type}`} aria-label={`Delete selected ${selectedFeature.type}`} onClick={deleteFeature}><Icon name="trash" /><span>Delete</span></button><button title="Open detailed inspector" aria-label="Open detailed inspector" onClick={() => { setRightPanelOpen(true); setInspectorExpanded(true) }}><Icon name="panel" /><span>Details</span></button></div></div>}
-      {!leftPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !renderOpen && !customItemOpen && <button className="floating-panel-button floating-left" onClick={() => { setLeftPanelOpen(true); if (window.innerWidth <= 1200) { setRightPanelOpen(false); setInspectorExpanded(false) } }} title="Open catalogue" aria-label="Open catalogue"><Icon name="panel" /><span>Catalogue</span></button>}
-      {!rightPanelOpen && !shoppingOpen && !newProjectOpen && !requestOpen && !renderOpen && !customItemOpen && <button className="floating-panel-button floating-right" onPointerDown={startInspectorGesture} onPointerUp={finishInspectorGesture} onPointerCancel={() => { inspectorStartY.current = null }} onClick={toggleInspector} title="Open inspector" aria-label="Open inspector"><Icon name="panel" /><span>Inspector</span></button>}
+      {compact && !renderOpen && <>
+        {showWelcome ? welcome : <div className="m-chrome" inert={modalOpen}>
+          <div className="m-top">
+            <button type="button" className="m-round m-menu-button" aria-label="Menu" aria-expanded={menuOpen} onClick={() => { setMenuOpen(!menuOpen); setAddOpen(false); setPanelOpen(false); setDetailsOpen(false) }}><Icon name="menu" size={22} />{itemCount > 0 && <span className="action-count">{itemCount}</span>}</button>
+            <div className="m-top-actions">
+              <button type="button" className="m-round" aria-label="Reset camera" title="Recentre the view" onClick={() => setCameraVersion((value) => value + 1)}><Icon name="focus" size={20} /></button>
+              {history.current.future.length > 0 && <button type="button" className="m-round" title="Redo" aria-label="Redo" onClick={redo}><Icon name="redo" size={20} /></button>}
+              <button type="button" className="m-round" title="Undo" aria-label="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" size={20} /></button>
+            </div>
+          </div>
+          {hangItem ? <div className="m-drawbar" role="toolbar" aria-label="Hang on a wall"><span>Tap the wall where the {roomItemShape(hangItem)?.name || 'item'} should go.</span><button type="button" className="primary-button" onClick={() => setHangItem(null)}>Cancel</button></div>
+            : activeTool !== 'select' ? <div className="m-drawbar" role="toolbar" aria-label="Drawing tools"><span>{drawingHint}</span><button type="button" className="primary-button" onClick={() => chooseTool('select')}>Done</button></div>
+            : hasSelection ? !panelOpen && !detailsOpen && <div className="selection-dock"><div className="dock-bar">{selectionActions}<button className="dock-details" aria-label="Open detailed inspector" title="Details" onClick={() => setDetailsOpen(true)}><Icon name="sliders" /><span>Details</span></button></div></div>
+              : !addOpen && !panelOpen && !menuOpen && <div className="m-bottom">
+                <div className="m-view" role="group" aria-label="View mode"><button type="button" aria-pressed={viewMode === '2d'} onClick={() => setViewMode('2d')}>Plan</button><button type="button" aria-pressed={viewMode === '3d'} onClick={() => setViewMode('3d')}>3D</button></div>
+                <button type="button" className="m-add" onClick={() => openAddSheet()}><Icon name="plus" size={22} /><span>Add furniture</span></button>
+              </div>}
+        </div>}
+        {(panelOpen || (detailsOpen && hasSelection)) && <section className="mobile-sheet" aria-label={detailsOpen && hasSelection ? 'Selection details' : `${steps.find((item) => item.id === step)!.label} panel`} inert={modalOpen}>
+          <button type="button" className="sheet-handle" aria-label="Close panel" onClick={() => { setPanelOpen(false); setDetailsOpen(false) }}><span /></button>
+          {detailsOpen && hasSelection ? <div className="panel-scroll">{inspectorContent}</div> : panelContent}
+        </section>}
+        {addOpen && <AddItemSheet initialRoom={targetWallId ? 'wall' : undefined} products={products} placedCounts={placedCounts} onAdd={(id) => addPoint ? addProduct(id, addPoint.x, addPoint.z, true) : addProduct(id)} onOwnItem={() => { setAddOpen(false); setCustomItemOpen(true) }} onClose={() => setAddOpen(false)} />}
+        {menuOpen && mobileMenu}
+      </>}
       {renderOpen && <Suspense fallback={<div className="render-loading" role="status">Loading render studio… <button onClick={() => setRenderOpen(false)}>Back to editor</button></div>}><RenderStudio project={project} onClose={() => setRenderOpen(false)} /></Suspense>}
-      {!renderOpen && !importOpen && !customItemOpen && notice && <div className={`toast ${selectedIds.length > 0 || selectedFeature ? 'toast-with-dock' : ''} ${rightPanelOpen && inspectorExpanded ? 'toast-inspector-expanded' : ''}`} role="status">{notice}</div>}
-      {shoppingOpen && <ShoppingDrawer items={shoppingItems} total={estimatedTotal} onClose={() => setShoppingOpen(false)} onExport={exportList} onRequest={() => { setShoppingOpen(false); setRequestOpen(true) }} />}
-      {newProjectOpen && <NewProjectModal onClose={() => setNewProjectOpen(false)} onCreate={createProject} />}
-      {requestOpen && <PurchaseRequestModal project={project} total={estimatedTotal} onClose={() => setRequestOpen(false)} />}
+      {!renderOpen && !importOpen && !customItemOpen && !measureOpen && !menuOpen && notice && <div className={`toast ${!project.features.length ? 'toast-high' : ''}`} role="status">{notice}</div>}
+      {shoppingOpen && <ShoppingDrawer items={shoppingItems} total={estimatedTotal} onClose={() => setShoppingOpen(false)} onExport={exportList} onRequest={() => { setShoppingOpen(false); if (!accountUser) { window.location.assign(`/profile?returnTo=${encodeURIComponent('/planner')}`); return } setRequestOpen(true) }} />}
+      {newProjectOpen && <NewProjectModal initialTemplate={newProjectOpen} onClose={() => setNewProjectOpen(null)} onCreate={createProject} />}
+      {requestOpen && <PurchaseRequestModal total={estimatedTotal} onClose={() => setRequestOpen(false)} onSubmit={submitPurchaseRequest} />}
       {customItemOpen && <ExistingItemModal onClose={() => setCustomItemOpen(false)} onCreate={addCustomObject} />}
       {importOpen && <PlanImportModal onClose={() => setImportOpen(false)} onImport={importProject} />}
+      {twistLabel && <div className="twist-label" style={{ left: twistLabel.x, top: twistLabel.y }} aria-hidden="true">{twistLabel.degrees}°</div>}
+      {measureOpen && <MeasureRoom name={project.name} ceilingHeight={project.ceilingHeight} replacing={project.features.length > 0 || project.objects.length > 0} onClose={() => setMeasureOpen(false)} onBuild={buildMeasuredRoom} />}
     </div>
   )
 }

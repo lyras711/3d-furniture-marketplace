@@ -2,6 +2,8 @@
   "rewrites": [
     { "source": "/planner", "destination": "/index.html" },
     { "source": "/planner/:path*", "destination": "/index.html" },
+    { "source": "/profile", "destination": "/index.html" },
+    { "source": "/profile/:path*", "destination": "/index.html" },
     { "source": "/for-business", "destination": "/index.html" },
     { "source": "/for-business/:path*", "destination": "/index.html" },
     { "source": "/b2b", "destination": "/index.html" },

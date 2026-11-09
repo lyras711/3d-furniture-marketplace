@@ -3,16 +3,19 @@ import { attachOpening, clamp, emptyProject, isProject, wallFromPoints, type Poi
 export type PixelPoint = { x: number; y: number }
 type PixelBounds = { minX: number; minY: number; maxX: number; maxY: number }
 export type PixelWall = { a: PixelPoint; b: PixelPoint; horizontal: boolean; thickness: number; confidence?: number }
-export type PixelOpening = PixelWall & { type: 'door' | 'window' | 'unconfirmed' | 'ignore'; suggestedType?: 'door' | 'window' }
+export type PixelOpening = PixelWall & { type: 'door' | 'window' | 'unconfirmed' | 'ignore'; suggestedType?: 'door' | 'window'; height?: number; sillHeight?: number; verticalConfidence?: number }
 export type PixelRoomLabel = { name: string; x: number; y: number; confidence: number }
 export type PixelKnownDimension = { a: PixelPoint; b: PixelPoint; meters: number; label: string; confidence: number }
-export type PlanDetectionRequest = { imageData: string; mimeType: 'image/png'; width: number; height: number }
+export type PlanDetectionImage = { imageData: string; mimeType: 'image/png'; width: number; height: number }
+export type PlanDetectionRequest = PlanDetectionImage & { elevationImage?: PlanDetectionImage }
 export type PlanDetectionResult = {
   walls: Omit<PixelWall, 'horizontal'>[]
-  openings: (Omit<PixelWall, 'horizontal'> & { type: 'door' | 'window' | 'unconfirmed' })[]
+  openings: (Omit<PixelWall, 'horizontal'> & { type: 'door' | 'window' | 'unconfirmed'; height?: number; sillHeight?: number; verticalConfidence?: number })[]
   roomLabels: PixelRoomLabel[]
   knownDimensions: PixelKnownDimension[]
   confidence: number
+  ceilingHeight?: number
+  ceilingHeightConfidence?: number
   warnings: string[]
 }
 export type PlanDetectionProvider = (request: PlanDetectionRequest) => Promise<PlanDetectionResult>
@@ -29,6 +32,8 @@ export type PlanAnalysis = {
   roomLabels?: PixelRoomLabel[]
   knownDimensions?: PixelKnownDimension[]
   confidence?: number
+  ceilingHeight?: number
+  ceilingHeightConfidence?: number
   provider?: 'local' | 'vertex-ai'
   warnings: string[]
 }
@@ -214,7 +219,14 @@ function validateDetection(result: PlanDetectionResult, width: number, height: n
     return { a, b, horizontal: Math.abs(b.x - a.x) >= Math.abs(b.y - a.y), thickness: clamp(value.thickness, 2, 200), confidence: clamp(value.confidence ?? result.confidence, 0, 1) }
   }
   const walls = result.walls.map(segment)
-  const openings = result.openings.map((opening) => ({ ...segment(opening), type: opening.type }))
+  const openings = result.openings.map((opening) => {
+    const height = opening.height, sillHeight = opening.sillHeight
+    if (height !== undefined && (!Number.isFinite(height) || height < 0.3 || height > 6)) throw new Error('The AI result contains an invalid opening height.')
+    if (sillHeight !== undefined && (!Number.isFinite(sillHeight) || sillHeight < 0 || sillHeight > 6)) throw new Error('The AI result contains an invalid sill height.')
+    return { ...segment(opening), type: opening.type, ...(height !== undefined ? { height } : {}), ...(sillHeight !== undefined ? { sillHeight } : {}), ...(opening.verticalConfidence !== undefined ? { verticalConfidence: clamp(opening.verticalConfidence, 0, 1) } : {}) }
+  })
+  if (result.ceilingHeight !== undefined && (!Number.isFinite(result.ceilingHeight) || result.ceilingHeight < 2 || result.ceilingHeight > 6)) throw new Error('The AI result contains an invalid ceiling height.')
+  const ceilingHeightConfidence = result.ceilingHeight !== undefined ? clamp(result.ceilingHeightConfidence ?? result.confidence, 0, 1) : undefined
   const roomLabels = result.roomLabels.slice(0, 40).filter((label) => typeof label.name === 'string' && label.name.trim().length > 0 && label.name.length <= 80).map((label) => ({ ...point({ x: label.x, y: label.y }), name: label.name.trim(), confidence: clamp(label.confidence, 0, 1) }))
   const knownDimensions = result.knownDimensions.slice(0, 20).map((dimension) => {
     const a = point(dimension.a), b = point(dimension.b)
@@ -222,33 +234,37 @@ function validateDetection(result: PlanDetectionResult, width: number, height: n
     return { a, b, meters: dimension.meters, label: dimension.label.slice(0, 80), confidence: clamp(dimension.confidence, 0, 1) }
   })
   const points = walls.flatMap((wall) => [wall.a, wall.b])
-  return { walls, openings, roomLabels, knownDimensions, bounds: { minX: Math.min(...points.map((p) => p.x)), minY: Math.min(...points.map((p) => p.y)), maxX: Math.max(...points.map((p) => p.x)), maxY: Math.max(...points.map((p) => p.y)) }, confidence: clamp(result.confidence, 0, 1), warnings: Array.isArray(result.warnings) ? result.warnings.filter((warning) => typeof warning === 'string').slice(0, 12) : [] }
+  const warnings = Array.isArray(result.warnings) ? result.warnings.filter((warning) => typeof warning === 'string').slice(0, 12) : []
+  if (result.ceilingHeight !== undefined || openings.some((opening) => opening.height !== undefined || opening.sillHeight !== undefined)) warnings.push('Vertical measurements from elevations are approximate. Review them before importing.')
+  return { walls, openings, roomLabels, knownDimensions, ...(result.ceilingHeight !== undefined ? { ceilingHeight: result.ceilingHeight, ceilingHeightConfidence } : {}), bounds: { minX: Math.min(...points.map((p) => p.x)), minY: Math.min(...points.map((p) => p.y)), maxX: Math.max(...points.map((p) => p.x)), maxY: Math.max(...points.map((p) => p.y)) }, confidence: clamp(result.confidence, 0, 1), warnings }
 }
 
-export async function analyzePlanFile(file: File, provider?: PlanDetectionProvider): Promise<PlanAnalysis> {
-  const { canvas, pageCount } = await fileCanvas(file)
-  const previewUrl = canvas.toDataURL('image/png'), suffix = pageCount > 1 ? ['Only the first PDF page was analyzed.'] : []
+export async function analyzePlanFile(file: File, provider?: PlanDetectionProvider, elevationFile?: File): Promise<PlanAnalysis> {
+  const { canvas, pageCount } = await fileCanvas(file), elevation = elevationFile ? await fileCanvas(elevationFile) : null
+  const previewUrl = canvas.toDataURL('image/png'), elevationUrl = elevation?.canvas.toDataURL('image/png')
+  const suffix = [pageCount > 1 ? 'Only the first floor-plan PDF page was analyzed.' : '', elevation && elevation.pageCount > 1 ? 'Only the first elevation PDF page was analyzed.' : ''].filter(Boolean)
   if (provider) {
     try {
-      const result = validateDetection(await provider({ imageData: previewUrl.slice(previewUrl.indexOf(',') + 1), mimeType: 'image/png', width: canvas.width, height: canvas.height }), canvas.width, canvas.height)
-      return { ...result, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'vertex-ai', warnings: [...result.warnings, 'AI-detected geometry and dimensions are approximate. Review the overlay and calibrate the scale.', ...suffix] }
+      const result = validateDetection(await provider({ imageData: previewUrl.slice(previewUrl.indexOf(',') + 1), mimeType: 'image/png', width: canvas.width, height: canvas.height, ...(elevation && elevationUrl ? { elevationImage: { imageData: elevationUrl.slice(elevationUrl.indexOf(',') + 1), mimeType: 'image/png', width: elevation.canvas.width, height: elevation.canvas.height } } : {}) }), canvas.width, canvas.height)
+      const verticalMeasurements = result.ceilingHeight !== undefined || result.openings.some((opening) => opening.height !== undefined || opening.sillHeight !== undefined)
+      return { ...result, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'vertex-ai', warnings: [...result.warnings, 'AI-detected geometry and dimensions are approximate. Review the overlay and calibrate the scale.', ...(verticalMeasurements ? [] : ['No vertical measurements were extracted; standard wall, door and window heights will be used.']), ...suffix] }
     } catch (reason) {
       try {
         const local = analyzePlanPixels(canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height))
         const message = reason instanceof Error ? reason.message : 'AI detection is unavailable.'
-        return { ...local, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'local', warnings: [`AI detection unavailable; used the local axis-aligned fallback. ${message}`, ...local.warnings, ...suffix] }
+        return { ...local, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'local', warnings: [`AI detection unavailable; used the local axis-aligned fallback. ${message}`, ...local.warnings, ...(elevation ? ['The elevation drawing was not used by the local fallback.'] : []), ...suffix] }
       } catch (fallbackError) {
         throw new Error(`${reason instanceof Error ? reason.message : 'AI detection is unavailable.'} The local fallback could not detect this plan: ${fallbackError instanceof Error ? fallbackError.message : 'check the image.'}`)
       }
     }
   }
   const local = analyzePlanPixels(canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height))
-  return { ...local, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'local', warnings: [...local.warnings, ...suffix] }
+  return { ...local, previewUrl, sourceWidth: canvas.width, sourceHeight: canvas.height, pageCount, provider: 'local', warnings: [...local.warnings, ...(elevation ? ['The elevation drawing was not used by the local fallback.'] : []), ...suffix] }
 }
 
 export type PlanCalibration = { a: PixelPoint; b: PixelPoint }
 
-export function createProjectFromPlan(analysis: PlanAnalysis, realDistance: number, name: string, calibration?: PlanCalibration): ProjectState {
+export function createProjectFromPlan(analysis: PlanAnalysis, realDistance: number, name: string, calibration?: PlanCalibration, ceilingHeightOverride?: number): ProjectState {
   const planWidth = analysis.bounds.maxX - analysis.bounds.minX, planHeight = analysis.bounds.maxY - analysis.bounds.minY
   const pixelLength = (segment: PixelWall) => Math.hypot(segment.b.x - segment.a.x, segment.b.y - segment.a.y)
   const calibrationPixels = calibration ? Math.hypot(calibration.b.x - calibration.a.x, calibration.b.y - calibration.a.y) : planWidth
@@ -256,8 +272,16 @@ export function createProjectFromPlan(analysis: PlanAnalysis, realDistance: numb
   if (!analysis.walls.length || [...analysis.walls, ...analysis.openings].some((wall) => ![wall.a.x, wall.a.y, wall.b.x, wall.b.y, wall.thickness].every(Number.isFinite) || pixelLength(wall) < 8)) throw new Error('Every segment needs endpoints at least 8 pixels apart.')
   const scale = realDistance / calibrationPixels, scaledWidth = planWidth * scale, scaledHeight = planHeight * scale, project = emptyProject(name || 'Imported plan')
   if (scaledWidth > 38 || scaledHeight > 38) throw new Error('The calibrated drawing exceeds the 40 m build grid. Import a smaller area.')
+  const suggestedHeight = analysis.ceilingHeight !== undefined && (analysis.ceilingHeightConfidence ?? 0) >= 0.65 ? analysis.ceilingHeight : project.ceilingHeight
+  const ceilingHeight = ceilingHeightOverride ?? suggestedHeight
+  if (!Number.isFinite(ceilingHeight) || ceilingHeight < 2 || ceilingHeight > 6) throw new Error('Enter a ceiling height between 2 and 6 metres.')
+  project.ceilingHeight = ceilingHeight
   const toPoint = (p: PixelPoint): Point => ({ x: (p.x - (analysis.bounds.minX + analysis.bounds.maxX) / 2) * scale, z: (p.y - (analysis.bounds.minY + analysis.bounds.maxY) / 2) * scale })
   project.width = Math.max(12, scaledWidth + 2); project.length = Math.max(12, scaledHeight + 2)
+  const openingDimensions = (opening: PixelOpening) => {
+    const measured = (opening.verticalConfidence ?? 0) >= 0.65
+    return { height: measured && opening.height !== undefined ? opening.height : opening.type === 'door' ? 2.1 : 1.35, sillHeight: opening.type === 'window' && measured && opening.sillHeight !== undefined ? opening.sillHeight : opening.type === 'window' ? 0.85 : 0 }
+  }
   project.roomType = analysis.roomLabels?.[0]?.name || 'Imported plan'
   project.planImport = { provider: analysis.provider || 'local', confidence: clamp(analysis.confidence ?? (analysis.provider === 'vertex-ai' ? 0.7 : 0.4), 0, 1), scaleCalibrated: true }
   project.roomLabels = (analysis.roomLabels || []).map((label, index) => { const point = toPoint(label); return { id: `imported-room-label-${index}`, name: label.name, x: point.x, z: point.z, confidence: clamp(label.confidence, 0, 1) } }).filter((label) => Math.abs(label.x) <= project.width / 2 && Math.abs(label.z) <= project.length / 2)
@@ -271,7 +295,7 @@ export function createProjectFromPlan(analysis: PlanAnalysis, realDistance: numb
     for (const [index, opening] of accepted.entries()) {
       if (project.features.length >= 200) break
       const centre = toPoint({ x: (opening.a.x + opening.b.x) / 2, y: (opening.a.y + opening.b.y) / 2 })
-      const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', x: centre.x, z: centre.z, rotation: 0, width: pixelLength(opening) * scale, height: opening.type === 'door' ? 2.1 : 1.35, sillHeight: opening.type === 'window' ? 0.85 : 0 }, project)
+      const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', x: centre.x, z: centre.z, rotation: 0, width: pixelLength(opening) * scale, ...openingDimensions(opening) }, project)
       if (feature.wallId && Math.hypot(feature.x - centre.x, feature.z - centre.z) <= 0.65) project.features.push(feature)
     }
   } else {
@@ -279,7 +303,7 @@ export function createProjectFromPlan(analysis: PlanAnalysis, realDistance: numb
       const wallIndex = walls.findIndex((wall) => wall.horizontal === opening.horizontal && Math.abs(across(wall) - across(opening)) <= wall.thickness && along(opening, opening.a) >= along(wall, wall.a) - 1 && along(opening, opening.b) <= along(wall, wall.b) + 1)
       if (wallIndex < 0 || project.features[wallIndex].width < 0.5 || project.features.length >= 200) continue
       const wall = project.features[wallIndex], centre = toPoint({ x: (opening.a.x + opening.b.x) / 2, y: (opening.a.y + opening.b.y) / 2 })
-      const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', wallId: wall.id, x: centre.x, z: centre.z, rotation: wall.rotation, width: length(opening) * scale, height: opening.type === 'door' ? 2.1 : 1.35, sillHeight: opening.type === 'window' ? 0.85 : 0 }, project)
+      const feature = attachOpening({ id: `imported-opening-${index}`, type: opening.type as 'door' | 'window', wallId: wall.id, x: centre.x, z: centre.z, rotation: wall.rotation, width: length(opening) * scale, ...openingDimensions(opening) }, project)
       project.features.push(feature)
     }
   }

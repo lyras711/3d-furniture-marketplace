@@ -140,7 +140,7 @@ test('showcase preserves legacy shared-project URLs', async ({ page }) => {
   await page.goto(`${url}/#project=${encodeURIComponent(JSON.stringify(emptyProject('Shared legacy link')))}`)
   await expect(page.locator('canvas')).toHaveAttribute('data-scene-ready', 'true')
   await expect(page.locator('.showcase')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /Shared legacy link/ })).toBeVisible()
+  await expect(page.getByLabel('Project title')).toHaveValue('Shared legacy link')
 })
 
 test('showcase desktop and mobile screenshots have no overflow, broken images, or hidden content', async ({ page }) => {

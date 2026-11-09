@@ -3,7 +3,8 @@ import SurfaceMaterial from './SurfaceMaterial'
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import { Edges, Environment, Grid, Html, Line } from '@react-three/drei'
 import { DoubleSide, Path, Plane, Raycaster, Shape, Vector2, Vector3 } from 'three'
-import { fitsFloor, floorColors, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
+import { activeTouchCount, beyondSlop, cancelOnMultiTouch, isDoubleTap, TAP_MAX_TRAVEL_PX, type Tap } from './gestures'
+import { doorSwingSign, fitsFloor, floorColors, openingStyle, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
 
 const floor = new Plane(new Vector3(0, 1, 0), 0)
 const dragType = 'application/x-forma-product'
@@ -17,25 +18,78 @@ export function FloorSurface({ region, color, finish, elevation = -0.01, ceiling
   return <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, elevation, 0]} receiveShadow castShadow={ceiling} raycast={() => null}><shapeGeometry args={[shape]} onUpdate={(geometry) => { const uv = geometry.getAttribute('uv'); for (let i = 0; i < uv.count; i++) uv.setXY(i, geometry.getAttribute('position').getX(i) / 2, geometry.getAttribute('position').getY(i) / 2); uv.needsUpdate = true }} />{finish?.includes('oak') ? <SurfaceMaterial kind="floor" color={finish === 'Pale oak' ? '#fff8ec' : '#e4c9a7'} /> : <meshStandardMaterial color={color} side={DoubleSide} roughness={ceiling ? 0.85 : 0.7} />}</mesh>
 }
 
-export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, lightingMode = 'default' }: {
+type Glass = { color: string; transmission: number; roughness: number; emissive: string; emissiveIntensity: number }
+const planLine = (points: [number, number][], y = 0.035) => points.map(([x, z]) => [x, y, z] as [number, number, number])
+/** One door or window in wall-local space (X along the wall, Z along its normal). `swing` is the local Z side a door leaf opens into. */
+function OpeningBody({ feature: f, low, y, openingHeight, thickness, selected, swing, glass }: { feature: RoomFeature; low: boolean; y: number; openingHeight: number; thickness: number; selected: boolean; swing: number; glass: Glass }) {
+  const style = openingStyle(f), w = f.width, door = f.type === 'door', hingeX = (f.hinge === 'right' ? 1 : -1) * w / 2
+  const frameColor = door ? '#ede5d7' : '#30362f'
+  const edges = selected && <Edges color="#4d7858" lineWidth={2} />
+  const arc = (pivot: number, radius: number, toward: number) => planLine(Array.from({ length: 25 }, (_, i) => [pivot + toward * Math.cos(i / 24 * Math.PI / 2) * radius, swing * Math.sin(i / 24 * Math.PI / 2) * radius]))
+  if (low) return <>
+    <mesh position={[0, y, 0]} receiveShadow><boxGeometry args={[w, openingHeight, thickness]} /><meshStandardMaterial color={door ? style === 'opening' ? '#e3d8c5' : '#c4aa88' : '#a5c3c5'} />{edges}</mesh>
+    {door && style === 'hinged' && <><Line points={arc(hingeX, w, -Math.sign(hingeX))} color="#a89679" lineWidth={1} dashed dashSize={0.08} gapSize={0.05} raycast={() => null} /><Line points={planLine([[hingeX, 0], [hingeX, swing * w]])} color="#8d7a5c" lineWidth={1.5} raycast={() => null} /></>}
+    {door && style === 'double' && [-1, 1].map((side) => <group key={side}><Line points={arc(side * w / 2, w / 2, -side)} color="#a89679" lineWidth={1} dashed dashSize={0.06} gapSize={0.04} raycast={() => null} /><Line points={planLine([[side * w / 2, 0], [side * w / 2, swing * w / 2]])} color="#8d7a5c" lineWidth={1.5} raycast={() => null} /></group>)}
+    {door && style === 'sliding' && <><Line points={planLine([[-w / 2, -0.025], [0.06, -0.025]], 0.11)} color="#6f5f45" lineWidth={2} raycast={() => null} /><Line points={planLine([[-0.06, 0.025], [w / 2, 0.025]], 0.11)} color="#6f5f45" lineWidth={2} raycast={() => null} /></>}
+    {!door && style === 'balcony' && <Line points={planLine([[0, -thickness / 2], [0, thickness / 2]], 0.11)} color="#57787b" lineWidth={1.5} raycast={() => null} />}
+  </>
+  const leaf = (x: number, width: number, z = 0, depth = 0.045) => <mesh key={`${x}-${z}`} position={[x, y, z]} castShadow receiveShadow><boxGeometry args={[width, openingHeight - 0.04, depth]} /><SurfaceMaterial kind="oak" color="#d3b996" />{edges}</mesh>
+  const handle = (x: number) => [-1, 1].map((side) => <mesh key={`${x}-${side}`} position={[x, Math.min(1, f.height * 0.55), side * 0.045]} rotation={[0, 0, Math.PI / 2]} castShadow><cylinderGeometry args={[0.012, 0.012, 0.13, 16]} /><meshStandardMaterial color="#bca171" roughness={0.25} metalness={0.85} /></mesh>)
+  const posts = door ? [-1, 1] : style === 'fixed' ? [-1, 1] : [-1, 0, 1]
+  return <>
+    {door ? <>
+      {style === 'hinged' && <>{leaf(0, w - 0.05)}{handle(-Math.sign(hingeX) * w * 0.34)}</>}
+      {style === 'double' && <>{[-1, 1].map((side) => leaf(side * w / 4, w / 2 - 0.04))}{handle(-0.07)}{handle(0.07)}</>}
+      {style === 'sliding' && [-1, 1].map((side) => <group key={side}>{leaf(side * w / 4, w / 2 + 0.04, side * 0.026, 0.035)}<mesh position={[side * 0.12, Math.min(1, f.height * 0.5), side * 0.056]} castShadow><boxGeometry args={[0.02, 0.32, 0.02]} /><meshStandardMaterial color="#8d8a82" roughness={0.3} metalness={0.8} /></mesh></group>)}
+      {style === 'opening' && <mesh position={[0, y, 0]}><planeGeometry args={[w, openingHeight]} /><meshBasicMaterial transparent opacity={0} depthWrite={false} side={DoubleSide} />{edges}</mesh>}
+    </> : <mesh position={[0, y, 0]} receiveShadow><planeGeometry args={[w, openingHeight]} /><meshPhysicalMaterial color={glass.color} transmission={glass.transmission} thickness={0} ior={1.5} roughness={glass.roughness} emissive={glass.emissive} emissiveIntensity={glass.emissiveIntensity} side={DoubleSide} />{edges}</mesh>}
+    {posts.map((i) => <mesh key={i} position={[i * (w / 2 - 0.025), y, 0]} castShadow receiveShadow><boxGeometry args={[0.045, openingHeight, thickness + 0.025]} /><meshStandardMaterial color={frameColor} roughness={0.38} metalness={door ? 0 : 0.45} /></mesh>)}
+    {[-1, 1].map((i) => <mesh key={i} position={[0, y + i * (openingHeight / 2 - 0.02), 0]} castShadow receiveShadow><boxGeometry args={[w, 0.04, thickness + 0.025]} /><meshStandardMaterial color={frameColor} roughness={0.38} /></mesh>)}
+    {!door && style !== 'balcony' && <mesh position={[0, y - openingHeight / 2 - 0.025, 0]} castShadow receiveShadow><boxGeometry args={[w + 0.08, 0.045, thickness + 0.11]} /><meshStandardMaterial color="#d8cfbb" roughness={0.35} /></mesh>}
+  </>
+}
+
+export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, lightingMode = 'default' }: {
   project: ProjectState; viewMode: '2d' | '3d'; cutaway: boolean; selectedId: string | null; tool: string
-  onSelect: (id: string) => void; onPlace: (type: 'door' | 'window', x: number, z: number) => void
+  onSelect: (id: string, point?: Point) => void; onPlace: (type: 'door' | 'window', x: number, z: number) => void
   onMoveEndpoint: (id: string, previous: Point, next: Point) => void
   onMoveOpening: (id: string, wallOffset: number) => void
-  onDragStart: (id: string) => void; onDragEnd: () => void
+  onDragStart: (id: string) => void; onDragEnd: () => void; onDragCancel?: () => void
   lightingMode?: EditorLightingMode
 }) {
   const regions = useMemo(() => getFloorRegions(project.features), [project.features])
-  return <>{project.features.filter((f) => f.type === 'wall').map((wall) => <WallObject key={wall.id} {...{ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, lightingMode, regions }} wall={wall} />)}</>
+  return <>{project.features.filter((f) => f.type === 'wall').map((wall) => <WallObject key={wall.id} {...{ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel, lightingMode, regions }} wall={wall} />)}</>
 }
-function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, lightingMode = 'default', wall, regions }: Parameters<typeof Architecture>[0] & { wall: RoomFeature; regions: FloorRegion[] }) {
+function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, lightingMode = 'default', wall, regions }: Parameters<typeof Architecture>[0] & { wall: RoomFeature; regions: FloorRegion[] }) {
   const { camera, controls } = useThree()
   const [front, setFront] = useState(false)
   const drag = useRef<Point | null>(null)
   const openingDrag = useRef<string | null>(null)
+  // Touch drags wait for the slop and stop when a second finger lands, so pinch-zoom never drags architecture.
+  const touchDrag = useRef<{ start: { x: number; y: number }; moved: boolean; release: () => void } | null>(null)
+  const setControls = (enabled: boolean) => { if (controls) (controls as unknown as { enabled: boolean }).enabled = enabled }
+  const beginTouchDrag = (event: ThreeEvent<PointerEvent>) => {
+    const target = event.target as Element, pointerId = event.pointerId, touch = event.pointerType === 'touch'
+    touchDrag.current = { start: { x: event.clientX, y: event.clientY }, moved: !touch, release: touch ? cancelOnMultiTouch(() => {
+      drag.current = null; openingDrag.current = null; touchDrag.current = null
+      target.releasePointerCapture?.(pointerId)
+      setControls(true)
+      onDragCancel()
+    }) : () => undefined }
+  }
+  const dragReady = (event: ThreeEvent<PointerEvent>) => {
+    const gesture = touchDrag.current
+    return !gesture || gesture.moved || (gesture.moved = beyondSlop(gesture.start, { x: event.clientX, y: event.clientY }))
+  }
+  const endTouchDrag = () => { touchDrag.current?.release(); touchDrag.current = null }
   const selected = selectedId === wall.id
   const thickness = wallThickness(wall)
   const openings = project.features.filter((f) => f.wallId === wall.id)
+  const outside = useMemo(() => {
+    const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
+    const inside = (side: number) => regions.some((r) => pointInPolygon({ x: wall.x + nx * side * 0.15, z: wall.z + nz * side * 0.15 }, r.points))
+    return inside(1) && !inside(-1) ? -1 : inside(-1) && !inside(1) ? 1 : 0
+  }, [regions, wall.x, wall.z, wall.rotation])
   useFrame(() => {
     const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
     const inside = (side: number) => regions.some((r) => pointInPolygon({ x: wall.x + nx * side * 0.15, z: wall.z + nz * side * 0.15 }, r.points))
@@ -50,8 +104,9 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
   const click = (event: ThreeEvent<MouseEvent>, id: string) => {
     if (tool === 'wall') return
     event.stopPropagation()
+    if (event.delta > TAP_MAX_TRAVEL_PX) return
     if (tool === 'door' || tool === 'window') onPlace(tool, event.point.x, event.point.z)
-    else onSelect(id)
+    else onSelect(id, { x: event.point.x, z: event.point.z })
   }
   const openingOffset = (event: ThreeEvent<PointerEvent>) => {
     const point = event.ray.intersectPlane(floor, new Vector3())
@@ -59,13 +114,13 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
   }
   const finish = (event: ThreeEvent<PointerEvent>) => {
     if (!drag.current) return
-    event.stopPropagation(); drag.current = null
+    event.stopPropagation(); drag.current = null; endTouchDrag()
     ;(event.target as Element).releasePointerCapture?.(event.pointerId)
     onDragEnd()
   }
   const finishOpening = (event: ThreeEvent<PointerEvent>) => {
     if (!openingDrag.current) return
-    event.stopPropagation(); openingDrag.current = null
+    event.stopPropagation(); openingDrag.current = null; endTouchDrag()
     ;(event.target as Element).releasePointerCapture?.(event.pointerId)
     onDragEnd()
   }
@@ -87,29 +142,25 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
       return <group key={f.id} position={[f.wallOffset || 0, 0, 0]} onClick={(event) => click(event, f.id)}
         onPointerDown={(event) => {
           if (event.button !== 0 || tool !== 'select') return
+          if (event.pointerType === 'touch' && (selectedId !== f.id || activeTouchCount() > 1)) return
           const offset = openingOffset(event)
           if (offset === null) return
           event.stopPropagation()
           openingDrag.current = f.id
+          beginTouchDrag(event)
           ;(event.target as Element).setPointerCapture?.(event.pointerId)
-          if (controls) (controls as unknown as { enabled: boolean }).enabled = false
+          setControls(false)
           onSelect(f.id)
           onDragStart(f.id)
         }}
         onPointerMove={(event) => {
           if (openingDrag.current !== f.id) return
           event.stopPropagation()
+          if (!dragReady(event)) return
           const offset = openingOffset(event)
           if (offset !== null) onMoveOpening(f.id, offset)
         }} onPointerUp={finishOpening} onPointerCancel={finishOpening}>
-        <mesh position={[0, y, 0]} castShadow={f.type === 'door'} receiveShadow>{f.type === 'window' && !low ? <planeGeometry args={[f.width, openingHeight]} /> : <boxGeometry args={[f.width, openingHeight, low ? thickness : 0.045]} />}{f.type === 'window' && !low ? <meshPhysicalMaterial color={windowColor} transmission={windowTransmission} thickness={0} ior={1.5} roughness={windowRoughness} emissive={windowEmissive} emissiveIntensity={windowEmissiveIntensity} side={DoubleSide} /> : low ? <meshStandardMaterial color={f.type === 'window' ? '#a5c3c5' : '#c4aa88'} /> : <SurfaceMaterial kind="oak" color="#d3b996" />}{selectedId === f.id && <Edges color="#4d7858" lineWidth={2} />}</mesh>
-        {!low && <>
-          {(f.type === 'window' ? [-1, 0, 1] : [-1, 1]).map((i) => <mesh key={i} position={[i * (f.width / 2 - 0.025), y, 0]} castShadow receiveShadow><boxGeometry args={[0.045, openingHeight, thickness + 0.025]} /><meshStandardMaterial color={f.type === 'window' ? '#30362f' : '#ede5d7'} roughness={0.38} metalness={f.type === 'window' ? 0.45 : 0} /></mesh>)}
-          {[-1, 1].map((i) => <mesh key={i} position={[0, y + i * (openingHeight / 2 - 0.02), 0]} castShadow receiveShadow><boxGeometry args={[f.width, 0.04, thickness + 0.025]} /><meshStandardMaterial color={f.type === 'window' ? '#30362f' : '#ede5d7'} roughness={0.38} /></mesh>)}
-          {f.type === 'window' && <mesh position={[0, y - openingHeight / 2 - 0.025, 0]} castShadow receiveShadow><boxGeometry args={[f.width + 0.08, 0.045, thickness + 0.11]} /><meshStandardMaterial color="#d8cfbb" roughness={0.35} /></mesh>}
-          {f.type === 'door' && [-1, 1].map((side) => <mesh key={side} position={[f.width * 0.34, Math.min(1, f.height * 0.55), side * 0.045]} rotation={[0, 0, Math.PI / 2]} castShadow><cylinderGeometry args={[0.012, 0.012, 0.13, 16]} /><meshStandardMaterial color="#bca171" roughness={0.25} metalness={0.85} /></mesh>)}
-        </>}
-        {f.type === 'door' && low && <Line points={Array.from({ length: 25 }, (_, i) => [-f.width / 2 + Math.cos(i / 24 * Math.PI / 2) * f.width, 0.035, -Math.sin(i / 24 * Math.PI / 2) * f.width] as [number, number, number])} color="#a89679" lineWidth={1} dashed dashSize={0.08} gapSize={0.05} raycast={() => null} />}
+        <OpeningBody feature={f} low={low} y={y} openingHeight={openingHeight} thickness={thickness} selected={selectedId === f.id} swing={f.type === 'door' ? doorSwingSign(f, wall, regions) : 1} glass={{ color: windowColor, transmission: windowTransmission, roughness: windowRoughness, emissive: windowEmissive, emissiveIntensity: windowEmissiveIntensity }} />
       </group>
     })}
     {!low && xs.slice(0, -1).map((left, i) => {
@@ -118,17 +169,20 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
       return [-1, 1].map((side) => <mesh key={`${i}-${side}`} position={[x, 0.055, side * (thickness / 2 + 0.013)]} castShadow receiveShadow><boxGeometry args={[right - left, 0.11, 0.026]} /><meshStandardMaterial color="#e6dfd2" roughness={0.5} /></mesh>)
     })}
     {selected && <Html center position={[0, height + 0.15, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{wall.width.toFixed(2)} m</span></Html>}
+    {plan && !selected && wall.width >= 0.6 && <Html center position={[0, height + 0.15, outside * (thickness / 2 + 0.24)]} style={{ pointerEvents: 'none' }}><span className="wall-length-tag">{wall.width.toFixed(2)} m</span></Html>}
     {selected && tool === 'select' && [-1, 1].map((side, index) => <mesh key={side} position={[side * wall.width / 2, plan ? 0.16 : height + 0.08, 0]}
       onPointerDown={(event) => {
-        if (event.button !== 0) return
+        if (event.button !== 0 || (event.pointerType === 'touch' && activeTouchCount() > 1)) return
         event.stopPropagation(); drag.current = wallEndpoints(wall)[index]
+        beginTouchDrag(event)
         ;(event.target as Element).setPointerCapture?.(event.pointerId)
-        if (controls) (controls as unknown as { enabled: boolean }).enabled = false
+        setControls(false)
         onDragStart(wall.id)
       }}
       onPointerMove={(event) => {
         if (!drag.current) return
         event.stopPropagation()
+        if (!dragReady(event)) return
         const p = event.ray.intersectPlane(floor, new Vector3())
         if (!p) return
         const next = snapBuildPoint({ x: p.x, z: p.z }, project, wall.id)
@@ -141,12 +195,14 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
   </group>
 }
 
-export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, lightingMode, onClear, onPlace, onDrop, onDrawWall }: {
+export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, lightingMode, onClear, onPlace, onDrop, onDrawWall, onAddAt }: {
   project: ProjectState; viewMode: '2d' | '3d'; gridVisible: boolean; tool: string; snap: boolean; wallSnap: boolean; lightingMode: EditorLightingMode
   onClear: () => void; onPlace: (type: 'wall' | 'door' | 'window', x: number, z: number) => void
   onDrop: (id: string, x: number, z: number) => void
   onDrawWall: (x: number, z: number, endX: number, endZ: number) => boolean
+  onAddAt?: (x: number, z: number) => void
 }) {
+  const lastTap = useRef<Tap | null>(null)
   const { camera, gl, invalidate } = useThree()
   const readyFrames = useRef(0)
   useFrame(() => {
@@ -164,7 +220,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
   const previewWall = wallStart.current && wallEnd && previewLength >= 0.25 ? wallFromPoints('__preview__', wallStart.current, wallEnd, project.ceilingHeight) : null
   const previewClosesRoom = previewWall ? getFloorRegions([...project.features, previewWall]).length > regions.length : false
   const capture = useRef<{ element: Element; id: number } | null>(null)
-  const wallGesture = useRef<{ anchorOnly: boolean; moved: boolean; x: number; y: number; id: number } | null>(null)
+  const wallGesture = useRef<{ anchorOnly: boolean; moved: boolean; x: number; y: number; id: number; release: () => void } | null>(null)
   const current = useRef({ project, snap, wallSnap, onDrop, regions })
   current.current = { project, snap, wallSnap, onDrop, regions }
   useEffect(() => {
@@ -199,6 +255,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     return () => { canvas.removeEventListener('dragover', over); canvas.removeEventListener('dragleave', leave); canvas.removeEventListener('drop', drop); window.removeEventListener('dragend', leave) }
   }, [camera, gl, invalidate])
   const cancelWall = () => {
+    wallGesture.current?.release()
     wallStart.current = null; wallGesture.current = null; setWallEnd(null)
     if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
   }
@@ -227,6 +284,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
       wallStart.current = end
       setWallEnd(end)
     } else setWallEnd(start)
+    gesture.release()
     wallGesture.current = null
     if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
   }
@@ -243,23 +301,40 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
       return <rectAreaLight key={feature.id} position={[feature.x + nx * inside * offset, (feature.sillHeight || 0) + feature.height / 2, feature.z + nz * inside * offset]} rotation={[0, feature.rotation + (inside === 1 ? Math.PI : 0), 0]} width={feature.width * 0.9} height={feature.height * 0.9} intensity={day3d ? 30 : 2.5} color="#ffedcf" />
     })}
     <mesh position={[0, -0.035, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow
-      onClick={(event) => { if (tool === 'select') { event.stopPropagation(); onClear() } else if (tool === 'door' || tool === 'window') { event.stopPropagation(); onPlace(tool, event.point.x, event.point.z) } }}
+      onClick={(event) => {
+        if (tool !== 'select' && tool !== 'door' && tool !== 'window') return
+        event.stopPropagation()
+        if (event.delta > TAP_MAX_TRAVEL_PX) return
+        if (tool !== 'select') { onPlace(tool, event.point.x, event.point.z); return }
+        const tap = { x: event.nativeEvent.clientX, y: event.nativeEvent.clientY, time: event.nativeEvent.timeStamp }
+        if (onAddAt && isDoubleTap(lastTap.current, tap)) { lastTap.current = null; onAddAt(event.point.x, event.point.z); return }
+        lastTap.current = tap
+        onClear()
+      }}
       onPointerDown={(event) => {
-        if (tool !== 'wall' || event.button !== 0) return
+        if (tool !== 'wall' || event.button !== 0 || (event.pointerType === 'touch' && activeTouchCount() > 1)) return
         const point = wallPoint(event)
         if (!point) return
         event.stopPropagation()
         const anchorOnly = !wallStart.current
         if (anchorOnly) wallStart.current = point
         setWallEnd(point)
-        wallGesture.current = { anchorOnly, moved: false, x: event.clientX, y: event.clientY, id: event.pointerId }
-        capture.current = { element: event.target as Element, id: event.pointerId }
-        capture.current.element.setPointerCapture?.(event.pointerId)
+        const id = event.pointerId
+        // A second finger means the user is zooming: drop this tap instead of drawing a wall.
+        const release = event.pointerType === 'touch' ? cancelOnMultiTouch(() => {
+          if (wallGesture.current?.id !== id) return
+          if (wallGesture.current.anchorOnly) wallStart.current = null
+          wallGesture.current = null; setWallEnd(wallStart.current)
+          if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
+        }) : () => undefined
+        wallGesture.current = { anchorOnly, moved: false, x: event.clientX, y: event.clientY, id, release }
+        capture.current = { element: event.target as Element, id }
+        capture.current.element.setPointerCapture?.(id)
       }}
       onPointerMove={(event) => {
         const gesture = wallGesture.current
         if (gesture?.id === event.pointerId && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 6) gesture.moved = true
-        if (wallStart.current) { event.stopPropagation(); setWallEnd(wallPoint(event)) }
+        if (wallStart.current && activeTouchCount() <= 1) { event.stopPropagation(); setWallEnd(wallPoint(event)) }
       }} onPointerUp={finishWall} onPointerCancel={cancelWall}>
       <planeGeometry args={[project.width, project.length]} /><meshStandardMaterial color="#eeeee7" roughness={1} />
     </mesh>

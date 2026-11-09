@@ -9,6 +9,8 @@ import { getAuth, type DecodedIdToken } from 'firebase-admin/auth'
 import { getAppCheck } from 'firebase-admin/app-check'
 import { FieldValue, getFirestore } from 'firebase-admin/firestore'
 import { cancelCrawlJob, createCrawlJob, getJob, listJobs, runCrawlJob } from './catalog-workflow'
+import { decidePurchaseItems, estimatePurchase, purchaseItemId, reviewPurchaseItems, type AvailabilityUpdate, type PurchaseItem, type PurchaseRequest } from '../src/purchase'
+import { getFloorRegions, isProject, migrateProject, productById, type ProjectState } from '../src/editor'
 import { VertexPlanVisionProvider } from './plan-vision'
 
 type Role = 'viewer' | 'editor' | 'admin' | 'owner'
@@ -150,19 +152,75 @@ async function consumePlanQuota(uid: string) {
   })
 }
 
+async function accountContext(request: IncomingMessage) {
+  const token = request.headers.authorization?.replace(/^Bearer\s+/i, '')
+  if (!token) throw new ApiError(401, 'Sign in to access your account.')
+  let decoded: DecodedIdToken
+  try { decoded = await firebase().auth.verifyIdToken(token) } catch { throw new ApiError(401, 'The Firebase ID token is invalid or expired.') }
+  if (decoded.firebase?.sign_in_provider === 'anonymous' || !decoded.email) throw new ApiError(401, 'A signed-in account with an email address is required.')
+  return { uid: decoded.uid, email: decoded.email.toLowerCase() }
+}
+
+function recordId(raw: string) {
+  let id: string
+  try { id = decodeURIComponent(raw) } catch { throw new ApiError(400, 'Record id is invalid.') }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new ApiError(400, 'Record id is invalid.')
+  return id
+}
+
+function projectPayload(value: unknown): ProjectState {
+  if (!isProject(value) || !value.name.trim() || value.name.trim().length > 80) throw new ApiError(400, 'A valid project is required; project names must be 1–80 characters.')
+  const project = migrateProject({ ...value, name: value.name.trim() })
+  if (Buffer.byteLength(JSON.stringify(project)) > 850_000) throw new ApiError(413, 'This project is too large to save to your profile.')
+  return project
+}
+
+function projectSummary(id: string, data: Record<string, unknown>) {
+  const project = data.project as ProjectState
+  return { id, name: project.name, createdAt: data.createdAt, updatedAt: data.updatedAt, objectCount: project.objects.length, roomCount: getFloorRegions(project.features).length }
+}
+
+async function ownedProject(uid: string, id: string) {
+  const ref = firebase().db.collection('userProjects').doc(id), snapshot = await ref.get(), data = snapshot.data()
+  if (!data || data.ownerUid !== uid) throw new ApiError(404, 'Saved project not found.')
+  return { ref, data }
+}
+
+function storedPurchaseRequest(id: string, data: Record<string, unknown>): PurchaseRequest {
+  return { id, projectId: String(data.projectId), projectName: String(data.projectName), customer: data.customer as PurchaseRequest['customer'], items: data.items as PurchaseItem[], estimatedTotal: typeof data.estimatedTotal === 'number' ? data.estimatedTotal : null, currency: 'EUR', status: data.status as PurchaseRequest['status'], createdAt: String(data.createdAt), updatedAt: String(data.updatedAt), ...(typeof data.placedAt === 'string' ? { placedAt: data.placedAt } : {}) }
+}
+
+function requestText(value: unknown, label: string, max: number, required = true) {
+  if (value === undefined && !required) return ''
+  if (typeof value !== 'string') throw new ApiError(400, `${label} must be text.`)
+  const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim()
+  if ((required && !text) || text.length > max) throw new ApiError(400, `${label} must be ${required ? '1–' : 'at most '}${max} characters.`)
+  return text
+}
+
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || host}`)
     if (request.method === 'OPTIONS') { response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type,x-firebase-appcheck' }); response.end(); return }
     if (request.method === 'POST' && url.pathname === '/api/planner/detect-floor-plan') {
-      const uid = await plannerUser(request), input = await body(request, 12 * 1024 * 1024)
-      if (input.mimeType !== 'image/png' || typeof input.imageData !== 'string' || !/^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.imageData)) throw new ApiError(400, 'A base64 PNG floor plan is required.')
+      const uid = await plannerUser(request), input = await body(request, 18 * 1024 * 1024)
+      const validBase64 = (value: unknown): value is string => typeof value === 'string' && /^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+      if (input.mimeType !== 'image/png' || !validBase64(input.imageData)) throw new ApiError(400, 'A base64 PNG floor plan is required.')
       if (!Number.isInteger(input.width) || !Number.isInteger(input.height) || Number(input.width) < 1 || Number(input.width) > 1800 || Number(input.height) < 1 || Number(input.height) > 1400) throw new ApiError(400, 'Image dimensions are outside supported limits.')
       const imageBytes = Buffer.from(input.imageData, 'base64')
       if (!imageBytes.length || imageBytes.length > 8 * 1024 * 1024 || imageBytes.toString('base64') !== input.imageData) throw new ApiError(400, 'Image data is invalid or too large.')
+      let elevationImage: { imageData: string; mimeType: 'image/png'; width: number; height: number } | undefined
+      if (input.elevationImage !== undefined) {
+        if (!input.elevationImage || typeof input.elevationImage !== 'object' || Array.isArray(input.elevationImage)) throw new ApiError(400, 'Elevation image data is invalid.')
+        const elevation = input.elevationImage as Record<string, unknown>
+        if (elevation.mimeType !== 'image/png' || !validBase64(elevation.imageData) || !Number.isInteger(elevation.width) || !Number.isInteger(elevation.height) || Number(elevation.width) < 1 || Number(elevation.width) > 1800 || Number(elevation.height) < 1 || Number(elevation.height) > 1400) throw new ApiError(400, 'Elevation image dimensions or format are invalid.')
+        const elevationBytes = Buffer.from(elevation.imageData, 'base64')
+        if (!elevationBytes.length || elevationBytes.length > 4 * 1024 * 1024 || elevationBytes.toString('base64') !== elevation.imageData || imageBytes.length + elevationBytes.length > 12 * 1024 * 1024) throw new ApiError(400, 'Elevation image data is invalid or too large.')
+        elevationImage = { imageData: elevation.imageData, mimeType: 'image/png', width: Number(elevation.width), height: Number(elevation.height) }
+      }
       try { await consumePlanQuota(uid) } catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(503, 'AI plan quota service is unavailable.') }
       try {
-        const result = await planVision.detect({ imageData: input.imageData, mimeType: 'image/png', width: Number(input.width), height: Number(input.height) })
+        const result = await planVision.detect({ imageData: input.imageData, mimeType: 'image/png', width: Number(input.width), height: Number(input.height), ...(elevationImage ? { elevationImage } : {}) })
         json(response, 200, result); return
       } catch {
         throw new ApiError(503, 'Vertex AI plan detection is unavailable. Use the local fallback or try again later.')
@@ -176,11 +234,123 @@ const server = createServer(async (request, response) => {
       if (job.status === 'failed') throw new ApiError(500, job.error || 'Ingestion job failed.')
       json(response, 200, job); return
     }
+    if (url.pathname.startsWith('/api/account/')) {
+      const actor = await accountContext(request), db = firebase().db
+      if (request.method === 'GET' && url.pathname === '/api/account/projects') {
+        const snapshot = await db.collection('userProjects').where('ownerUid', '==', actor.uid).get()
+        const projects = snapshot.docs.map((doc) => projectSummary(doc.id, doc.data())).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+        json(response, 200, projects); return
+      }
+      if (request.method === 'POST' && url.pathname === '/api/account/projects') {
+        const project = projectPayload((await body(request)).project), now = new Date().toISOString(), ref = db.collection('userProjects').doc()
+        const data = { ownerUid: actor.uid, project, createdAt: now, updatedAt: now }
+        await ref.create(data)
+        json(response, 201, projectSummary(ref.id, data)); return
+      }
+      const projectMatch = url.pathname.match(/^\/api\/account\/projects\/([^/]+)$/)
+      if (projectMatch) {
+        const id = recordId(projectMatch[1]), { ref, data } = await ownedProject(actor.uid, id)
+        if (request.method === 'GET') { json(response, 200, { ...projectSummary(id, data), project: data.project }); return }
+        if (request.method === 'PUT') {
+          const input = await body(request), value = input.project ?? (typeof input.name === 'string' ? { ...(data.project as ProjectState), name: requestText(input.name, 'Project name', 80) } : null)
+          if (!value) throw new ApiError(400, 'A project or project name is required.')
+          const project = projectPayload(value), now = new Date().toISOString()
+          await ref.update({ project, updatedAt: now })
+          json(response, 200, projectSummary(id, { ...data, project, updatedAt: now })); return
+        }
+        if (request.method === 'DELETE') {
+          const requests = await db.collection('purchaseRequests').where('ownerUid', '==', actor.uid).get()
+          if (requests.docs.some((doc) => doc.data().projectId === id && ['pending', 'awaiting-user-decision', 'ready-to-place'].includes(String(doc.data().status)))) throw new ApiError(409, 'Resolve the active purchase request before deleting this space.')
+          await ref.delete(); json(response, 200, { id, deleted: true }); return
+        }
+      }
+      if (request.method === 'GET' && url.pathname === '/api/account/purchase-requests') {
+        const snapshot = await db.collection('purchaseRequests').where('ownerUid', '==', actor.uid).get()
+        const requests = snapshot.docs.map((doc) => storedPurchaseRequest(doc.id, doc.data())).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        json(response, 200, requests); return
+      }
+      if (request.method === 'POST' && url.pathname === '/api/account/purchase-requests') {
+        const input = await body(request)
+        if (typeof input.projectId !== 'string') throw new ApiError(400, 'A saved project is required for a purchase request.')
+        const projectId = recordId(input.projectId), { data: projectData } = await ownedProject(actor.uid, projectId), project = projectData.project as ProjectState
+        if (!isProject(project)) throw new ApiError(409, 'The saved project is no longer valid.')
+        const basket = new Map<string, { productId: string; variantId?: string; quantity: number }>()
+        project.objects.forEach((object) => {
+          if (!object.inBasket || !object.productId) return
+          const product = productById.get(object.productId)
+          if (!product || (object.variantId && !product.variants?.some((variant) => variant.id === object.variantId))) throw new ApiError(400, 'A basket product or variant is no longer in the catalog.')
+          const id = purchaseItemId(product.id, object.variantId), current = basket.get(id)
+          if (current) current.quantity += 1
+          else basket.set(id, { productId: product.id, ...(object.variantId ? { variantId: object.variantId } : {}), quantity: 1 })
+        })
+        if (!basket.size) throw new ApiError(400, 'Add at least one catalog product to the basket before requesting a purchase.')
+        const items: PurchaseItem[] = [...basket].map(([id, { productId, variantId, quantity }]) => {
+          const product = productById.get(productId)!, variant = product.variants?.find((item) => item.id === variantId)
+          return { id, productId, ...(variantId ? { variantId } : {}), ...(variant ? { variantName: variant.name } : {}), name: product.name, retailer: product.retailer, sku: product.sku, quantity, unitPrice: product.price, catalogStatus: product.status, availability: 'pending', included: true }
+        })
+        const contact = input.customer && typeof input.customer === 'object' ? input.customer as Record<string, unknown> : {}
+        const customer = { name: requestText(contact.name, 'Full name', 100), email: actor.email, phone: requestText(contact.phone, 'Phone', 40, false), city: requestText(contact.city, 'Delivery city', 100), notes: requestText(contact.notes, 'Notes', 500, false) }
+        const estimatedTotal = estimatePurchase(items), now = new Date().toISOString(), ref = db.collection('purchaseRequests').doc()
+        const data = { ownerUid: actor.uid, projectId, projectName: project.name, customer, items, estimatedTotal, currency: 'EUR', status: 'pending', createdAt: now, updatedAt: now }
+        await ref.create(data)
+        json(response, 201, storedPurchaseRequest(ref.id, data)); return
+      }
+      const decisionMatch = url.pathname.match(/^\/api\/account\/purchase-requests\/([^/]+)\/decision$/)
+      if (request.method === 'POST' && decisionMatch) {
+        const id = recordId(decisionMatch[1]), ref = db.collection('purchaseRequests').doc(id), snapshot = await ref.get(), data = snapshot.data()
+        if (!data || data.ownerUid !== actor.uid) throw new ApiError(404, 'Purchase request not found.')
+        if (data.status !== 'awaiting-user-decision') throw new ApiError(409, 'This request is not waiting for a decision.')
+        const input = await body(request), decision = input.decision
+        if (decision !== 'proceed' && decision !== 'revise') throw new ApiError(400, 'Choose whether to proceed or revise the design.')
+        const result = decidePurchaseItems(data.items as PurchaseItem[], decision)
+        if (!result) throw new ApiError(400, 'This request has no available items to proceed with.')
+        const estimatedTotal = estimatePurchase(result.items), now = new Date().toISOString()
+        await ref.update({ items: result.items, status: result.status, estimatedTotal, userDecision: decision, updatedAt: now })
+        json(response, 200, storedPurchaseRequest(id, { ...data, items: result.items, status: result.status, estimatedTotal, updatedAt: now })); return
+      }
+      json(response, 404, { error: 'Account resource not found.' }); return
+    }
     if (!url.pathname.startsWith('/api/admin/')) { json(response, 404, { error: 'Not found.' }); return }
     const me = await context(request, url.pathname === '/api/admin/me' ? 'viewer' : 'viewer')
     if (request.method === 'GET' && url.pathname === '/api/admin/me') { json(response, 200, { uid: me.uid, email: me.email, role: me.role }); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/jobs') { json(response, 200, await listJobs()); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/catalog') { json(response, 200, await catalogView()); return }
+    if (request.method === 'GET' && url.pathname === '/api/admin/metrics') {
+      await context(request, 'admin')
+      const db = firebase().db, requestsByStatus: Record<PurchaseRequest['status'], number> = { pending: 0, 'awaiting-user-decision': 0, 'ready-to-place': 0, 'returned-for-revision': 0, placed: 0 }
+      const [projects, ...counts] = await Promise.all([db.collection('userProjects').count().get(), ...Object.keys(requestsByStatus).map((status) => db.collection('purchaseRequests').where('status', '==', status).count().get())])
+      Object.keys(requestsByStatus).forEach((status, index) => { requestsByStatus[status as PurchaseRequest['status']] = counts[index].data().count })
+      json(response, 200, { savedProjects: projects.data().count, requestsByStatus }); return
+    }
+    if (request.method === 'GET' && url.pathname === '/api/admin/purchase-requests') {
+      await context(request, 'admin')
+      const snapshot = await firebase().db.collection('purchaseRequests').orderBy('createdAt', 'desc').get()
+      json(response, 200, snapshot.docs.map((doc) => storedPurchaseRequest(doc.id, doc.data()))); return
+    }
+    const availabilityMatch = url.pathname.match(/^\/api\/admin\/purchase-requests\/([^/]+)\/availability$/)
+    if (request.method === 'PUT' && availabilityMatch) {
+      const actor = await context(request, 'admin'), id = recordId(availabilityMatch[1]), ref = firebase().db.collection('purchaseRequests').doc(id), snapshot = await ref.get(), data = snapshot.data()
+      if (!data) throw new ApiError(404, 'Purchase request not found.')
+      if (data.status !== 'pending') throw new ApiError(409, 'Availability can only be reviewed while a request is pending.')
+      const input = await body(request), rawItems = Array.isArray(input.items) ? input.items as Record<string, unknown>[] : []
+      if (rawItems.some((item) => !item || typeof item !== 'object' || typeof item.id !== 'string' || (item.availability !== 'available' && item.availability !== 'unavailable'))) throw new ApiError(400, 'Each product needs an available or unavailable result.')
+      const updates = rawItems as AvailabilityUpdate[], result = reviewPurchaseItems(data.items as PurchaseItem[], updates)
+      if (!result) throw new ApiError(400, 'Review every requested product exactly once.')
+      const now = new Date().toISOString()
+      await ref.update({ items: result.items, status: result.status, updatedAt: now, availabilityReviewedBy: actor.uid })
+      await audit(actor, 'purchase.availability-reviewed', id, { status: result.status })
+      json(response, 200, storedPurchaseRequest(id, { ...data, items: result.items, status: result.status, updatedAt: now })); return
+    }
+    const placedMatch = url.pathname.match(/^\/api\/admin\/purchase-requests\/([^/]+)\/placed$/)
+    if (request.method === 'POST' && placedMatch) {
+      const actor = await context(request, 'admin'), id = recordId(placedMatch[1]), ref = firebase().db.collection('purchaseRequests').doc(id), snapshot = await ref.get(), data = snapshot.data()
+      if (!data) throw new ApiError(404, 'Purchase request not found.')
+      if (data.status !== 'ready-to-place') throw new ApiError(409, 'Only availability-confirmed requests can be marked as placed.')
+      const now = new Date().toISOString()
+      await ref.update({ status: 'placed', placedAt: now, updatedAt: now, placedBy: actor.uid })
+      await audit(actor, 'purchase.order-placed', id, { itemCount: (data.items as PurchaseItem[]).filter((item) => item.included).length })
+      json(response, 200, storedPurchaseRequest(id, { ...data, status: 'placed', placedAt: now, updatedAt: now })); return
+    }
     if (request.method === 'GET' && url.pathname === '/api/admin/audit') {
       await context(request, 'admin')
       const snapshot = await firebase().db.collection('adminAudit').orderBy('createdAt', 'desc').limit(100).get()

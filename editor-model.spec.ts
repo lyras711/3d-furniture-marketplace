@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test'
-import { attachOpening, emptyProject, getFloorRegions, fitsFloor, isProject, migrateProject, moveWallEndpoint, overlaps, placeObject, placementWarnings, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState } from './src/editor'
+import { attachOpening, emptyProject, getFloorRegions, fitsFloor, hangOnWall, isProject, migrateProject, moveWallEndpoint, openingSizes, openingStyle, overlaps, placeObject, placementWarnings, refreshOpenings, rotateObjects, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState, type RoomFeature } from './src/editor'
 
 import { analyzePlanPixels, createProjectFromPlan, type PlanAnalysis } from './src/planImport'
 import { normalizePlanVisionResult } from './scripts/plan-vision'
+import { decidePurchaseItems, estimatePurchase, purchaseItemId, reviewPurchaseItems, type PurchaseItem } from './src/purchase'
 
 function planImage(rects: number[][]) {
   const width = 500, height = 400, data = new Uint8ClampedArray(width * height * 4).fill(255)
@@ -53,9 +54,11 @@ test('Vertex plan output is bounded and retains confidence, room labels, and pri
       { a: { x: 180, y: 140 }, b: { x: 20, y: 140 }, thickness: 8, confidence: 0.92 },
       { a: { x: 20, y: 140 }, b: { x: 20, y: 20 }, thickness: 8, confidence: 0.91 },
     ],
-    openings: [{ a: { x: 60, y: 20 }, b: { x: 80, y: 20 }, thickness: 8, confidence: 0.84, type: 'door' }],
+    openings: [{ a: { x: 60, y: 20 }, b: { x: 80, y: 20 }, thickness: 8, confidence: 0.84, type: 'door', heightMeters: 2.35, sillHeightMeters: 0, verticalConfidence: 0.91 }],
     roomLabels: [{ name: 'Living room', x: 100, y: 80, confidence: 0.8 }],
     knownDimensions: [{ a: { x: 20, y: 20 }, b: { x: 180, y: 20 }, meters: 8, label: '8 m', confidence: 0.99 }],
+    ceilingHeightMeters: 3.25,
+    ceilingHeightConfidence: 0.94,
     confidence: 0.9,
     warnings: [],
   }, 200, 160)
@@ -63,6 +66,8 @@ test('Vertex plan output is bounded and retains confidence, room labels, and pri
   expect(result.openings[0].type).toBe('door')
   expect(result.roomLabels[0].name).toBe('Living room')
   expect(result.knownDimensions[0].meters).toBe(8)
+  expect(result.ceilingHeight).toBeCloseTo(3.25)
+  expect(result.openings[0]).toMatchObject({ height: 2.35, sillHeight: 0, verticalConfidence: 0.91 })
   expect(() => normalizePlanVisionResult({ ...result, walls: [{ ...result.walls[0], a: { x: 201, y: 20 } }] }, 200, 160)).toThrow('outside the image')
 })
 
@@ -76,12 +81,20 @@ test('AI plan geometry stays editable and one known dimension calibrates the who
       { a: { x: 180, y: 140 }, b: { x: 20, y: 140 }, horizontal: true, thickness: 8, confidence: 0.92 },
       { a: { x: 20, y: 140 }, b: { x: 20, y: 20 }, horizontal: false, thickness: 8, confidence: 0.91 },
     ],
-    openings: [{ a: { x: 60, y: 20 }, b: { x: 80, y: 20 }, horizontal: true, thickness: 8, type: 'door', confidence: 0.84 }],
+    openings: [{ a: { x: 60, y: 20 }, b: { x: 80, y: 20 }, horizontal: true, thickness: 8, type: 'door', confidence: 0.84, height: 2.35, sillHeight: 0, verticalConfidence: 0.91 }],
     roomLabels: [{ name: 'Living room', x: 100, y: 80, confidence: 0.8 }],
-    confidence: 0.9, provider: 'vertex-ai', warnings: [],
+    confidence: 0.9, ceilingHeight: 3.25, ceilingHeightConfidence: 0.94, provider: 'vertex-ai', warnings: [],
   }
   const project = createProjectFromPlan(analysis, 6, 'Calibrated plan', { a: { x: 180, y: 20 }, b: { x: 180, y: 140 } })
   expect(project.planImport?.scaleCalibrated).toBe(true)
+  expect(project.ceilingHeight).toBeCloseTo(3.25)
+  expect(project.features.find((feature) => feature.type === 'wall')?.height).toBeCloseTo(3.25)
+  expect(project.features.find((feature) => feature.type === 'door')?.height).toBeCloseTo(2.35)
+  const overridden = createProjectFromPlan(analysis, 6, 'Manual height', { a: { x: 180, y: 20 }, b: { x: 180, y: 140 } }, 3.5)
+  expect(overridden.ceilingHeight).toBeCloseTo(3.5)
+  const lowConfidence = createProjectFromPlan({ ...analysis, ceilingHeightConfidence: 0.4, openings: analysis.openings.map((opening) => ({ ...opening, verticalConfidence: 0.4 })) }, 6, 'Safe defaults', { a: { x: 180, y: 20 }, b: { x: 180, y: 140 } })
+  expect(lowConfidence.ceilingHeight).toBeCloseTo(2.8)
+  expect(lowConfidence.features.find((feature) => feature.type === 'door')?.height).toBeCloseTo(2.1)
   expect(project.planImport?.provider).toBe('vertex-ai')
   expect(getFloorRegions(project.features)[0].area).toBeCloseTo(48)
   expect(project.features.find((feature) => feature.type === 'door')?.wallId).toBeTruthy()
@@ -263,4 +276,69 @@ test('schema v2 room objects migrate as out of basket and preserve an explicit b
   const optedIn = { ...migrated, objects: [{ ...migrated.objects[0], inBasket: true }] }
   expect(migrateProject(optedIn).objects[0].inBasket).toBe(true)
   expect(isProject({ ...migrated, objects: [{ ...migrated.objects[0], inBasket: 'yes' as never }] })).toBe(false)
+})
+
+test('manual purchase review only advances after every item has a verified decision', () => {
+  const items: PurchaseItem[] = [
+    { id: purchaseItemId('sofa-haven', 'sand'), productId: 'sofa-haven', variantId: 'sand', variantName: 'Sand', name: 'Haven sofa', retailer: 'Store A', sku: 'SOFA-1', quantity: 1, unitPrice: 899, catalogStatus: 'Sample', availability: 'pending', included: true },
+    { id: purchaseItemId('table-arc'), productId: 'table-arc', name: 'Arc table', retailer: 'Store B', sku: 'TABLE-1', quantity: 2, unitPrice: 249, catalogStatus: 'Sample', availability: 'pending', included: true },
+  ]
+  expect(reviewPurchaseItems(items, [{ id: purchaseItemId('sofa-haven', 'sand'), availability: 'available' }])).toBeNull()
+  const reviewed = reviewPurchaseItems(items, [{ id: purchaseItemId('sofa-haven', 'sand'), availability: 'available' }, { id: purchaseItemId('table-arc'), availability: 'unavailable' }])!
+  expect(reviewed.status).toBe('awaiting-user-decision')
+  expect(decidePurchaseItems(reviewed.items, 'proceed')).toMatchObject({ status: 'ready-to-place', items: [{ included: true }, { included: false }] })
+  expect(decidePurchaseItems(reviewed.items, 'revise')).toMatchObject({ status: 'returned-for-revision', items: [{ included: false }, { included: false }] })
+  const available = reviewPurchaseItems(items, items.map(({ id }) => ({ id, availability: 'available' as const })))!
+  expect(available.status).toBe('ready-to-place')
+  expect(decidePurchaseItems(available.items, 'proceed')?.status).toBe('ready-to-place')
+  expect(estimatePurchase(items)).toBe(1397)
+  expect(estimatePurchase([...items, { ...items[0], id: 'unknown', productId: 'unknown', unitPrice: null }])).toBeNull()
+  expect(estimatePurchase([...items, { ...items[0], id: 'unknown', productId: 'unknown', unitPrice: null, included: false }])).toBe(1397)
+  expect(estimatePurchase(items.map((item) => ({ ...item, included: false })))).toBeNull()
+})
+
+test('door styles validate and the swing side decides the clearance zone', () => {
+  const box = { id: 'box', custom: { name: 'Box', width: 40, depth: 40, height: 40, color: '#888888', kind: 'furniture' as const }, x: 0, z: -1, rotation: 0 }
+  const withDoor = (patch: Partial<RoomFeature>) => {
+    const project = { ...emptyProject(), features: loop(square) }
+    project.features.push(attachOpening({ id: 'door', type: 'door', x: 0, z: -2, rotation: 0, width: 0.9, height: 2.1, ...patch }, project))
+    return { ...project, objects: [box] }
+  }
+  const blocked = (patch: Partial<RoomFeature>) => placementWarnings(withDoor(patch)).some((warning) => warning.message.includes('door clearance'))
+  expect(blocked({})).toBe(true)
+  expect(blocked({ swing: 'out' })).toBe(false)
+  expect(blocked({ style: 'double', width: 1.4 })).toBe(false)
+  expect(blocked({ style: 'sliding' })).toBe(false)
+  expect(isProject(withDoor({ style: 'sliding', hinge: 'right', swing: 'out' }))).toBe(true)
+  expect(isProject(withDoor({ style: 'balcony' }))).toBe(false)
+  expect(isProject(withDoor({ hinge: 'up' as 'left' }))).toBe(false)
+  expect(openingStyle({ id: 'w', type: 'window', x: 0, z: 0, rotation: 0, width: 1, height: 1 })).toBe('casement')
+  expect(openingSizes.balcony[0]).toMatchObject({ sillHeight: 0, height: 2.2 })
+})
+
+test('wall items hang flush on the room side, follow their wall, and warn about clashes', () => {
+  const project = room()
+  const hung = hangOnWall({ id: 'art', productId: 'art-horizon', x: 0, z: 0, rotation: 0, wallId: 'wall-0' }, project)!
+  expect(hung).toMatchObject({ wallId: 'wall-0', wallSide: 1, wallOffset: 0 })
+  expect(hung.rotation).toBeCloseTo(0)
+  expect(hung.z).toBeCloseTo(-2 + 0.06 + 0.015 + 0.005)
+  expect(hung.elevation).toBeCloseTo(1.2)
+  expect(hangOnWall(hung, project, { x: 5, z: -1.9 })!.wallOffset).toBeCloseTo(1.55)
+  expect(hangOnWall({ ...hung, elevation: 5 }, project)!.elevation).toBeCloseTo(2.8 - 0.6)
+  expect(hangOnWall({ ...hung, wallId: undefined }, project, { x: 0, z: -2.2 }, true)!.wallSide).toBe(-1)
+  const withArt = { ...project, objects: [hung] }
+  expect(isProject(withArt)).toBe(true)
+  expect(isProject({ ...withArt, objects: [{ ...hung, wallSide: 2 as 1 }] })).toBe(false)
+  expect(fitsFloor(hung, withArt)).toBe(true)
+  expect(overlaps(hung, { ...sofa, x: hung.x, z: hung.z })).toBe(false)
+  expect(rotateObjects(withArt, ['art'], 0.3)).toBeNull()
+  const moved = moveWallEndpoint(withArt, 'wall-0', { x: -2, z: -2 }, { x: -2, z: -2.6 })
+  expect(moved.objects[0].rotation).toBeCloseTo(moved.features.find((f) => f.id === 'wall-0')!.rotation)
+  const window = attachOpening({ id: 'win', type: 'window', x: 0, z: -2, rotation: 0, width: 1.2, height: 1.4, sillHeight: 0.9 }, project)
+  expect(placementWarnings({ ...withArt, features: [...project.features, window] }).map((w) => w.message)).toContain('Horizon framed print overlaps the window.')
+  const tall = { id: 'tall', productId: 'shelf-frame', x: 0, z: -1.8, rotation: 0 }
+  expect(placementWarnings({ ...withArt, objects: [hung, tall] }).some((w) => w.id === 'art' && w.message.includes('may hit'))).toBe(true)
+  const detached = refreshOpenings({ ...withArt, features: project.features.filter((f) => f.id !== 'wall-0') })
+  expect(detached.objects[0].wallId).toBeUndefined()
+  expect(placementWarnings(detached).some((w) => w.message.includes('no longer on a wall'))).toBe(true)
 })
