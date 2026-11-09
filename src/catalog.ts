@@ -2,6 +2,10 @@ import { generatedProducts } from './catalog.generated'
 
 export type CategoryFilter = 'All' | 'Seating' | 'Tables' | 'Lighting' | 'Decor' | 'Storage' | 'Bedroom' | 'Kitchen' | 'Bathroom'
 
+/** Admin human-review state, stored outside the bundle in Firestore `catalogEdits`. */
+export type CatalogReview = 'pending' | 'approved' | 'needs-work'
+export const catalogReviews: CatalogReview[] = ['pending', 'approved', 'needs-work']
+
 export interface ProductVariant {
   id: string
   name: string

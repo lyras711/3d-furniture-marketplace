@@ -1,5 +1,9 @@
 export type PurchaseAvailability = 'pending' | 'available' | 'unavailable'
-export type PurchaseStatus = 'pending' | 'awaiting-user-decision' | 'ready-to-place' | 'returned-for-revision' | 'placed'
+export const purchaseStatuses = ['pending', 'awaiting-user-decision', 'ready-to-place', 'returned-for-revision', 'placed', 'delivered', 'cancelled'] as const
+export type PurchaseStatus = typeof purchaseStatuses[number]
+export type AdminStatusChange = 'placed' | 'delivered' | 'cancelled'
+export type PurchaseHistoryEntry = { status: PurchaseStatus; at: string; by: 'customer' | 'admin'; note?: string }
+export type AdminNote = { id: string; text: string; at: string; authorEmail: string }
 export type PurchaseItem = {
   id: string
   productId: string
@@ -26,13 +30,31 @@ export type PurchaseRequest = {
   createdAt: string
   updatedAt: string
   placedAt?: string
+  deliveredAt?: string
+  cancelledAt?: string
+  /** Shown to the customer on their profile. */
+  cancelReason?: string
+  history?: PurchaseHistoryEntry[]
 }
+/** Admin-only projection; `adminNotes` must never be sent to `/api/account/**`. */
+export type AdminPurchaseRequest = PurchaseRequest & { adminNotes: AdminNote[] }
 export type AdminMetrics = {
   savedProjects: number
   requestsByStatus: Record<PurchaseStatus, number>
 }
 export type AvailabilityUpdate = { id: string; availability: Exclude<PurchaseAvailability, 'pending'> }
 export const purchaseItemId = (productId: string, variantId?: string) => JSON.stringify([productId, variantId || ''])
+export const activePurchaseStatuses: PurchaseStatus[] = ['pending', 'awaiting-user-decision', 'ready-to-place']
+
+const adminTransitions: Record<AdminStatusChange, PurchaseStatus[]> = {
+  placed: ['ready-to-place'],
+  delivered: ['placed'],
+  cancelled: [...activePurchaseStatuses, 'placed'],
+}
+
+export function adminTransitionAllowed(from: PurchaseStatus, to: AdminStatusChange) {
+  return adminTransitions[to].includes(from)
+}
 
 export function estimatePurchase(items: PurchaseItem[]) {
   const included = items.filter((item) => item.included)

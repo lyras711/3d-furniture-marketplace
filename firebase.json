@@ -5,6 +5,7 @@
     "rewrites": [
       { "source": "/api/planner/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/api/admin/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
+      { "source": "/api/catalog/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/api/account/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/api/worker/**", "run": { "serviceId": "forma-admin-worker", "region": "europe-west1" } },
       { "source": "/admin{,/**}", "destination": "/index.html" },

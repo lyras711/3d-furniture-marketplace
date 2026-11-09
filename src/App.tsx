@@ -20,7 +20,8 @@ import { onAuthStateChanged, signInAnonymously, type User } from 'firebase/auth'
 import { accountApi, AccountApiError, cloudProjectKey, type SavedProject, type SavedProjectDetails } from './account'
 import { purchaseItemId } from './purchase'
 import { appCheck, auth } from './firebase'
-import { products, type CategoryFilter, type Product } from './catalog'
+import type { CategoryFilter, Product } from './catalog'
+import { useListedProducts } from './catalogVisibility'
 import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, addWallSegment, eraseWallSegment, hangOnWall, isWallMounted, placeObject, setWallLength, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 type ViewMode = '3d' | '2d'
@@ -1048,6 +1049,7 @@ function ExistingItemModal({ onClose, onCreate }: { onClose: () => void; onCreat
 }
 
 function App() {
+  const products = useListedProducts()
   const [project, renderProject] = useState<ProjectState>(loadProject)
   const projectRef = useRef(project)
   const lastStored = useRef<string | null>(null)
@@ -1271,11 +1273,11 @@ function App() {
     const sofaFamily = /sofa/i.test(selectedProduct.category)
     return products.filter((product) => product.id !== selectedProduct.id && (product.category === selectedProduct.category || (sofaFamily && /sofa/i.test(product.category))))
       .sort((a, b) => Number(b.category === selectedProduct.category) - Number(a.category === selectedProduct.category)).slice(0, 4)
-  }, [selectedProduct])
+  }, [products, selectedProduct])
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase()
     return products.filter((product) => (category === 'All' || product.group === category) && (retailer === 'All' || product.retailer === retailer) && (!query || `${product.name} ${product.brand} ${product.category} ${product.retailer} ${product.sku || ''}`.toLowerCase().includes(query))).sort((a, b) => sort === 'price-low' ? (a.price ?? Infinity) - (b.price ?? Infinity) : sort === 'price-high' ? (b.price ?? -Infinity) - (a.price ?? -Infinity) : 0)
-  }, [category, search, retailer, sort])
+  }, [products, category, search, retailer, sort])
 
   const shoppingItems = useMemo(() => {
     const grouped = new Map<string, { id: string; product: Product; variantName?: string; quantity: number; subtotal: number | null }>()

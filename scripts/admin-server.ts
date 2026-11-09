@@ -9,8 +9,10 @@ import { getAuth, type DecodedIdToken } from 'firebase-admin/auth'
 import { getAppCheck } from 'firebase-admin/app-check'
 import { FieldValue, getFirestore } from 'firebase-admin/firestore'
 import { cancelCrawlJob, createCrawlJob, getJob, listJobs, runCrawlJob } from './catalog-workflow'
-import { decidePurchaseItems, estimatePurchase, purchaseItemId, reviewPurchaseItems, type AvailabilityUpdate, type PurchaseItem, type PurchaseRequest } from '../src/purchase'
+import { activePurchaseStatuses, adminTransitionAllowed, decidePurchaseItems, estimatePurchase, purchaseItemId, purchaseStatuses, reviewPurchaseItems, type AdminNote, type AdminPurchaseRequest, type AdminStatusChange, type AvailabilityUpdate, type PurchaseHistoryEntry, type PurchaseItem, type PurchaseRequest } from '../src/purchase'
 import { getFloorRegions, isProject, migrateProject, productById, type ProjectState } from '../src/editor'
+import { catalogReviews, products, type CatalogReview } from '../src/catalog'
+import { partnerFields, type Partner, type PartnerNote } from '../src/partners'
 import { VertexPlanVisionProvider } from './plan-vision'
 
 type Role = 'viewer' | 'editor' | 'admin' | 'owner'
@@ -62,6 +64,8 @@ function catalogId(pathname: string) {
   return pathname.match(/^\/api\/admin\/catalog\/([^/]+)$/)?.[1] || null
 }
 
+const hiddenEdit = (data: Record<string, unknown>) => data.hidden === true || (data.hidden === undefined && Boolean(data.deletedAt))
+
 function roleFromValue(value: unknown): Role | null {
   return value === 'viewer' || value === 'editor' || value === 'admin' || value === 'owner' ? value : null
 }
@@ -91,18 +95,23 @@ async function audit(actor: Awaited<ReturnType<typeof context>>, action: string,
   await db.collection('adminAudit').add({ actorUid: actor.uid, actorEmail: actor.email, actorRole: actor.role, action, target, data, createdAt: FieldValue.serverTimestamp() })
 }
 
+async function catalogEdits() {
+  const snapshot = await firebase().db.collection('catalogEdits').get()
+  return new Map(snapshot.docs.map((doc) => [doc.id, doc.data()]))
+}
+
+/** Bundled catalogue (what the planner ships) plus admin visibility/review state. Name, price and dimensions are partner-owned and read-only here. */
 async function catalogView() {
-  const registry = JSON.parse(await readFile('public/catalog/catalog.json', 'utf8')) as { generatedAt?: string; products?: Array<Record<string, unknown>> }
-  let products = registry.products || []
-  try {
-    const stored = await firebase().db.collection('catalogProducts').get()
-    if (stored.size) products = stored.docs.map((doc) => doc.data() as Record<string, unknown>)
-    const snapshot = await firebase().db.collection('catalogEdits').get()
-    const edits = new Map(snapshot.docs.map((doc) => [doc.id, doc.data()]))
-    return { generatedAt: registry.generatedAt, products: products.map((product) => ({ ...product, ...(edits.get(String(product.id)) || {}) })).filter((product) => !product.deletedAt) }
-  } catch {
-    return { generatedAt: registry.generatedAt, products }
-  }
+  let edits = new Map<string, Record<string, unknown>>()
+  try { edits = await catalogEdits() } catch {}
+  return { products: products.map((product) => {
+    const edit = edits.get(product.id) || {}
+    return { id: product.id, sku: product.sku, name: product.name, brand: product.brand, retailer: product.retailer, retailerId: product.retailerId || null, group: product.group, category: product.category, width: product.width, depth: product.depth, height: product.height, price: product.price, status: product.status, thumbnailPath: product.thumbnailPath || null, modelPath: product.modelPath || null, variantCount: product.variants?.length || 0, verification: product.verification || null, hidden: hiddenEdit(edit), review: catalogReviews.includes(edit.review as CatalogReview) ? edit.review as CatalogReview : 'pending', updatedAt: typeof edit.updatedAt === 'object' && edit.updatedAt && 'toDate' in edit.updatedAt ? (edit.updatedAt as { toDate(): Date }).toDate().toISOString() : null }
+  }) }
+}
+
+async function hiddenProductIds() {
+  return new Set([...(await catalogEdits())].filter(([, data]) => hiddenEdit(data)).map(([id]) => id))
 }
 
 async function enqueueJob(jobId: string) {
@@ -187,7 +196,18 @@ async function ownedProject(uid: string, id: string) {
 }
 
 function storedPurchaseRequest(id: string, data: Record<string, unknown>): PurchaseRequest {
-  return { id, projectId: String(data.projectId), projectName: String(data.projectName), customer: data.customer as PurchaseRequest['customer'], items: data.items as PurchaseItem[], estimatedTotal: typeof data.estimatedTotal === 'number' ? data.estimatedTotal : null, currency: 'EUR', status: data.status as PurchaseRequest['status'], createdAt: String(data.createdAt), updatedAt: String(data.updatedAt), ...(typeof data.placedAt === 'string' ? { placedAt: data.placedAt } : {}) }
+  return { id, projectId: String(data.projectId), projectName: String(data.projectName), customer: data.customer as PurchaseRequest['customer'], items: data.items as PurchaseItem[], estimatedTotal: typeof data.estimatedTotal === 'number' ? data.estimatedTotal : null, currency: 'EUR', status: data.status as PurchaseRequest['status'], createdAt: String(data.createdAt), updatedAt: String(data.updatedAt), ...Object.fromEntries((['placedAt', 'deliveredAt', 'cancelledAt', 'cancelReason'] as const).filter((key) => typeof data[key] === 'string').map((key) => [key, data[key]])), history: Array.isArray(data.history) ? data.history as PurchaseHistoryEntry[] : [] }
+}
+
+function adminPurchaseRequest(id: string, data: Record<string, unknown>): AdminPurchaseRequest {
+  return { ...storedPurchaseRequest(id, data), adminNotes: Array.isArray(data.adminNotes) ? data.adminNotes as AdminNote[] : [] }
+}
+
+const historyEntry = (status: PurchaseRequest['status'], at: string, by: PurchaseHistoryEntry['by'], note?: string): PurchaseHistoryEntry => ({ status, at, by, ...(note ? { note } : {}) })
+
+function storedPartner(id: string, data: Record<string, unknown>): Partner {
+  const fields = partnerFields(data, true)
+  return { website: '', country: '', contactName: '', contactEmail: '', contactPhone: '', retailerId: '', company: '', stage: 'lead', ...('fields' in fields ? fields.fields : {}), id, notes: Array.isArray(data.notes) ? data.notes as PartnerNote[] : [], stageHistory: Array.isArray(data.stageHistory) ? data.stageHistory as Partner['stageHistory'] : [], createdAt: String(data.createdAt), updatedAt: String(data.updatedAt) }
 }
 
 function requestText(value: unknown, label: string, max: number, required = true) {
@@ -260,7 +280,7 @@ const server = createServer(async (request, response) => {
         }
         if (request.method === 'DELETE') {
           const requests = await db.collection('purchaseRequests').where('ownerUid', '==', actor.uid).get()
-          if (requests.docs.some((doc) => doc.data().projectId === id && ['pending', 'awaiting-user-decision', 'ready-to-place'].includes(String(doc.data().status)))) throw new ApiError(409, 'Resolve the active purchase request before deleting this space.')
+          if (requests.docs.some((doc) => doc.data().projectId === id && activePurchaseStatuses.includes(doc.data().status))) throw new ApiError(409, 'Resolve the active purchase request before deleting this space.')
           await ref.delete(); json(response, 200, { id, deleted: true }); return
         }
       }
@@ -274,10 +294,11 @@ const server = createServer(async (request, response) => {
         if (typeof input.projectId !== 'string') throw new ApiError(400, 'A saved project is required for a purchase request.')
         const projectId = recordId(input.projectId), { data: projectData } = await ownedProject(actor.uid, projectId), project = projectData.project as ProjectState
         if (!isProject(project)) throw new ApiError(409, 'The saved project is no longer valid.')
-        const basket = new Map<string, { productId: string; variantId?: string; quantity: number }>()
+        const basket = new Map<string, { productId: string; variantId?: string; quantity: number }>(), hidden = await hiddenProductIds()
         project.objects.forEach((object) => {
           if (!object.inBasket || !object.productId) return
           const product = productById.get(object.productId)
+          if (product && hidden.has(product.id)) throw new ApiError(400, `${product.name} is no longer offered. Remove it from the basket and try again.`)
           if (!product || (object.variantId && !product.variants?.some((variant) => variant.id === object.variantId))) throw new ApiError(400, 'A basket product or variant is no longer in the catalog.')
           const id = purchaseItemId(product.id, object.variantId), current = basket.get(id)
           if (current) current.quantity += 1
@@ -291,7 +312,7 @@ const server = createServer(async (request, response) => {
         const contact = input.customer && typeof input.customer === 'object' ? input.customer as Record<string, unknown> : {}
         const customer = { name: requestText(contact.name, 'Full name', 100), email: actor.email, phone: requestText(contact.phone, 'Phone', 40, false), city: requestText(contact.city, 'Delivery city', 100), notes: requestText(contact.notes, 'Notes', 500, false) }
         const estimatedTotal = estimatePurchase(items), now = new Date().toISOString(), ref = db.collection('purchaseRequests').doc()
-        const data = { ownerUid: actor.uid, projectId, projectName: project.name, customer, items, estimatedTotal, currency: 'EUR', status: 'pending', createdAt: now, updatedAt: now }
+        const data = { ownerUid: actor.uid, projectId, projectName: project.name, customer, items, estimatedTotal, currency: 'EUR', status: 'pending', createdAt: now, updatedAt: now, history: [historyEntry('pending', now, 'customer')] }
         await ref.create(data)
         json(response, 201, storedPurchaseRequest(ref.id, data)); return
       }
@@ -305,10 +326,17 @@ const server = createServer(async (request, response) => {
         const result = decidePurchaseItems(data.items as PurchaseItem[], decision)
         if (!result) throw new ApiError(400, 'This request has no available items to proceed with.')
         const estimatedTotal = estimatePurchase(result.items), now = new Date().toISOString()
-        await ref.update({ items: result.items, status: result.status, estimatedTotal, userDecision: decision, updatedAt: now })
-        json(response, 200, storedPurchaseRequest(id, { ...data, items: result.items, status: result.status, estimatedTotal, updatedAt: now })); return
+        const entry = historyEntry(result.status, now, 'customer')
+        await ref.update({ items: result.items, status: result.status, estimatedTotal, userDecision: decision, updatedAt: now, history: FieldValue.arrayUnion(entry) })
+        json(response, 200, storedPurchaseRequest(id, { ...data, items: result.items, status: result.status, estimatedTotal, updatedAt: now, history: [...(Array.isArray(data.history) ? data.history : []), entry] })); return
       }
       json(response, 404, { error: 'Account resource not found.' }); return
+    }
+    if (request.method === 'GET' && url.pathname === '/api/catalog/visibility') {
+      let hidden: string[] = []
+      try { hidden = [...await hiddenProductIds()] } catch {}
+      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=60', 'access-control-allow-origin': '*' })
+      response.end(JSON.stringify({ hidden })); return
     }
     if (!url.pathname.startsWith('/api/admin/')) { json(response, 404, { error: 'Not found.' }); return }
     const me = await context(request, url.pathname === '/api/admin/me' ? 'viewer' : 'viewer')
@@ -317,7 +345,7 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/admin/catalog') { json(response, 200, await catalogView()); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/metrics') {
       await context(request, 'admin')
-      const db = firebase().db, requestsByStatus: Record<PurchaseRequest['status'], number> = { pending: 0, 'awaiting-user-decision': 0, 'ready-to-place': 0, 'returned-for-revision': 0, placed: 0 }
+      const db = firebase().db, requestsByStatus = Object.fromEntries(purchaseStatuses.map((status) => [status, 0])) as Record<PurchaseRequest['status'], number>
       const [projects, ...counts] = await Promise.all([db.collection('userProjects').count().get(), ...Object.keys(requestsByStatus).map((status) => db.collection('purchaseRequests').where('status', '==', status).count().get())])
       Object.keys(requestsByStatus).forEach((status, index) => { requestsByStatus[status as PurchaseRequest['status']] = counts[index].data().count })
       json(response, 200, { savedProjects: projects.data().count, requestsByStatus }); return
@@ -325,7 +353,7 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/admin/purchase-requests') {
       await context(request, 'admin')
       const snapshot = await firebase().db.collection('purchaseRequests').orderBy('createdAt', 'desc').get()
-      json(response, 200, snapshot.docs.map((doc) => storedPurchaseRequest(doc.id, doc.data()))); return
+      json(response, 200, snapshot.docs.map((doc) => adminPurchaseRequest(doc.id, doc.data()))); return
     }
     const availabilityMatch = url.pathname.match(/^\/api\/admin\/purchase-requests\/([^/]+)\/availability$/)
     if (request.method === 'PUT' && availabilityMatch) {
@@ -337,19 +365,74 @@ const server = createServer(async (request, response) => {
       const updates = rawItems as AvailabilityUpdate[], result = reviewPurchaseItems(data.items as PurchaseItem[], updates)
       if (!result) throw new ApiError(400, 'Review every requested product exactly once.')
       const now = new Date().toISOString()
-      await ref.update({ items: result.items, status: result.status, updatedAt: now, availabilityReviewedBy: actor.uid })
+      const entry = historyEntry(result.status, now, 'admin')
+      await ref.update({ items: result.items, status: result.status, updatedAt: now, availabilityReviewedBy: actor.uid, history: FieldValue.arrayUnion(entry) })
       await audit(actor, 'purchase.availability-reviewed', id, { status: result.status })
-      json(response, 200, storedPurchaseRequest(id, { ...data, items: result.items, status: result.status, updatedAt: now })); return
+      json(response, 200, adminPurchaseRequest(id, { ...data, items: result.items, status: result.status, updatedAt: now, history: [...(Array.isArray(data.history) ? data.history : []), entry] })); return
     }
-    const placedMatch = url.pathname.match(/^\/api\/admin\/purchase-requests\/([^/]+)\/placed$/)
-    if (request.method === 'POST' && placedMatch) {
-      const actor = await context(request, 'admin'), id = recordId(placedMatch[1]), ref = firebase().db.collection('purchaseRequests').doc(id), snapshot = await ref.get(), data = snapshot.data()
+    const statusMatch = url.pathname.match(/^\/api\/admin\/purchase-requests\/([^/]+)\/status$/)
+    if (request.method === 'POST' && statusMatch) {
+      const actor = await context(request, 'admin'), id = recordId(statusMatch[1]), ref = firebase().db.collection('purchaseRequests').doc(id), snapshot = await ref.get(), data = snapshot.data()
       if (!data) throw new ApiError(404, 'Purchase request not found.')
-      if (data.status !== 'ready-to-place') throw new ApiError(409, 'Only availability-confirmed requests can be marked as placed.')
-      const now = new Date().toISOString()
-      await ref.update({ status: 'placed', placedAt: now, updatedAt: now, placedBy: actor.uid })
-      await audit(actor, 'purchase.order-placed', id, { itemCount: (data.items as PurchaseItem[]).filter((item) => item.included).length })
-      json(response, 200, storedPurchaseRequest(id, { ...data, status: 'placed', placedAt: now, updatedAt: now })); return
+      const input = await body(request), next = input.status as AdminStatusChange
+      if (next !== 'placed' && next !== 'delivered' && next !== 'cancelled') throw new ApiError(400, 'Status must be placed, delivered or cancelled.')
+      if (!adminTransitionAllowed(data.status, next)) throw new ApiError(409, `A ${String(data.status).replaceAll('-', ' ')} request cannot be marked ${next}.`)
+      const reason = next === 'cancelled' ? requestText(input.reason, 'Cancellation reason', 300) : '', now = new Date().toISOString()
+      const entry = historyEntry(next, now, 'admin', reason), patch: Record<string, unknown> = { status: next, updatedAt: now, [`${next}At`]: now, [`${next}By`]: actor.uid, ...(reason ? { cancelReason: reason } : {}) }
+      await ref.update({ ...patch, history: FieldValue.arrayUnion(entry) })
+      await audit(actor, `purchase.${next}`, id, { from: data.status, ...(reason ? { reason } : {}) })
+      json(response, 200, adminPurchaseRequest(id, { ...data, ...patch, history: [...(Array.isArray(data.history) ? data.history : []), entry] })); return
+    }
+    const orderNoteMatch = url.pathname.match(/^\/api\/admin\/purchase-requests\/([^/]+)\/notes$/)
+    if (request.method === 'POST' && orderNoteMatch) {
+      const actor = await context(request, 'admin'), id = recordId(orderNoteMatch[1]), ref = firebase().db.collection('purchaseRequests').doc(id), snapshot = await ref.get(), data = snapshot.data()
+      if (!data) throw new ApiError(404, 'Purchase request not found.')
+      const note: AdminNote = { id: crypto.randomUUID(), text: requestText((await body(request)).text, 'Note', 1000), at: new Date().toISOString(), authorEmail: actor.email }
+      await ref.update({ adminNotes: FieldValue.arrayUnion(note) })
+      await audit(actor, 'purchase.note-added', id)
+      json(response, 200, adminPurchaseRequest(id, { ...data, adminNotes: [...(Array.isArray(data.adminNotes) ? data.adminNotes : []), note] })); return
+    }
+    const partnerMatch = url.pathname.match(/^\/api\/admin\/partners(?:\/([^/]+))?(\/notes)?$/)
+    if (partnerMatch) {
+      const actor = await context(request, 'admin'), collection = firebase().db.collection('partners')
+      if (!partnerMatch[1]) {
+        if (request.method === 'GET') {
+          const snapshot = await collection.get()
+          json(response, 200, snapshot.docs.map((doc) => storedPartner(doc.id, doc.data())).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))); return
+        }
+        if (request.method === 'POST') {
+          const result = partnerFields(await body(request))
+          if ('error' in result) throw new ApiError(400, result.error)
+          const now = new Date().toISOString(), ref = collection.doc(), data = { ...result.fields, notes: [], stageHistory: [{ stage: result.fields.stage, at: now, authorEmail: actor.email }], createdAt: now, updatedAt: now, createdBy: actor.uid }
+          await ref.create(data)
+          await audit(actor, 'partner.created', ref.id, { company: result.fields.company })
+          json(response, 201, storedPartner(ref.id, data)); return
+        }
+      } else {
+        const id = recordId(partnerMatch[1]), ref = collection.doc(id), snapshot = await ref.get(), data = snapshot.data()
+        if (!data) throw new ApiError(404, 'Partner not found.')
+        const now = new Date().toISOString()
+        if (partnerMatch[2] && request.method === 'POST') {
+          const note: PartnerNote = { id: crypto.randomUUID(), text: requestText((await body(request)).text, 'Note', 1000), at: now, authorEmail: actor.email }
+          await ref.update({ notes: FieldValue.arrayUnion(note), updatedAt: now })
+          await audit(actor, 'partner.note-added', id)
+          json(response, 200, storedPartner(id, { ...data, notes: [...(Array.isArray(data.notes) ? data.notes : []), note], updatedAt: now })); return
+        }
+        if (!partnerMatch[2] && request.method === 'PUT') {
+          const result = partnerFields(await body(request), true)
+          if ('error' in result) throw new ApiError(400, result.error)
+          if (!Object.keys(result.fields).length) throw new ApiError(400, 'No partner fields were provided.')
+          const stageEntry = result.fields.stage && result.fields.stage !== data.stage ? { stage: result.fields.stage, at: now, authorEmail: actor.email } : null
+          await ref.update({ ...result.fields, updatedAt: now, ...(stageEntry ? { stageHistory: FieldValue.arrayUnion(stageEntry) } : {}) })
+          await audit(actor, stageEntry ? 'partner.stage-changed' : 'partner.updated', id, { ...result.fields })
+          json(response, 200, storedPartner(id, { ...data, ...result.fields, updatedAt: now, stageHistory: [...(Array.isArray(data.stageHistory) ? data.stageHistory : []), ...(stageEntry ? [stageEntry] : [])] })); return
+        }
+        if (!partnerMatch[2] && request.method === 'DELETE') {
+          await ref.delete()
+          await audit(actor, 'partner.deleted', id, { company: data.company })
+          json(response, 200, { id, deleted: true }); return
+        }
+      }
     }
     if (request.method === 'GET' && url.pathname === '/api/admin/audit') {
       await context(request, 'admin')
@@ -391,17 +474,15 @@ const server = createServer(async (request, response) => {
     }
     const productId = catalogId(url.pathname)
     if (request.method === 'PUT' && productId) {
-      const actor = await context(request, 'editor'); const input = await body(request)
-      const allowed = ['name', 'brand', 'price', 'status', 'description', 'category']
-      const patch = Object.fromEntries(Object.entries(input).filter(([key]) => allowed.includes(key)))
-      if (!Object.keys(patch).length) throw new ApiError(400, 'No editable catalog fields were provided.')
-      await firebase().db.collection('catalogEdits').doc(productId).set({ ...patch, updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
-      await audit(actor, 'catalog.updated', productId, patch); json(response, 200, { id: productId, ...patch }); return
-    }
-    if (request.method === 'DELETE' && productId) {
-      const actor = await context(request, 'admin')
-      await firebase().db.collection('catalogEdits').doc(productId).set({ deletedAt: FieldValue.serverTimestamp(), deletedBy: actor.uid }, { merge: true })
-      await audit(actor, 'catalog.deleted', productId); json(response, 200, { id: productId, deleted: true }); return
+      const id = recordId(productId)
+      if (!productById.has(id)) throw new ApiError(404, 'Catalog product not found.')
+      const input = await body(request), patch: Record<string, unknown> = {}
+      if (input.review !== undefined) { if (!catalogReviews.includes(input.review as CatalogReview)) throw new ApiError(400, 'Review must be pending, approved or needs-work.'); patch.review = input.review }
+      if (input.hidden !== undefined) { if (typeof input.hidden !== 'boolean') throw new ApiError(400, 'hidden must be true or false.'); patch.hidden = input.hidden }
+      if (!Object.keys(patch).length) throw new ApiError(400, 'Only visibility and review state can be changed here; product data comes from partners.')
+      const actor = await context(request, patch.hidden === undefined ? 'editor' : 'admin')
+      await firebase().db.collection('catalogEdits').doc(id).set({ ...patch, ...(patch.hidden === false ? { deletedAt: FieldValue.delete() } : {}), updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      await audit(actor, patch.hidden === undefined ? 'catalog.reviewed' : patch.hidden ? 'catalog.hidden' : 'catalog.shown', id, patch); json(response, 200, { id, ...patch }); return
     }
     json(response, 404, { error: 'Not found.' })
   } catch (error) {

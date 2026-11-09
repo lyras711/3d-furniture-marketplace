@@ -4,7 +4,8 @@ import { addWallSegment, attachOpening, emptyProject, eraseWallSegment, getFloor
 import { analyzePlanPixels, createProjectFromPlan, type PlanAnalysis } from './src/planImport'
 import { normalizePlanVisionResult } from './scripts/plan-vision'
 import { wallsFromSketch } from './src/sketch'
-import { decidePurchaseItems, estimatePurchase, purchaseItemId, reviewPurchaseItems, type PurchaseItem } from './src/purchase'
+import { adminTransitionAllowed, decidePurchaseItems, estimatePurchase, purchaseItemId, purchaseStatuses, reviewPurchaseItems, type PurchaseItem } from './src/purchase'
+import { partnerFields } from './src/partners'
 
 function planImage(rects: number[][]) {
   const width = 500, height = 400, data = new Uint8ClampedArray(width * height * 4).fill(255)
@@ -315,6 +316,25 @@ test('door styles validate and the swing side decides the clearance zone', () =>
   expect(isProject(withDoor({ hinge: 'up' as 'left' }))).toBe(false)
   expect(openingStyle({ id: 'w', type: 'window', x: 0, z: 0, rotation: 0, width: 1, height: 1 })).toBe('casement')
   expect(openingSizes.balcony[0]).toMatchObject({ sillHeight: 0, height: 2.2 })
+})
+
+test('admins can only place ready orders, deliver placed orders, and cancel unfinished ones', () => {
+  const allowed = (to: 'placed' | 'delivered' | 'cancelled') => purchaseStatuses.filter((from) => adminTransitionAllowed(from, to))
+  expect(allowed('placed')).toEqual(['ready-to-place'])
+  expect(allowed('delivered')).toEqual(['placed'])
+  expect(allowed('cancelled')).toEqual(['pending', 'awaiting-user-decision', 'ready-to-place', 'placed'])
+})
+
+test('partner records need a company and reject malformed contact fields', () => {
+  expect(partnerFields({})).toEqual({ error: 'Company name is required.' })
+  expect(partnerFields({ company: '  Polihome  ', retailerId: 'polihome' })).toEqual({ fields: { company: 'Polihome', website: '', country: '', contactName: '', contactEmail: '', contactPhone: '', retailerId: 'polihome', stage: 'lead' } })
+  expect(partnerFields({ company: 'A', contactEmail: 'nope' })).toEqual({ error: 'Contact email is invalid.' })
+  expect(partnerFields({ company: 'A', website: 'javascript:alert(1)' })).toEqual({ error: 'Website must start with http:// or https://.' })
+  expect(partnerFields({ company: 'A', stage: 'won' })).toEqual({ error: 'Choose a valid partner stage.' })
+  expect(partnerFields({ company: 'A', retailerId: 'Bad Id' })).toMatchObject({ error: expect.stringContaining('Retailer id') })
+  expect(partnerFields({ stage: 'active' }, true)).toEqual({ fields: { stage: 'active' } })
+  expect(partnerFields({ company: '' }, true)).toEqual({ error: 'Company name is required.' })
+  expect(partnerFields({ company: 'x'.repeat(121) })).toMatchObject({ error: expect.stringContaining('120') })
 })
 
 test('wall items hang flush on the room side, follow their wall, and warn about clashes', () => {

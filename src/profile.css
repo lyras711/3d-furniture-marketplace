@@ -31,7 +31,8 @@ body:has(.profile-shell) { overflow: auto; background: #f4f3ef; }
 .profile-status { padding: 6px 9px; border-radius: 20px; background: #edf3eb; color: #61725f; font-size: 9px; font-weight: 700; white-space: nowrap; }
 .profile-status-pending, .profile-status-awaiting-user-decision { background: #fbf3df; color: #896d3e; }
 .profile-status-returned-for-revision { background: #f1eef7; color: #7b738e; }
-.profile-status-placed { background: #e8f3ec; color: #416b50; }
+.profile-status-placed, .profile-status-delivered { background: #e8f3ec; color: #416b50; }
+.profile-status-cancelled { background: #fff0ed; color: #a35f55; }
 .profile-request-items { border-top: 1px solid #edf0eb; }
 .profile-request-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid #edf0eb; font-size: 10px; }
 .profile-request-item > span:first-child { display: flex; flex-direction: column; gap: 4px; }
