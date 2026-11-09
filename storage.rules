@@ -1,9 +1,12 @@
 rules_version = '2';
+// Catalogue GLBs and thumbnails are public; uploads happen only through the Admin SDK.
 service firebase.storage {
   match /b/{bucket}/o {
+    match /catalog/{allPaths=**} {
+      allow read: if true;
+    }
     match /{allPaths=**} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null && (request.auth.token.admin == true || request.auth.token.role in ['owner', 'admin']);
+      allow read, write: if false;
     }
   }
 }

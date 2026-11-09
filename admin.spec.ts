@@ -180,6 +180,35 @@ test.describe('compact admin', () => {
   })
 })
 
+test('profile sign-in offers a password reset and new accounts get a confirmation email', async ({ page }) => {
+  const oob: { requestType: string; email?: string; continueUrl?: string }[] = []
+  await page.route('https://identitytoolkit.googleapis.com/**', (route) => {
+    const path = new URL(route.request().url()).pathname, body = route.request().postDataJSON?.() ?? {}
+    if (path.endsWith('accounts:sendOobCode')) { oob.push(body); return route.fulfill({ json: { email: body.email || 'new@example.com' } }) }
+    if (path.endsWith('accounts:signUp')) return route.fulfill({ json: { localId: 'new-uid', email: body.email, idToken, refreshToken: 'refresh', expiresIn: '3600' } })
+    if (path.endsWith('accounts:lookup')) return route.fulfill({ json: { users: [{ localId: 'new-uid', email: 'new@example.com', emailVerified: false, providerUserInfo: [{ providerId: 'password', email: 'new@example.com' }] }] } })
+    if (path.includes('passwordPolicy')) return route.fulfill({ json: { customStrengthOptions: { minPasswordLength: 8, containsNumericCharacter: true }, enforcementState: 'ENFORCE', allowedNonAlphanumericCharacters: [], schemaVersion: 1 } })
+    return route.fulfill({ json: {} })
+  })
+  await page.route(`${origin}/api/account/**`, (route) => route.fulfill({ json: [] }))
+  await page.goto(`${origin}/profile`)
+  await page.evaluate(() => { localStorage.clear(); indexedDB.deleteDatabase('firebaseLocalStorageDb') })
+  await page.reload()
+  await page.getByRole('button', { name: 'Forgot password?' }).click()
+  await expect(page.getByRole('alert')).toContainText('Enter your email address first')
+  await page.getByLabel('Email').fill('maria@example.com')
+  await page.getByRole('button', { name: 'Forgot password?' }).click()
+  await expect(page.getByRole('status')).toHaveText('If an account exists for maria@example.com, a reset link is on its way.')
+  await page.getByRole('button', { name: 'New to Formivo? Create an account' }).click()
+  await expect(page.getByText('At least 8 characters, including a number.')).toBeVisible()
+  await page.getByLabel('Email').fill('new@example.com')
+  await page.getByLabel('Password').fill('room-planner-1')
+  await page.getByRole('button', { name: 'Create account' }).click()
+  await expect(page.getByText('Confirm your email address using the link we sent to new@example.com.')).toBeVisible()
+  expect(oob.map((item) => item.requestType)).toEqual(['PASSWORD_RESET', 'VERIFY_EMAIL'])
+  expect(oob.every((item) => item.continueUrl === `${origin}/profile`)).toBe(true)
+})
+
 test('products hidden by an admin leave the planner catalogue', async ({ page }) => {
   await page.route(`${origin}/api/catalog/visibility`, (route) => route.fulfill({ json: { hidden: ['sofa-haven'] } }))
   await page.goto(`${origin}/planner`)

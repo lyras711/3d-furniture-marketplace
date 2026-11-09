@@ -19,7 +19,7 @@ import { getToken } from 'firebase/app-check'
 import { onAuthStateChanged, signInAnonymously, type User } from 'firebase/auth'
 import { accountApi, AccountApiError, cloudProjectKey, type SavedProject, type SavedProjectDetails } from './account'
 import { purchaseItemId } from './purchase'
-import { appCheck, auth } from './firebase'
+import { auth, getAppCheck } from './firebase'
 import type { CategoryFilter, Product } from './catalog'
 import { useListedProducts } from './catalogVisibility'
 import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, addWallSegment, eraseWallSegment, hangOnWall, isWallMounted, placeObject, setWallLength, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
@@ -77,6 +77,7 @@ function makeId(prefix: string) {
 
 
 const requestPlanDetection: PlanDetectionProvider = async (request) => {
+  const appCheck = getAppCheck()
   if (!auth || !appCheck) throw new Error('Firebase Auth and App Check are not configured for AI plan detection.')
   const user = auth.currentUser || (await signInAnonymously(auth)).user
   const [idToken, appCheckToken] = await Promise.all([user.getIdToken(), getToken(appCheck)])

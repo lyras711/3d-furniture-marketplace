@@ -76,7 +76,9 @@ async function context(request: IncomingMessage, minimum: Role = 'viewer') {
   let decoded: DecodedIdToken
   try { decoded = await firebase().auth.verifyIdToken(token) } catch { throw new ApiError(401, 'The Firebase ID token is invalid or expired.') }
   const email = decoded.email?.toLowerCase() || ''
-  const configuredOwner = (process.env.ADMIN_EMAILS || '').split(',').map((item) => item.trim().toLowerCase()).includes(email)
+  const listedOwner = (process.env.ADMIN_EMAILS || '').split(',').map((item) => item.trim().toLowerCase()).includes(email)
+  // An unverified address proves nothing: anyone can register an ADMIN_EMAILS address first.
+  const configuredOwner = listedOwner && decoded.email_verified === true
   let role = configuredOwner ? 'owner' as Role : roleFromValue(decoded.role) || (decoded.admin === true ? 'admin' as Role : null)
   try {
     const userDoc = await firebase().db.collection('adminUsers').doc(decoded.uid).get()
@@ -86,6 +88,7 @@ async function context(request: IncomingMessage, minimum: Role = 'viewer') {
   } catch (error) {
     if (!role) throw new ApiError(503, `Firebase Admin is not configured: ${error instanceof Error ? error.message : String(error)}`)
   }
+  if (!role && listedOwner) throw new ApiError(403, 'Confirm your email address before using the admin dashboard. Open /profile to resend the confirmation link.')
   if (!role || roleRank[role] < roleRank[minimum]) throw new ApiError(403, 'This account does not have the required admin role.')
   return { uid: decoded.uid, email, role, token: decoded }
 }

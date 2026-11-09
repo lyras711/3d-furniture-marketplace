@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
-import { auth, firebaseConfigured, keepAdminSession } from './firebase'
+import { createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
+import { auth, authActionSettings, authErrorMessage, firebaseConfigured, keepAdminSession } from './firebase'
 import { accountApi, type SavedProject } from './account'
 import { activePurchaseStatuses, type PurchaseRequest, type PurchaseStatus } from './purchase'
 import './profile.css'
@@ -33,6 +33,7 @@ export default function Profile() {
   const [rename, setRename] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const hasActiveRequest = (projectId: string) => requests.some((request) => request.projectId === projectId && activePurchaseStatuses.includes(request.status))
 
   useEffect(() => {
@@ -59,13 +60,28 @@ export default function Profile() {
   }, [user, reload])
 
   const authenticate = async (event: FormEvent) => {
-    event.preventDefault(); setAuthBusy(true); setError('')
+    event.preventDefault(); setAuthBusy(true); setError(''); setNotice('')
     try {
       if (!auth) throw new Error('Firebase Authentication is not configured for this deployment.')
-      if (mode === 'create') await createUserWithEmailAndPassword(auth, email.trim(), password)
+      if (mode === 'create') { const created = await createUserWithEmailAndPassword(auth, email.trim(), password); await sendEmailVerification(created.user, authActionSettings()).catch(() => {}) }
       else await signInWithEmailAndPassword(auth, email.trim(), password)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Sign-in failed.') }
+    } catch (reason) { setError(authErrorMessage(reason)) }
     finally { setAuthBusy(false) }
+  }
+
+  const resetPassword = async () => {
+    setError(''); setNotice('')
+    if (!auth || !email.trim()) { setError('Enter your email address first, then choose “Forgot password?”.'); return }
+    setAuthBusy(true)
+    try { await sendPasswordResetEmail(auth, email.trim(), authActionSettings()); setNotice(`If an account exists for ${email.trim()}, a reset link is on its way.`) }
+    catch (reason) { setError(authErrorMessage(reason, 'Could not send a reset link.')) }
+    finally { setAuthBusy(false) }
+  }
+
+  const resendVerification = async () => {
+    if (!user) return
+    try { await sendEmailVerification(user, authActionSettings()); setNotice(`We sent a new confirmation link to ${user.email}.`) }
+    catch (reason) { setError(authErrorMessage(reason, 'Could not send the confirmation email.')) }
   }
 
   const renameProject = async (project: SavedProject) => {
@@ -103,12 +119,14 @@ export default function Profile() {
 
   if (!authReady) return <div className="profile-shell"><main className="profile-main"><p role="status">Checking your account…</p></main></div>
   if (!firebaseConfigured || !auth) return <div className="profile-shell"><header className="profile-header"><a className="profile-brand" href="/">FORMIVO</a><a href="/planner">Open planner</a></header><main className="profile-main"><section className="profile-auth-card"><span className="profile-eyebrow">Your Formivo account</span><h1>Save your spaces across devices.</h1><p>Account sign-in is not configured for this deployment. Your current editor still saves on this device.</p><a className="profile-primary" href="/planner">Continue to planner</a></section></main></div>
-  if (!user) return <div className="profile-shell"><header className="profile-header"><a className="profile-brand" href="/">FORMIVO</a><a href="/planner">Open planner</a></header><main className="profile-main"><section className="profile-auth-card"><span className="profile-eyebrow">Your Formivo account</span><h1>{mode === 'create' ? 'Create your profile.' : 'Welcome back.'}</h1><p>Sign in to save your room designs and track purchase requests.</p><form className="profile-auth-form" onSubmit={authenticate}><label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label><label>Password<input type="password" autoComplete={mode === 'create' ? 'new-password' : 'current-password'} minLength={6} value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <p className="profile-error" role="alert">{error}</p>}<button className="profile-primary" disabled={authBusy}>{authBusy ? 'Working…' : mode === 'create' ? 'Create account' : 'Sign in'}</button></form><button className="profile-text-button" onClick={() => { setMode(mode === 'create' ? 'sign-in' : 'create'); setError('') }}>{mode === 'create' ? 'Already have an account? Sign in' : 'New to Formivo? Create an account'}</button></section></main></div>
+  if (!user) return <div className="profile-shell"><header className="profile-header"><a className="profile-brand" href="/">FORMIVO</a><a href="/planner">Open planner</a></header><main className="profile-main"><section className="profile-auth-card"><span className="profile-eyebrow">Your Formivo account</span><h1>{mode === 'create' ? 'Create your profile.' : 'Welcome back.'}</h1><p>Sign in to save your room designs and track purchase requests.</p><form className="profile-auth-form" onSubmit={authenticate}><label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label><label>Password<input type="password" autoComplete={mode === 'create' ? 'new-password' : 'current-password'} minLength={mode === 'create' ? 8 : undefined} value={password} onChange={(event) => setPassword(event.target.value)} required />{mode === 'create' && <small>At least 8 characters, including a number.</small>}</label>{error && <p className="profile-error" role="alert">{error}</p>}{notice && <p className="profile-notice" role="status">{notice}</p>}<button className="profile-primary" disabled={authBusy}>{authBusy ? 'Working…' : mode === 'create' ? 'Create account' : 'Sign in'}</button></form><button className="profile-text-button" onClick={() => { setMode(mode === 'create' ? 'sign-in' : 'create'); setError(''); setNotice('') }}>{mode === 'create' ? 'Already have an account? Sign in' : 'New to Formivo? Create an account'}</button>{mode === 'sign-in' && <button className="profile-text-button" disabled={authBusy} onClick={() => void resetPassword()}>Forgot password?</button>}</section></main></div>
 
   return <div className="profile-shell">
     <header className="profile-header"><a className="profile-brand" href="/">FORMIVO</a><nav><a href="/planner">Open planner</a><span>{user.email}</span><button onClick={() => { if (auth) void signOut(auth) }}>Sign out</button></nav></header>
     <main className="profile-main">
       <section className="profile-hero"><div><span className="profile-eyebrow">Your workspace</span><h1>Spaces made yours.</h1><p>Manage saved designs and follow purchase requests from one place.</p></div><a className="profile-primary" href="/planner">Create a space</a></section>
+      {!user.emailVerified && <p className="profile-verify">Confirm your email address using the link we sent to {user.email}. <button className="profile-text-button" onClick={() => void resendVerification()}>Send the link again</button></p>}
+      {notice && <p className="profile-notice" role="status">{notice}</p>}
       {error && <p className="profile-error profile-global-error" role="alert">{error}</p>}
       <section className="profile-section"><div className="profile-section-head"><div><span className="profile-eyebrow">01 / Your creations</span><h2>Saved spaces</h2></div><button className="profile-secondary" onClick={() => setReload((value) => value + 1)} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button></div>
         {loading && !projects.length ? <p className="profile-empty" role="status">Loading your spaces…</p> : projects.length ? <div className="profile-project-grid">{projects.map((project) => <article className="profile-project-card" key={project.id}><div className="profile-project-copy"><span className="profile-eyebrow">Saved design</span>{editingId === project.id ? <input className="profile-rename-input" aria-label="Project name" autoFocus value={rename} maxLength={80} onChange={(event) => setRename(event.target.value)} /> : <h3>{project.name}</h3>}<p>{project.objectCount} furniture items · {project.roomCount} {project.roomCount === 1 ? 'room' : 'rooms'}</p><small>Updated {readableTime(project.updatedAt)}</small></div><div className="profile-card-actions">{editingId === project.id ? <><button className="profile-secondary" disabled={busyId === project.id} onClick={() => void renameProject(project)}>Save name</button><button className="profile-quiet" onClick={() => setEditingId(null)}>Cancel</button></> : <><a className="profile-primary" href={`/planner?projectId=${encodeURIComponent(project.id)}`}>Open in editor</a><button className="profile-secondary" onClick={() => { setEditingId(project.id); setRename(project.name) }}>Rename</button><button className="profile-danger" disabled={busyId === project.id || hasActiveRequest(project.id)} title={hasActiveRequest(project.id) ? 'Resolve the active purchase request first' : undefined} onClick={() => void deleteProject(project)}>Delete</button></>}</div></article>)}</div> : <p className="profile-empty">No saved spaces yet. Create a room in the planner, then choose Save to add it here.</p>}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
-import { auth, firebaseConfigured, keepAdminSession } from './firebase'
+import { onAuthStateChanged, sendPasswordResetEmail, signInWithEmailAndPassword, signOut, type User } from 'firebase/auth'
+import { auth, authActionSettings, authErrorMessage, firebaseConfigured, keepAdminSession } from './firebase'
 import { atLeast, emptyData, errorText, send, type AdminData, type Job, type Role } from './admin/api'
 import OverviewTab from './admin/OverviewTab'
 import OrdersTab from './admin/OrdersTab'
@@ -40,6 +40,7 @@ export default function Admin() {
   const [tab, setTab] = useState<TabId>(initialTab)
   const [focus, setFocus] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
 
   useEffect(() => {
     if (!auth) { setAuthReady(true); return }
@@ -84,14 +85,20 @@ export default function Admin() {
   }
 
   const signIn = async (event: FormEvent) => {
-    event.preventDefault(); setAuthBusy(true); setError('')
+    event.preventDefault(); setAuthBusy(true); setError(''); setNotice('')
     try { if (!auth) throw new Error('Firebase Auth is not configured. Set the VITE_FIREBASE_* values before using /admin.'); await signInWithEmailAndPassword(auth, email, password) }
-    catch (reason) { setError(errorText(reason)) }
+    catch (reason) { setError(authErrorMessage(reason)) }
     finally { setAuthBusy(false) }
+  }
+  const resetPassword = async () => {
+    setError(''); setNotice('')
+    if (!auth || !email.trim()) { setError('Enter your email address first.'); return }
+    try { await sendPasswordResetEmail(auth, email.trim(), authActionSettings()); setNotice(`If an account exists for ${email.trim()}, a reset link is on its way.`) }
+    catch (reason) { setError(authErrorMessage(reason, 'Could not send a reset link.')) }
   }
 
   if (!authReady) return <AuthCard><span className="admin-eyebrow">Formivo admin dashboard</span><h1>Checking access…</h1></AuthCard>
-  if (!firebaseConfigured || !auth || !user) return <AuthCard onSubmit={signIn}><a className="admin-brand" href="/">FORMIVO</a><span className="admin-eyebrow">Protected admin</span><h1>Sign in to the admin dashboard.</h1>{!firebaseConfigured && <p className="admin-error">Firebase Auth is not configured for this deployment.</p>}<label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="username" required /></label><label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required /></label>{error && <p className="admin-error">{error}</p>}<button className="admin-primary" disabled={authBusy || !firebaseConfigured}>{authBusy ? 'Signing in…' : 'Sign in'}</button><p className="admin-help">Access is granted only to users with an admin role in Firebase.</p></AuthCard>
+  if (!firebaseConfigured || !auth || !user) return <AuthCard onSubmit={signIn}><a className="admin-brand" href="/">FORMIVO</a><span className="admin-eyebrow">Protected admin</span><h1>Sign in to the admin dashboard.</h1>{!firebaseConfigured && <p className="admin-error">Firebase Auth is not configured for this deployment.</p>}<label>Email<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="username" required /></label><label>Password<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required /></label>{error && <p className="admin-error">{error}</p>}{notice && <p className="admin-help" role="status">{notice}</p>}<button className="admin-primary" disabled={authBusy || !firebaseConfigured}>{authBusy ? 'Signing in…' : 'Sign in'}</button><button type="button" className="admin-signout" onClick={() => void resetPassword()}>Forgot password?</button><p className="admin-help">Access is granted only to users with an admin role in Firebase.</p></AuthCard>
   if (!accessChecked) return <AuthCard><span className="admin-eyebrow">Protected admin</span><h1>Checking role…</h1></AuthCard>
   if (!role) return <AuthCard><a className="admin-brand" href="/">FORMIVO</a><span className="admin-eyebrow">Protected admin</span><h1>Admin access is required.</h1><p className="admin-error">{error || 'This account does not have an admin role.'}</p><button className="admin-primary" onClick={() => { if (auth) void signOut(auth) }}>Sign out</button></AuthCard>
 

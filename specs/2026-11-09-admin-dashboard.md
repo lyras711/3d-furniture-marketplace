@@ -25,3 +25,8 @@ Goal: one `/admin` dashboard to manage B2C orders, B2B retailer partners and cat
 - viewer: overview, catalogue, ingestion (read). editor: review state, ingestion jobs. admin/owner: orders, partners, visibility, team, audit.
 
 Related: [[2026-11-08-mobile-simplicity-plan]]
+
+## Firebase / GCP hardening (2026-11-09, later)
+- Production had blank `VITE_FIREBASE_*` in Vercel, so `/profile` and `/admin` could not sign in on formivo3d.com. Fixed and rebuilt.
+- Done: authorized domains, anonymous auth, password policy, App Check (reCAPTCHA Enterprise), Vertex AI, deny-all Firestore/Storage rules (public `catalog/**` read), PITR, least-privilege `formivo-api` Cloud Run SA, verified-email requirement for `ADMIN_EMAILS` owners, reset/verify emails, Vercel-only hosting.
+- Open: custom email sender domain (needs DNS), Firebase public-facing app name in email templates, removing Editor from the default compute SA, budget alerts, EU Storage bucket.
