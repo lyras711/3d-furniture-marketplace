@@ -374,6 +374,45 @@ test('connected corner dragging updates walls and floors as one undo step', asyn
   expect((await save(page)).features).toEqual(before.features)
 })
 
+test('room boxes share walls, erase removes part of a wall, and drawing works in 3D', async ({ page }) => {
+  await page.getByRole('button', { name: 'Room', exact: true }).click()
+  await segment(page, [-3, -2], [0, 2])
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '12.00')
+  await segment(page, [0, -2], [3, 2])
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '2')
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '5')
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '24.00')
+  await page.getByRole('button', { name: 'Erase', exact: true }).click()
+  await segment(page, [1, -2], [2, -2])
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '6')
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '1')
+  await page.getByTitle('Undo').click()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '2')
+  await page.getByRole('button', { name: 'Wall', exact: true }).click()
+  const a = await gridPoint(page, -3, -2), b = await gridPoint(page, -1, -3.5)
+  await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(b.x, b.y, { steps: 6 })
+  await expect(page.locator('.dimension-tag')).toContainText('m')
+  await page.mouse.up()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '6')
+  await page.getByRole('button', { name: '3D', exact: true }).click(); await frame(page)
+  const box = (await page.locator('canvas').boundingBox())!
+  await page.mouse.move(box.x + box.width / 2 - 150, box.y + box.height / 2 + 60); await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 60, { steps: 8 })
+  await page.screenshot({ path: '/tmp/forma-wall-3d-preview.png' })
+  await page.mouse.up()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '7')
+})
+
+test('tapping a wall length lets you type the exact size and the room stays closed', async ({ page }) => {
+  await build(page)
+  await page.getByRole('button', { name: /Change wall length, now 5.00 m/ }).first().click()
+  const dialog = page.getByRole('dialog', { name: 'Wall length' })
+  await dialog.getByLabel('Wall length in metres').fill('6')
+  await dialog.getByRole('button', { name: 'Set length' }).click()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '30.00')
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '1')
+})
+
 test('Escape cancels an unfinished wall without leaving capture or phantom geometry', async ({ page }) => {
   const a = await gridPoint(page, -2, 0), b = await gridPoint(page, 2, 0)
   await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(b.x, b.y, { steps: 5 })
@@ -814,7 +853,7 @@ test('mobile opens on a welcome screen, explains unfinished walls, and builds a 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   const welcome = page.getByRole('region', { name: 'Start your plan' })
   await expect(welcome.getByRole('heading', { name: 'Let’s draw your home' })).toBeVisible()
-  for (const name of ['Measure my room', 'Draw it on screen', 'Enter a room size', 'Use an example room']) await expect(welcome.getByRole('button', { name })).toBeVisible()
+  for (const name of ['Measure my room', 'Sketch it with your finger', 'Draw it on screen', 'Enter a room size', 'Use an example room']) await expect(welcome.getByRole('button', { name })).toBeVisible()
   await expect(page.getByRole('navigation', { name: 'Planner steps' })).toHaveCount(0)
   await page.screenshot({ path: '/tmp/forma-mobile-welcome.png' })
   await welcome.getByRole('button', { name: 'Draw it on screen' }).click()
@@ -847,17 +886,26 @@ test.describe('touch room workflow', () => {
     await frame(page)
   }
 
-  test('tap-to-chain walls previews lengths, closes rooms, and remains undoable', async ({ page }) => {
+  const touchSquare = async (page: Page) => {
+    for (let i = 0; i < 4; i++) await touchDrag(page, await gridPoint(page, square[i][0], square[i][1]), await gridPoint(page, square[(i + 1) % 4][0], square[(i + 1) % 4][1]))
+  }
+  const touchStroke = async (page: Page, points: TouchPoint[]) => {
+    const session = await page.context().newCDPSession(page)
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [points[0]] })
+    for (const point of points.slice(1)) await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [point] })
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await session.detach()
+    await frame(page)
+  }
+
+  test('each drag draws one straight wall on the grid, the fourth closes the room, and it stays undoable', async ({ page }) => {
     await drawOnScreen(page)
-    await tapPoint(page, square[0])
-    const firstEnd = await gridPoint(page, square[1][0], square[1][1])
-    await page.mouse.move(firstEnd.x, firstEnd.y)
-    await expect(page.locator('.dimension-tag')).toContainText('5.00 m')
-    for (const point of square.slice(1)) await tapPoint(page, point)
-    const closingEnd = await gridPoint(page, square[0][0], square[0][1])
-    await page.mouse.move(closingEnd.x, closingEnd.y)
-    await expect(page.locator('.dimension-tag')).toContainText('Room closes')
-    await tapPoint(page, square[0])
+    await touchDrag(page, await gridPoint(page, -2.5, -2.5), await gridPoint(page, 2.4, -2.35))
+    await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '1')
+    const first = (await save(page)).features[0]
+    expect(first.width).toBeCloseTo(5)
+    expect(Math.abs(Math.sin(first.rotation))).toBeLessThan(1e-9)
+    for (let i = 1; i < 4; i++) await touchDrag(page, await gridPoint(page, square[i][0], square[i][1]), await gridPoint(page, square[(i + 1) % 4][0], square[(i + 1) % 4][1]))
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '4')
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '25.00')
     await expect(page.getByRole('status')).toContainText('Room finished')
@@ -869,9 +917,28 @@ test.describe('touch room workflow', () => {
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '25.00')
   })
 
+  test('a rough finger sketch becomes straight walls that close the room', async ({ page }) => {
+    await page.getByRole('button', { name: 'Sketch it with your finger' }).tap()
+    await expect(page.getByRole('toolbar', { name: 'Sketch' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Make walls' })).toBeDisabled()
+    const corners = [[-2, -1.5], [2, -1.5], [2, 1.5], [-2, 1.5]], points: TouchPoint[] = []
+    for (let i = 0; i < 4; i++) for (let t = 0; t < 1; t += 0.1) {
+      const [ax, az] = corners[i], [bx, bz] = corners[(i + 1) % 4]
+      points.push(await gridPoint(page, ax + (bx - ax) * t + Math.sin(t * 8 + i) * 0.05, az + (bz - az) * t + Math.cos(t * 6 + i) * 0.05))
+    }
+    points.push(await gridPoint(page, -1.9, -1.45))
+    await touchStroke(page, points)
+    await page.screenshot({ path: '/tmp/forma-mobile-sketch.png' })
+    await page.getByRole('button', { name: 'Make walls' }).tap()
+    await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '4')
+    await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '1')
+    await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '12.00')
+    await expect(page.getByRole('status')).toContainText('walls made from your sketch')
+  })
+
   const touchRoomWithSofa = async (page: Page) => {
     await drawOnScreen(page)
-    for (const point of [...square, square[0]]) await tapPoint(page, point)
+    await touchSquare(page)
     await page.getByRole('button', { name: 'Add furniture' }).tap()
     const sofa = page.getByTitle('Add Haven three-seat sofa to room')
     await sofa.scrollIntoViewIfNeeded()
@@ -882,7 +949,7 @@ test.describe('touch room workflow', () => {
 
   test('the Add sheet lists furniture by room and a tapped wall offers doors and windows', async ({ page }) => {
     await drawOnScreen(page)
-    for (const point of [...square, square[0]]) await tapPoint(page, point)
+    await touchSquare(page)
     await page.getByRole('button', { name: 'Add furniture' }).tap()
     const sheet = page.getByRole('region', { name: 'Add furniture' })
     await expect(sheet.getByTitle('Add Haven three-seat sofa to room')).toBeVisible()
@@ -913,7 +980,7 @@ test.describe('touch room workflow', () => {
 
   test('a tapped wall offers wall decor that hangs on it, keeps its height, and does not rotate', async ({ page }) => {
     await drawOnScreen(page)
-    for (const point of [...square, square[0]]) await tapPoint(page, point)
+    await touchSquare(page)
     await tapPoint(page, [0, -2.5])
     await page.getByRole('button', { name: 'Hang something on this wall' }).tap()
     const sheet = page.getByRole('region', { name: 'Add furniture' })
@@ -992,14 +1059,14 @@ test.describe('touch room workflow', () => {
     await pinch(page, await gridPoint(page, -1, -1), await gridPoint(page, 1, 1))
     await page.getByRole('button', { name: 'Reset camera' }).tap()
     await frame(page)
-    for (const point of [...square, square[0]]) await tapPoint(page, point)
+    await touchSquare(page)
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '4')
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '25.00')
   })
 
   test('double-tapping the floor adds furniture at that spot', async ({ page }) => {
     await drawOnScreen(page)
-    for (const point of [...square, square[0]]) await tapPoint(page, point)
+    await touchSquare(page)
     const spot = await gridPoint(page, 1.2, 1.2)
     await page.touchscreen.tap(spot.x, spot.y)
     await page.touchscreen.tap(spot.x, spot.y)
@@ -1010,7 +1077,7 @@ test.describe('touch room workflow', () => {
     await sofa.tap()
     const object = (await save(page)).objects[0]
     expect(Math.hypot(object.x - 1.2, object.z - 1.2)).toBeLessThan(0.2)
-    const outside = await gridPoint(page, -3.1, 0)
+    const outside = await gridPoint(page, 0, -3.6)
     await page.touchscreen.tap(outside.x, outside.y)
     await page.touchscreen.tap(outside.x, outside.y)
     await expect(page.getByRole('status')).toContainText('inside a room')
@@ -1069,7 +1136,7 @@ test.describe('touch room workflow', () => {
 
   test('selection keeps the inspector shut while touch controls move, rotate, replace, and basket items', async ({ page }) => {
     await drawOnScreen(page)
-    for (const point of [...square, square[0]]) await tapPoint(page, point)
+    await touchSquare(page)
     await page.getByRole('button', { name: 'Add furniture' }).tap()
     const sofa = page.getByTitle('Add Haven three-seat sofa to room')
     await sofa.scrollIntoViewIfNeeded()
@@ -1080,6 +1147,7 @@ test.describe('touch room workflow', () => {
     await touchDrag(page, start, end)
     await page.getByRole('button', { name: 'Rotate selected object 15 degrees' }).tap()
     await page.getByRole('button', { name: 'Add selected object to basket' }).tap()
+    await expect(page.locator('.basket-badge')).toHaveCount(1)
     const before = (await save(page)).objects[0]
     expect(before.rotation).toBeCloseTo(Math.PI / 12)
     expect(before.inBasket).toBe(true)

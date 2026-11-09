@@ -4,7 +4,8 @@ import SurfaceMaterial from './SurfaceMaterial'
 const RenderStudio = lazy(() => import('./RenderStudio'))
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF } from '@react-three/drei'
-import SceneEnvironment, { Architecture, type EditorLightingMode } from './SceneEnvironment'
+import SceneEnvironment, { Architecture, BUILD_TOOLS, GRID_TOOLS, type BuildAction, type EditorLightingMode } from './SceneEnvironment'
+import { wallsFromSketch } from './sketch'
 import MeasureRoom from './MeasureRoom'
 import AddItemSheet from './AddItemSheet'
 import OpeningOptions from './OpeningOptions'
@@ -20,16 +21,18 @@ import { accountApi, AccountApiError, cloudProjectKey, type SavedProject, type S
 import { purchaseItemId } from './purchase'
 import { appCheck, auth } from './firebase'
 import { products, type CategoryFilter, type Product } from './catalog'
-import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, hangOnWall, isWallMounted, placeObject, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
+import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, addWallSegment, eraseWallSegment, hangOnWall, isWallMounted, placeObject, setWallLength, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 type ViewMode = '3d' | '2d'
 type LightingMode = EditorLightingMode
-type Tool = 'select' | 'wall' | 'door' | 'window'
-type FeatureType = Exclude<Tool, 'select'>
+type Tool = 'select' | 'wall' | 'room' | 'erase' | 'sketch' | 'door' | 'window'
+type FeatureType = 'wall' | 'door' | 'window'
 type Step = 'room' | 'furnish' | 'review'
 
 
 const FLOOR = new Plane(new Vector3(0, 1, 0), 0)
+// OrbitControls treats an unknown button/touch action as "do nothing".
+const NO_ACTION = -1 as number
 const PRODUCT_DRAG_TYPE = 'application/x-forma-product'
 
 const STORAGE_KEY = 'forma-room-planner-project'
@@ -511,6 +514,7 @@ function FurnitureObject({
       onPointerUp={finish} onPointerCancel={finish}
     >
       {viewMode === '2d' ? <mesh position={[0, item.category === 'Rug' ? 0.015 : wallMounted ? 0.13 : 0.06, wallMounted ? Math.max(0, 0.08 - depth) / 2 : 0]}><boxGeometry args={[width, 0.02, wallMounted ? Math.max(depth, 0.08) : depth]} /><meshBasicMaterial color={item.tone} transparent opacity={item.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : product ? <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={item.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense> : <RoundedBox position={[0, height / 2, 0]} args={[width, height, depth]} radius={Math.min(0.035, height / 4)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={item.tone} roughness={0.9} /></RoundedBox>}
+      {object.inBasket && <Html position={[0, (viewMode === '3d' ? height : 0.1) + 0.14, 0]} center zIndexRange={[4, 0]} style={{ pointerEvents: 'none' }}><span className="basket-badge" title="In basket"><Icon name="shopping" size={13} /></span></Html>}
       {selected && <>
         <Line points={[[-width / 2 - 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, -depth / 2 - 0.04]]} color="#517e68" lineWidth={2} raycast={() => null} />
         <Html position={[0, 0.05, depth / 2 + 0.18]} center style={{ pointerEvents: 'none' }}><span className="dimension-tag">{item.width} × {item.depth} cm</span></Html>
@@ -539,7 +543,7 @@ function RoomScene({
   onDragCancel,
   addPoint,
   onAddAt,
-  snap, wallSnap, lightingMode, onDropProduct, onDrawWall, onMoveEndpoint, onMoveOpening,
+  snap, wallSnap, lightingMode, onDropProduct, onBuild, sketch, onErase, onEditLength, onMoveEndpoint, onMoveOpening,
 }: {
   onDragCancel: () => void
   addPoint: Point | null
@@ -550,7 +554,10 @@ function RoomScene({
   wallSnap: boolean
   lightingMode: LightingMode
   onDropProduct: (id: string, x: number, z: number) => void
-  onDrawWall: (x: number, z: number, endX: number, endZ: number) => boolean
+  onBuild: (action: BuildAction) => void
+  sketch: Point[][]
+  onErase: (id: string) => void
+  onEditLength: (id: string) => void
   project: ProjectState
   viewMode: ViewMode
   gridVisible: boolean
@@ -569,18 +576,20 @@ function RoomScene({
   onDragEnd: () => void
 }) {
   const floorCount = useMemo(() => getFloorRegions(project.features).length, [project.features])
+  // Build tools draw with one finger / the left button, so the camera turns with two fingers / the right button instead.
+  const building = BUILD_TOOLS.includes(activeTool)
   return (
     <Canvas shadows orthographic frameloop="demand" dpr={[1, 1.5]}
       camera={{ position: [8, 8, 10], zoom: 65, near: 0.1, far: 150 }}
       gl={{ antialias: true, toneMapping: ACESFilmicToneMapping }} onPointerMissed={() => { if (!draggingId && activeTool === 'select') onClearSelection() }}>
       {viewMode === '3d' && <PerspectiveCamera makeDefault position={[8, 8, 10]} fov={50} near={0.03} far={150} />}
-      <OrbitControls makeDefault enabled={!draggingId} enableRotate={viewMode === '3d' && activeTool === 'select'} enableDamping dampingFactor={0.12} minDistance={0.2} maxDistance={100} minZoom={1} maxZoom={250} minPolarAngle={viewMode === '2d' ? 0 : 0.1} maxPolarAngle={Math.PI / 2.1} mouseButtons={{ LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }} touches={{ ONE: viewMode === '2d' && activeTool === 'select' ? TOUCH.PAN : TOUCH.ROTATE, TWO: TOUCH.DOLLY_PAN }} />
-      <CameraRig project={project} viewMode={viewMode} cameraVersion={cameraVersion} fitRooms={activeTool !== 'wall' && floorCount > 0} floorCount={floorCount} />
+      <OrbitControls makeDefault enabled={!draggingId} enableRotate={viewMode === '3d' && (activeTool === 'select' || building)} enableDamping dampingFactor={0.12} minDistance={0.2} maxDistance={100} minZoom={1} maxZoom={250} minPolarAngle={viewMode === '2d' ? 0 : 0.1} maxPolarAngle={Math.PI / 2.1} mouseButtons={building ? viewMode === '3d' ? { LEFT: NO_ACTION as MOUSE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE } : { LEFT: NO_ACTION as MOUSE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN } : { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }} touches={{ ONE: building ? NO_ACTION as TOUCH : viewMode === '2d' && activeTool === 'select' ? TOUCH.PAN : TOUCH.ROTATE, TWO: building && viewMode === '3d' ? TOUCH.DOLLY_ROTATE : TOUCH.DOLLY_PAN }} />
+      <CameraRig project={project} viewMode={viewMode} cameraVersion={cameraVersion} fitRooms={!GRID_TOOLS.includes(activeTool) && floorCount > 0} floorCount={floorCount} />
       <PlanProbe viewMode={viewMode} />
-      <SceneEnvironment project={project} viewMode={viewMode} gridVisible={gridVisible} tool={activeTool} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onClear={onClearSelection} onPlace={onPlaceFeature} onDrop={onDropProduct} onDrawWall={onDrawWall} onAddAt={onAddAt} />
+      <SceneEnvironment project={project} viewMode={viewMode} gridVisible={gridVisible} tool={activeTool} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onClear={onClearSelection} onPlace={onPlaceFeature} onDrop={onDropProduct} onBuild={onBuild} sketch={sketch} onAddAt={onAddAt} />
       {addPoint && <mesh position={[addPoint.x, 0.03, addPoint.z]} rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}><ringGeometry args={[0.16, 0.24, 40]} /><meshBasicMaterial color="#2f5d46" transparent opacity={0.85} /></mesh>}
 
-      <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onMoveOpening={onMoveOpening} lightingMode={lightingMode} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel} />
+      <Architecture project={project} viewMode={viewMode} cutaway={wallsTransparent} selectedId={selectedFeatureId} tool={activeTool} onSelect={onSelectFeature} onPlace={onPlaceFeature} onMoveEndpoint={onMoveEndpoint} onMoveOpening={onMoveOpening} lightingMode={lightingMode} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragCancel={onDragCancel} onErase={onErase} onEditLength={onEditLength} />
       {project.objects.map((object) => {
         const product = object.productId ? productById.get(object.productId) ?? null : null
         if (!product && !object.custom) return null
@@ -1018,6 +1027,18 @@ function PlanImportModal({ onClose, onImport }: { onClose: () => void; onImport:
   </form></div>
 }
 
+function WallLengthDialog({ wall, onClose, onSet }: { wall?: RoomFeature; onClose: () => void; onSet: (length: number) => void }) {
+  const [value, setValue] = useState(wall ? wall.width.toFixed(2) : '')
+  if (!wall) return null
+  const submit = (event: FormEvent) => { event.preventDefault(); const length = Number(value.replace(',', '.')); if (length >= 0.25 && length <= 40) onSet(Math.round(length * 100) / 100) }
+  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close wall length dialog" /><form className="modal-card length-card" role="dialog" aria-modal="true" aria-label="Wall length" onSubmit={submit}>
+    <div className="modal-header"><div><span className="eyebrow">Now {wall.width.toFixed(2)} m</span><h2>Wall length</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div>
+    <label className="field-label"><span>Length</span><span className="unit-input"><input aria-label="Wall length in metres" inputMode="decimal" autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} /><em>m</em></span></label>
+    <p className="form-note">The far corner moves along the wall, and the next wall moves with it so the room stays closed.</p>
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Set length</button></div>
+  </form></div>
+}
+
 function ExistingItemModal({ onClose, onCreate }: { onClose: () => void; onCreate: (item: CustomRoomItem) => void }) {
   const [name, setName] = useState('Existing furniture')
   const [width, setWidth] = useState('100'), [depth, setDepth] = useState('100'), [height, setHeight] = useState('100')
@@ -1120,6 +1141,8 @@ function App() {
   // A wall item waiting for the user to tap a wall, and the wall chosen from the mobile wall bar for the Add sheet.
   const [hangItem, setHangItem] = useState<RoomObject | null>(null)
   const [targetWallId, setTargetWallId] = useState<string | null>(null)
+  const [sketchStrokes, setSketchStrokes] = useState<Point[][]>([])
+  const [lengthWallId, setLengthWallId] = useState<string | null>(null)
   const [addPoint, setAddPoint] = useState<Point | null>(null)
   const [twistLabel, setTwistLabel] = useState<(ScreenPoint & { degrees: number }) | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -1136,16 +1159,18 @@ function App() {
   useEffect(() => { if (compact ? !addOpen : !panelOpen || step !== 'furnish') setAddPoint(null) }, [compact, addOpen, panelOpen, step])
   useEffect(() => { if (!compact) { setMenuOpen(false); setAddOpen(false) } }, [compact])
   useEffect(() => { if (!addOpen) setTargetWallId(null) }, [addOpen])
-  const modalOpen = Boolean(shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen || measureOpen)
+  const modalOpen = Boolean(shoppingOpen || newProjectOpen || requestOpen || importOpen || customItemOpen || measureOpen || lengthWallId)
   const openStep = (next: Step) => {
     if (compact && panelOpen && step === next) { setPanelOpen(false); return }
     setStep(next); setPanelOpen(true); setDetailsOpen(false); setViewMenuOpen(false)
     if (next !== 'room' && activeTool !== 'select') setActiveTool('select')
   }
   const chooseTool = (tool: Tool) => {
-    clearSelection(); setActiveTool(tool); setViewMenuOpen(false)
-    if (tool === 'wall') setViewMode('2d')
-    if (compact) { setPanelOpen(false); setMenuOpen(false); setAddOpen(false); if (tool === 'wall') setWelcomeDismissed(true) }
+    clearSelection(); setActiveTool(tool); setViewMenuOpen(false); setHangItem(null)
+    if (tool !== 'sketch') setSketchStrokes([])
+    if (tool === 'sketch') setViewMode('2d')
+    if (BUILD_TOOLS.includes(tool)) setWelcomeDismissed(true)
+    if (compact) { setPanelOpen(false); setMenuOpen(false); setAddOpen(false) }
   }
   const openMobilePanel = (next: Step) => { setMenuOpen(false); setAddOpen(false); setDetailsOpen(false); setStep(next); setPanelOpen(true) }
   const openAddSheet = (wallId?: string) => {
@@ -1217,13 +1242,13 @@ function App() {
   }, [notice])
 
   useEffect(() => {
-    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !customItemOpen && !measureOpen) return
+    if (!shoppingOpen && !newProjectOpen && !requestOpen && !importOpen && !customItemOpen && !measureOpen && !lengthWallId) return
     const previous = document.activeElement as HTMLElement | null
     const panel = document.querySelector<HTMLElement>('.modal-card, .shopping-drawer')
     const elements = () => Array.from(document.querySelector('.modal-card, .shopping-drawer')?.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, textarea') || [])
     const frame = requestAnimationFrame(() => (panel?.querySelector<HTMLElement>('input') || elements()[0])?.focus())
     const keys = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(null); setRequestOpen(false); setImportOpen(false); setCustomItemOpen(false); setMeasureOpen(false) }
+      if (event.key === 'Escape') { event.preventDefault(); setShoppingOpen(false); setNewProjectOpen(null); setRequestOpen(false); setImportOpen(false); setCustomItemOpen(false); setMeasureOpen(false); setLengthWallId(null) }
       if (event.key !== 'Tab') return
       const targets = elements(), first = targets[0], last = targets[targets.length - 1]
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
@@ -1231,7 +1256,7 @@ function App() {
     }
     document.addEventListener('keydown', keys)
     return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', keys); previous?.focus() }
-  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen, customItemOpen, measureOpen])
+  }, [shoppingOpen, newProjectOpen, requestOpen, importOpen, customItemOpen, measureOpen, lengthWallId])
 
   const selectedObjects = project.objects.filter((object) => selectedIds.includes(object.id))
   const selectedProductObjects = selectedObjects.filter((object) => object.productId)
@@ -1644,30 +1669,45 @@ function App() {
     setNotice('Purchase request sent. Follow updates from your profile.')
   }
 
-  const drawWall = (x: number, z: number, endX: number, endZ: number) => {
+  const buildAction = (action: BuildAction) => {
     const current = projectRef.current
-    if (current.features.length >= 200) { setNotice('This prototype supports up to 200 walls and openings.'); return false }
-    const a = snapBuildPoint({ x, z }, current), b = snapBuildPoint({ x: endX, z: endZ }, current)
-    if (Math.hypot(a.x - b.x, a.z - b.z) < 0.25) return false
-    const same = (p: Point, q: Point) => Math.hypot(p.x - q.x, p.z - q.z) < 0.001
-    if (current.features.filter((f) => f.type === 'wall').some((f) => { const [c, d] = wallEndpoints(f); return (same(a, c) && same(b, d)) || (same(a, d) && same(b, c)) })) return false
-    const wall = wallFromPoints(makeId('wall'), a, b, current.ceilingHeight)
-    const next = { ...current, features: [...current.features, wall] }
+    if (action.tool === 'sketch') { setSketchStrokes((strokes) => [...strokes, action.points]); return }
+    if (action.tool === 'erase') {
+      const next = eraseWallSegment(current, action.a, action.b, () => makeId('wall'))
+      if (next === current) setNotice(`Drag along a wall to remove part of it, or ${compact ? 'tap' : 'click'} a wall to remove all of it.`)
+      else setProject(next)
+      return
+    }
+    if (current.features.length >= 196) { setNotice('This prototype supports up to 200 walls and openings.'); return }
+    const { a, b } = action
+    if (action.tool === 'room' && (Math.abs(b.x - a.x) < 0.5 || Math.abs(b.z - a.z) < 0.5)) { setNotice('Drag a bigger box: at least 50 cm each way.'); return }
+    const corners = [a, { x: b.x, z: a.z }, b, { x: a.x, z: b.z }]
+    const segments: [Point, Point][] = action.tool === 'room' ? corners.map((p, i) => [p, corners[(i + 1) % 4]]) : [[a, b]]
+    const next = segments.reduce((project, [p, q]) => addWallSegment(project, p, q, makeId('wall')), current)
+    if (next === current) return
     const closesRoom = getFloorRegions(next.features).length > getFloorRegions(current.features).length
     if (closesRoom) setNotice(compact ? 'Room finished. Tap a wall to add a door or window, or tap Add furniture.' : 'Room enclosed. Your floor is ready to furnish.')
     if (closesRoom && compact) setActiveTool('select')
     setProject(next)
-    return closesRoom
   }
+  const finishSketch = () => {
+    const segments = wallsFromSketch(sketchStrokes)
+    setSketchStrokes([])
+    if (!segments.length) { setNotice('Draw the outline of your room first.'); return }
+    setProject(segments.reduce((project, [a, b]) => addWallSegment(project, a, b, makeId('wall')), projectRef.current))
+    clearSelection(); setActiveTool('select'); setWelcomeDismissed(true); setCameraVersion((value) => value + 1)
+    setNotice(`${segments.length} walls made from your sketch. ${compact ? 'Tap' : 'Click'} a wall's length to type its exact size.`)
+  }
+  const eraseFeature = (id: string) => setProject((current) => refreshOpenings({ ...current, features: current.features.filter((feature) => feature.id !== id && feature.wallId !== id) }))
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen || customItemOpen || measureOpen) return
-      if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); setHangItem(null); endDrag(); return }
+      if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen || customItemOpen || measureOpen || lengthWallId) return
+      if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); setHangItem(null); setSketchStrokes([]); endDrag(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject(); return }
       if (event.key === '/') { event.preventDefault(); setStep('furnish'); setPanelOpen(true); requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.search-field input')?.focus()); return }
       if (selectedFeatureId && (event.key === 'Delete' || event.key === 'Backspace')) { event.preventDefault(); deleteFeature(); return }
-      const shortcut = !event.metaKey && !event.ctrlKey && !event.altKey ? ({ v: 'select', w: 'wall', d: 'door', n: 'window' } as Record<string, Tool>)[event.key.toLowerCase()] : undefined
+      const shortcut = !event.metaKey && !event.ctrlKey && !event.altKey ? ({ v: 'select', w: 'wall', b: 'room', e: 'erase', d: 'door', n: 'window' } as Record<string, Tool>)[event.key.toLowerCase()] : undefined
       if (shortcut) { chooseTool(shortcut); return }
       if (selectedObjects.length > 1) {
         if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelected(); return }
@@ -1768,9 +1808,13 @@ function App() {
   ]
   const stepNav = (className: string) => <nav className={className} aria-label="Planner steps">{steps.map((item, index) => <button key={item.id} type="button" className={`step-button ${step === item.id && panelOpen ? 'step-active' : ''} ${stepDone[item.id] ? 'step-done' : ''}`} aria-current={step === item.id ? 'step' : undefined} aria-label={`${item.label} step`} onClick={() => openStep(item.id)}><span className="step-index">{stepDone[item.id] ? <Icon name="check" size={12} /> : index + 1}</span><span className="step-text"><strong>{item.label}</strong><small>{item.meta}</small></span></button>)}</nav>
   const collapsePanel = compact ? undefined : () => setPanelOpen(false)
-  const tools: [Tool, string, IconName, string][] = [['select', 'Select', 'pointer', 'V'], ['wall', 'Wall', 'wall', 'W'], ['door', 'Door', 'door', 'D'], ['window', 'Window', 'window', 'N']]
+  const tools: [Tool, string, IconName, string][] = [['select', 'Select', 'pointer', 'V'], ['wall', 'Wall', 'wall', 'W'], ['room', 'Room', 'grid', 'B'], ['erase', 'Erase', 'trash', 'E'], ['door', 'Door', 'door', 'D'], ['window', 'Window', 'window', 'N']]
   const tap = compact ? 'Tap' : 'Click'
-  const canvasTip = hangItem ? `Click the wall where the ${roomItemShape(hangItem)?.name || 'item'} should go · Esc cancels` : activeTool === 'wall' ? compact ? 'Tap each corner in turn · drag to draw a single wall' : 'Click each corner in turn · drag to draw one wall · Shift keeps it straight · Esc stops'
+  const canvasTip = hangItem ? `Click the wall where the ${roomItemShape(hangItem)?.name || 'item'} should go · Esc cancels`
+    : activeTool === 'wall' ? 'Drag along the grid to draw a wall · ends join nearby walls · right-drag turns the 3D view · Esc stops'
+    : activeTool === 'room' ? 'Drag a box to add a room with four walls · it shares walls with rooms next to it'
+    : activeTool === 'erase' ? 'Drag along a wall to remove part of it · click a wall, door or window to remove it'
+    : activeTool === 'sketch' ? 'Draw the outline of your room · lift and keep going · then press Make walls'
     : activeTool !== 'select' ? `${tap} any wall to place a ${activeTool}`
       : selectedObject && isWallMounted(selectedObject) ? 'Drag to slide it along the wall · set its height in the panel · Delete removes'
       : selectedObject ? compact ? 'Drag to move · use the toolbar to rotate or remove' : 'Drag to move · R rotates · arrow keys nudge · Delete removes'
@@ -1875,13 +1919,21 @@ function App() {
     <p>Start with one room. Doors, windows and furniture come next, and you can change everything later.</p>
     <div className="m-welcome-options">
       <button type="button" className="m-option m-option-primary" onClick={() => setMeasureOpen(true)}><Icon name="wall" size={26} /><span><strong>Measure my room</strong><small>Walk along each wall with your phone or a tape measure</small></span></button>
-      <button type="button" className="m-option" onClick={() => chooseTool('wall')}><Icon name="pointer" size={26} /><span><strong>Draw it on screen</strong><small>Tap each corner of the room on a grid</small></span></button>
+      <button type="button" className="m-option" onClick={() => chooseTool('sketch')}><Icon name="pointer" size={26} /><span><strong>Sketch it with your finger</strong><small>Draw the outline roughly; we straighten it into walls</small></span></button>
+      <button type="button" className="m-option" onClick={() => chooseTool('wall')}><Icon name="wall" size={26} /><span><strong>Draw it on screen</strong><small>Drag along a grid to place each wall exactly</small></span></button>
       <button type="button" className="m-option" onClick={() => openMobilePanel('room')}><Icon name="grid" size={26} /><span><strong>Enter a room size</strong><small>Type the width and length of a simple room</small></span></button>
       <button type="button" className="m-option" onClick={() => setNewProjectOpen('living-room')}><Icon name="home" size={26} /><span><strong>Use an example room</strong><small>Start from a ready-made living room</small></span></button>
     </div>
     <div className="m-welcome-links"><button type="button" className="text-button" onClick={() => setImportOpen(true)}>Import a floor plan</button><a className="text-button" href="/profile">My saved designs</a></div>
   </section>
-  const drawingHint = activeTool === 'wall' ? 'Tap each corner of the room in turn. Tap the first corner again to finish.' : `Tap a wall to place the ${activeTool}.`
+  const drawingHint = activeTool === 'wall' ? 'Drag your finger along the grid to draw a wall. Two fingers move the view.'
+    : activeTool === 'room' ? 'Drag a box to add a room with four walls.'
+    : activeTool === 'erase' ? 'Drag along a wall to remove part of it, or tap a wall to remove it.'
+    : `Tap a wall to place the ${activeTool}.`
+  const sketchBar = <div className="m-drawbar m-drawbar-stack" role="toolbar" aria-label="Sketch">
+    <span>{sketchStrokes.length ? 'Keep drawing, or make the walls when the outline is done.' : 'Draw the outline of your room with your finger. Lift and keep going any time.'}</span>
+    <div className="m-drawbar-actions"><button type="button" className="secondary-button" onClick={() => sketchStrokes.length ? setSketchStrokes([]) : chooseTool('select')}>{sketchStrokes.length ? 'Clear' : 'Cancel'}</button><button type="button" className="primary-button" disabled={!sketchStrokes.length} onClick={finishSketch}>Make walls</button></div>
+  </div>
 
   return (
     <div className={`app-shell ${compact ? 'app-compact' : panelOpen ? 'panel-open' : ''}`}>
@@ -1905,7 +1957,7 @@ function App() {
 
         <main className="workspace">
           <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={wallCount}>
-            <RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={tapEmptyCanvas} onSelectObject={selectObject} onSelectFeature={tapFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} onDragCancel={cancelDrag} addPoint={addPoint} onAddAt={addAt} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onDrawWall={drawWall} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} />
+            <RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={tapEmptyCanvas} onSelectObject={selectObject} onSelectFeature={tapFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} onDragCancel={cancelDrag} addPoint={addPoint} onAddAt={addAt} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onBuild={buildAction} sketch={sketchStrokes} onErase={eraseFeature} onEditLength={setLengthWallId} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} />
             <div className="canvas-label">{viewMode === '3d' ? '3D view' : 'Floor plan'} · {activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</div>
           </div>
 
@@ -1929,11 +1981,12 @@ function App() {
               <span className="empty-icon"><Icon name="wall" size={22} /></span>
               <strong>Your space starts here</strong>
               <span>Click to place your first corner, then each next corner. Close the outline to create the floor — or enter a size in the panel.</span>
-              <div className="quick-start-actions"><button type="button" className="secondary-button" onClick={() => setMeasureOpen(true)}><Icon name="wall" /> Measure my room</button><button type="button" className="secondary-button empty-import-button" onClick={() => setImportOpen(true)}><Icon name="upload" /> Import floor plan</button><button type="button" className="secondary-button empty-import-button" onClick={() => setNewProjectOpen('living-room')}><Icon name="home" /> Use a room template</button></div>
+              <div className="quick-start-actions"><button type="button" className="secondary-button" onClick={() => setMeasureOpen(true)}><Icon name="wall" /> Measure my room</button><button type="button" className="secondary-button" onClick={() => chooseTool('sketch')}><Icon name="pointer" /> Sketch the outline</button><button type="button" className="secondary-button empty-import-button" onClick={() => setImportOpen(true)}><Icon name="upload" /> Import floor plan</button><button type="button" className="secondary-button empty-import-button" onClick={() => setNewProjectOpen('living-room')}><Icon name="home" /> Use a room template</button></div>
             </div>}
             <div className="canvas-tip">{canvasTip}</div>
             {hasSelection && <aside className="inspector-card" aria-label="Selection details">{inspectorContent}{selectedObject && selectionWarnings.length > 0 && <section className="inspector-section"><div className="section-label-row"><span>Placement checks</span></div>{selectionWarnings.map((warning, index) => <div className="health-row warning" key={index}><span className="health-dot" />{warning.message}</div>)}</section>}</aside>}
           </>}
+          {!compact && activeTool === 'sketch' && sketchBar}
           {dragProduct && <div className="drop-prompt">{floors.length ? 'Drop inside your room' : 'Close your walls before furnishing'}</div>}
         </main>
       </div>
@@ -1949,7 +2002,12 @@ function App() {
             </div>
           </div>
           {hangItem ? <div className="m-drawbar" role="toolbar" aria-label="Hang on a wall"><span>Tap the wall where the {roomItemShape(hangItem)?.name || 'item'} should go.</span><button type="button" className="primary-button" onClick={() => setHangItem(null)}>Cancel</button></div>
-            : activeTool !== 'select' ? <div className="m-drawbar" role="toolbar" aria-label="Drawing tools"><span>{drawingHint}</span><button type="button" className="primary-button" onClick={() => chooseTool('select')}>Done</button></div>
+            : activeTool === 'sketch' ? sketchBar
+            : activeTool !== 'select' ? <div className="m-drawbar m-drawbar-stack" role="toolbar" aria-label="Drawing tools"><span>{drawingHint}</span>
+              <div className="m-drawbar-actions">
+                {BUILD_TOOLS.includes(activeTool) && <div className="m-build-tools" role="group" aria-label="Wall tools">{(['wall', 'room', 'erase'] as Tool[]).map((tool) => <button key={tool} type="button" aria-pressed={activeTool === tool} onClick={() => chooseTool(tool)}>{tool === 'wall' ? 'Wall' : tool === 'room' ? 'Room' : 'Erase'}</button>)}</div>}
+                <button type="button" className="primary-button" onClick={() => chooseTool('select')}>Done</button>
+              </div></div>
             : hasSelection ? !panelOpen && !detailsOpen && <div className="selection-dock"><div className="dock-bar">{selectionActions}<button className="dock-details" aria-label="Open detailed inspector" title="Details" onClick={() => setDetailsOpen(true)}><Icon name="sliders" /><span>Details</span></button></div></div>
               : !addOpen && !panelOpen && !menuOpen && <div className="m-bottom">
                 <div className="m-view" role="group" aria-label="View mode"><button type="button" aria-pressed={viewMode === '2d'} onClick={() => setViewMode('2d')}>Plan</button><button type="button" aria-pressed={viewMode === '3d'} onClick={() => setViewMode('3d')}>3D</button></div>
@@ -1971,6 +2029,7 @@ function App() {
       {customItemOpen && <ExistingItemModal onClose={() => setCustomItemOpen(false)} onCreate={addCustomObject} />}
       {importOpen && <PlanImportModal onClose={() => setImportOpen(false)} onImport={importProject} />}
       {twistLabel && <div className="twist-label" style={{ left: twistLabel.x, top: twistLabel.y }} aria-hidden="true">{twistLabel.degrees}°</div>}
+      {lengthWallId && <WallLengthDialog wall={project.features.find((feature) => feature.id === lengthWallId)} onClose={() => setLengthWallId(null)} onSet={(length) => { const next = setWallLength(projectRef.current, lengthWallId, length); if (next === projectRef.current) setNotice('That length would squeeze a neighbouring wall too short.'); else setProject(next); setLengthWallId(null) }} />}
       {measureOpen && <MeasureRoom name={project.name} ceilingHeight={project.ceilingHeight} replacing={project.features.length > 0 || project.objects.length > 0} onClose={() => setMeasureOpen(false)} onBuild={buildMeasuredRoom} />}
     </div>
   )

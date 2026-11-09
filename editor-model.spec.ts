@@ -1,8 +1,9 @@
 import { test, expect } from '@playwright/test'
-import { attachOpening, emptyProject, getFloorRegions, fitsFloor, hangOnWall, isProject, migrateProject, moveWallEndpoint, openingSizes, openingStyle, overlaps, placeObject, placementWarnings, refreshOpenings, rotateObjects, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState, type RoomFeature } from './src/editor'
+import { addWallSegment, attachOpening, emptyProject, eraseWallSegment, getFloorRegions, fitsFloor, hangOnWall, setWallLength, snapWallDrag, isProject, migrateProject, moveWallEndpoint, openingSizes, openingStyle, overlaps, placeObject, placementWarnings, refreshOpenings, rotateObjects, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState, type RoomFeature } from './src/editor'
 
 import { analyzePlanPixels, createProjectFromPlan, type PlanAnalysis } from './src/planImport'
 import { normalizePlanVisionResult } from './scripts/plan-vision'
+import { wallsFromSketch } from './src/sketch'
 import { decidePurchaseItems, estimatePurchase, purchaseItemId, reviewPurchaseItems, type PurchaseItem } from './src/purchase'
 
 function planImage(rects: number[][]) {
@@ -341,4 +342,41 @@ test('wall items hang flush on the room side, follow their wall, and warn about 
   const detached = refreshOpenings({ ...withArt, features: project.features.filter((f) => f.id !== 'wall-0') })
   expect(detached.objects[0].wallId).toBeUndefined()
   expect(placementWarnings(detached).some((w) => w.message.includes('no longer on a wall'))).toBe(true)
+})
+
+test('Sims-style wall drags snap to 45° and the grid, merge overlaps, erase parts, and set lengths', () => {
+  const empty = emptyProject()
+  expect(snapWallDrag({ x: 0, z: 0 }, { x: 2.13, z: 0.2 }, empty)).toEqual({ x: 2.25, z: 0 })
+  expect(snapWallDrag({ x: 0, z: 0 }, { x: 1.4, z: 1.6 }, empty)).toEqual({ x: 1.5, z: 1.5 })
+  let p = addWallSegment(empty, { x: 0, z: 0 }, { x: 2, z: 0 }, 'a')
+  p = addWallSegment(p, { x: 1, z: 0 }, { x: 3, z: 0 }, 'b')
+  expect(p.features).toHaveLength(1)
+  expect(p.features[0]).toMatchObject({ id: 'a', width: 3 })
+  expect(addWallSegment(p, { x: 0.5, z: 0 }, { x: 1.5, z: 0 }, 'c')).toBe(p)
+  p = { ...p, features: [...p.features, attachOpening({ id: 'd', type: 'door', x: 0.5, z: 0, rotation: 0, width: 0.8, height: 2.1 }, p), attachOpening({ id: 'w', type: 'window', x: 2.4, z: 0, rotation: 0, width: 0.6, height: 1, sillHeight: 1 }, p)] }
+  let n = 0
+  const erased = eraseWallSegment(p, { x: 1, z: 0 }, { x: 2, z: 0 }, () => `piece-${n++}`)
+  const walls = erased.features.filter((f) => f.type === 'wall').map((f) => f.width).sort()
+  expect(walls).toEqual([1, 1])
+  expect(erased.features.find((f) => f.id === 'w')!.wallId).toBe('piece-0')
+  expect(erased.features.find((f) => f.id === 'd')!.wallId).toBe('a')
+  const rect = loop([{ x: -2, z: -1.5 }, { x: 2, z: -1.5 }, { x: 2, z: 1.5 }, { x: -2, z: 1.5 }])
+  const longer = setWallLength({ ...emptyProject(), features: rect }, 'wall-0', 5)
+  expect(getFloorRegions(longer.features)[0].area).toBeCloseTo(15)
+  expect(longer.features.find((f) => f.id === 'wall-0')!.width).toBeCloseTo(5)
+})
+
+test('a wobbly freehand square becomes four straight closed walls on the grid', () => {
+  const corners = [{ x: -2, z: -1.5 }, { x: 2, z: -1.5 }, { x: 2, z: 1.5 }, { x: -2, z: 1.5 }]
+  const stroke: Point[] = []
+  corners.forEach((a, i) => { const b = corners[(i + 1) % 4]; for (let t = 0; t < 1; t += 0.05) stroke.push({ x: a.x + (b.x - a.x) * t + Math.sin(t * 9 + i) * 0.06, z: a.z + (b.z - a.z) * t + Math.cos(t * 7 + i) * 0.06 }) })
+  stroke.push({ x: -1.85, z: -1.4 })
+  const segments = wallsFromSketch([stroke])
+  expect(segments).toHaveLength(4)
+  let project = emptyProject()
+  segments.forEach(([a, b], i) => { project = addWallSegment(project, a, b, `s${i}`) })
+  expect(getFloorRegions(project.features)).toHaveLength(1)
+  expect(getFloorRegions(project.features)[0].area).toBeCloseTo(12, 0)
+  expect(project.features.every((f) => Math.abs(Math.sin(2 * f.rotation)) < 1e-9)).toBe(true)
+  expect(wallsFromSketch([[{ x: 0, z: 0 }, { x: 0.1, z: 0 }]])).toEqual([])
 })

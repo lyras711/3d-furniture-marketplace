@@ -155,3 +155,14 @@
 - Dragging slides along the item's own wall; in 3D it also moves up and down on the wall plane. Group drags leave wall items in place. Duplicate offsets along the wall. Details shows "Height above floor (cm)" instead of X/Z/Rotation.
 - With "Lower front walls" on, wall items whose wall faces the camera are hidden, so they do not float. The render studio honours `elevation`.
 - Five temporary sample items (`art-horizon`, `mirror-round`, `shelf-float`, `tv-wall-55`, `cabinet-upper`) follow the existing "Formivo sample / Formivo temporary / price null / illustrative dimensions" convention, with procedural geometry and SVG thumbnails. They are not retailer products. The catalogue now has 27 pieces (Kitchen 4).
+
+# Sims-style wall building, sketch and basket badges (2026-11-09)
+
+- Build tools (`BUILD_TOOLS`): **Wall** (W) is one press–drag–release per straight wall. It snaps to 45° directions and the 25 cm grid (`snapWallDrag`), or onto a nearby wall end. Tap-to-chain is gone. **Room** (B) drags a box into four walls. **Erase** (E) drags along a wall to remove that part (`eraseWallSegment` keeps leftover pieces ≥ 25 cm and moves openings and wall items onto them), or taps a wall/door/window to remove it.
+  - All build tools work in plan view and in 3D (raycast to the floor). While one is active, the left button / one finger draws. The camera turns with the right button / two fingers (3D) or pans (plan view). OrbitControls gets an unknown action (`NO_ACTION`) for LEFT/ONE.
+  - Choosing Wall no longer forces plan view. On compact layouts the drawbar has a Wall/Room/Erase switch plus Done, and closing a room returns to Select.
+- `addWallSegment` merges a new wall with collinear walls it overlaps or touches, so redrawing never doubles walls. Adjacent room boxes share walls; for example, two touching boxes give 5 walls. Openings and wall items move onto the merged wall by world position.
+- Wall-length labels (plan view, Select tool) and the selected wall's length tag are buttons ("Change wall length, now X m"). They open the "Wall length" dialog, and `setWallLength` moves the far corner and shifts the next wall with it so the room stays closed. Labels sit 46 cm outside the wall so they do not catch taps meant for the wall.
+- Freehand sketching is a start option only: "Sketch it with your finger" on the mobile welcome, "Sketch the outline" on the desktop empty plan; it uses tool `sketch` (plan view). Strokes collect until "Make walls". `wallsFromSketch` (src/sketch.ts) simplifies (RDP), squares directions within 12° of 45° steps, re-intersects corners, closes near-closed strokes and snaps to the grid.
+- Catalogue items in the basket show a green `.basket-badge` above them in plan and 3D views.
+- Tests: touch helpers `touchSquare()` (four drags) and `touchStroke()`. Model tests cover snapping, merge, erase split, length edit and sketch straightening.

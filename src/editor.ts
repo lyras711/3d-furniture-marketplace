@@ -346,3 +346,95 @@ export function isProject(value: unknown): value is ProjectState {
   const p = value as ProjectState
   return (p.schemaVersion === undefined || p.schemaVersion === 2 || p.schemaVersion === 3) && typeof p.name === 'string' && typeof p.roomType === 'string' && [p.width, p.length].every((v) => Number.isFinite(v) && v >= 2 && v <= 40) && Number.isFinite(p.ceilingHeight) && p.ceilingHeight >= 2 && p.ceilingHeight <= 6 && typeof p.floorMaterial === 'string' && typeof p.wallMaterial === 'string' && (p.roomLabels === undefined || (Array.isArray(p.roomLabels) && p.roomLabels.length <= 40 && p.roomLabels.every((label) => label && typeof label.id === 'string' && typeof label.name === 'string' && [label.x, label.z, label.confidence].every(Number.isFinite) && label.confidence >= 0 && label.confidence <= 1))) && (p.planImport === undefined || (typeof p.planImport === 'object' && p.planImport !== null && ['local', 'vertex-ai'].includes(p.planImport.provider) && Number.isFinite(p.planImport.confidence) && p.planImport.confidence >= 0 && p.planImport.confidence <= 1 && typeof p.planImport.scaleCalibrated === 'boolean')) && Array.isArray(p.objects) && p.objects.length <= 1000 && p.objects.every((o) => isRoomObject(o)) && Array.isArray(p.features) && p.features.length <= 200 && p.features.every((f) => f && typeof f.id === 'string' && ['wall', 'door', 'window'].includes(f.type) && [f.x, f.z, f.rotation, f.width, f.height].every(Number.isFinite) && f.width >= 0.25 && f.width <= 60 && f.height >= 0.3 && f.height <= 6 && (f.sillHeight === undefined || Number.isFinite(f.sillHeight)) && (f.wallId === undefined || typeof f.wallId === 'string') && (f.wallOffset === undefined || Number.isFinite(f.wallOffset)) && (f.thickness === undefined || (Number.isFinite(f.thickness) && f.thickness >= 0.02 && f.thickness <= 2)) && (f.style === undefined || (f.type === 'door' ? doorStyles : f.type === 'window' ? windowStyles : []).includes(f.style as never)) && (f.hinge === undefined || ['left', 'right'].includes(f.hinge)) && (f.swing === undefined || ['in', 'out'].includes(f.swing)))
 }
+
+// ── Sims-style wall building ─────────────────────────────────────────────
+const GRID_STEP = 0.25
+const unit = (p: Point) => { const length = Math.hypot(p.x, p.z) || 1; return { x: p.x / length, z: p.z / length } }
+const dot = (a: Point, b: Point) => a.x * b.x + a.z * b.z
+const isWall = (f: RoomFeature) => f.type === 'wall'
+
+/** End point of a wall drag: along the nearest 45° direction, on the 25 cm grid, or onto a nearby existing wall end. */
+export function snapWallDrag(start: Point, raw: Point, project: ProjectState): Point {
+  const ends = project.features.filter(isWall).flatMap(wallEndpoints).filter((p) => distance(p, start) > EPS)
+  const near = ends.sort((a, b) => distance(a, raw) - distance(b, raw))[0]
+  if (near && distance(near, raw) < 0.23) return near
+  const d = sub(raw, start)
+  if (Math.hypot(d.x, d.z) < 0.05) return start
+  const angle = Math.round(Math.atan2(d.z, d.x) / (Math.PI / 4)) * (Math.PI / 4)
+  const dir = { x: Math.round(Math.cos(angle)), z: Math.round(Math.sin(angle)) }
+  // Per-axis distance along the direction, rounded to whole grid steps so both ends stay on the grid.
+  const steps = Math.max(0, Math.round(dot(d, dir) / dot(dir, dir) / GRID_STEP))
+  return { x: clamp(start.x + dir.x * steps * GRID_STEP, -project.width / 2, project.width / 2), z: clamp(start.z + dir.z * steps * GRID_STEP, -project.length / 2, project.length / 2) }
+}
+
+const collinear = (wall: RoomFeature, a: Point, dir: Point) => wallEndpoints(wall).every((p) => Math.abs(cross(dir, sub(p, a))) < 0.01)
+/** Re-bases openings and wall items from `fromIds` onto wall `to` by their world position. */
+function reassignToWall(project: ProjectState, fromIds: Set<string>, to: RoomFeature): ProjectState {
+  const along = (p: Point) => (p.x - to.x) * Math.cos(to.rotation) - (p.z - to.z) * Math.sin(to.rotation)
+  return {
+    ...project,
+    features: project.features.map((f) => f.type !== 'wall' && f.wallId && fromIds.has(f.wallId) ? { ...f, wallId: to.id, wallOffset: along(f) } : f),
+    objects: project.objects.map((o) => o.wallId && fromIds.has(o.wallId) ? { ...o, wallId: to.id, wallOffset: along(o) } : o),
+  }
+}
+
+/** Adds a wall from a to b. Collinear walls it overlaps or touches are merged into one, so redrawing over a wall never doubles it. */
+export function addWallSegment(project: ProjectState, a: Point, b: Point, id: string): ProjectState {
+  const length = distance(a, b)
+  if (length < 0.25 || project.features.length >= 200) return project
+  const dir = unit(sub(b, a))
+  let from = 0, to = length
+  const merged = project.features.filter(isWall).filter((wall) => {
+    if (!collinear(wall, a, dir)) return false
+    const [c, d] = wallEndpoints(wall).map((p) => dot(sub(p, a), dir))
+    if (Math.max(c, d) < -0.001 || Math.min(c, d) > length + 0.001) return false
+    from = Math.min(from, c, d); to = Math.max(to, c, d)
+    return true
+  })
+  const height = merged[0]?.height ?? project.ceilingHeight
+  const wall = { ...(merged[0] ?? {}), ...wallFromPoints(merged[0]?.id ?? id, { x: a.x + dir.x * from, z: a.z + dir.z * from }, { x: a.x + dir.x * to, z: a.z + dir.z * to }, height) }
+  if (merged.length === 1 && Math.abs(merged[0].width - wall.width) < 0.001) return project
+  const ids = new Set(merged.map((m) => m.id))
+  const next = { ...project, features: [...project.features.filter((f) => !ids.has(f.id)), wall] }
+  return refreshOpenings(reassignToWall(next, ids, wall))
+}
+
+/** Removes the part of any collinear wall covered by the drag from a to b; leftover pieces of at least 25 cm stay. */
+export function eraseWallSegment(project: ProjectState, a: Point, b: Point, makeId: () => string): ProjectState {
+  const length = distance(a, b)
+  if (length < 0.1) return project
+  const dir = unit(sub(b, a))
+  let next = project
+  for (const wall of project.features.filter(isWall)) {
+    if (!collinear(wall, a, dir)) continue
+    const [p, q] = wallEndpoints(wall), tp = dot(sub(p, a), dir), tq = dot(sub(q, a), dir)
+    const lo = Math.min(tp, tq), hi = Math.max(tp, tq)
+    if (hi <= 0.001 || lo >= length - 0.001) continue
+    const at = (t: number) => ({ x: a.x + dir.x * t, z: a.z + dir.z * t })
+    const pieces = [[lo, Math.max(lo, 0)], [Math.min(hi, length), hi]].filter(([s, e]) => e - s >= 0.25).map(([s, e]) => wallFromPoints('', at(s), at(e), wall.height))
+    const kept = pieces.map((piece, i) => ({ ...wall, ...piece, id: i === 0 ? wall.id : makeId() }))
+    // Openings and wall items inside the removed part go with it (items are detached); the rest move to the piece they sit on.
+    const inGap = (f: { x: number; z: number }) => { const t = dot(sub(f, a), dir); return t > Math.max(lo, 0) && t < Math.min(hi, length) }
+    next = { ...next, features: [...next.features.filter((f) => f.id !== wall.id && !(f.wallId === wall.id && inGap(f))), ...kept], objects: next.objects.map((o) => o.wallId === wall.id && inGap(o) ? { ...o, wallId: undefined } : o) }
+    kept.forEach((piece) => {
+      const [s, e] = wallEndpoints(piece).map((point) => dot(sub(point, a), dir)), within = (f: { x: number; z: number }) => { const t = dot(sub(f, a), dir); return t >= Math.min(s, e) - 0.001 && t <= Math.max(s, e) + 0.001 }
+      next = { ...next, features: next.features.map((f) => f.type !== 'wall' && f.wallId === wall.id && within(f) ? { ...f, wallId: piece.id, wallOffset: undefined } : f), objects: next.objects.map((o) => o.wallId === wall.id && within(o) ? reassignToWall({ ...next, objects: [o] }, new Set([wall.id]), piece).objects[0] : o) }
+    })
+  }
+  return next === project ? project : refreshOpenings(next)
+}
+
+/** Sets a wall's length by moving its end corner along the wall, and shifting the next wall with it so a closed room stays closed. */
+export function setWallLength(project: ProjectState, id: string, length: number): ProjectState {
+  const wall = project.features.find((f) => f.id === id && isWall(f))
+  if (!wall || !Number.isFinite(length) || length < 0.25) return project
+  const [a, b] = wallEndpoints(wall), dir = unit(sub(b, a)), delta = { x: dir.x * (length - wall.width), z: dir.z * (length - wall.width) }
+  const move = (p: Point) => ({ x: p.x + delta.x, z: p.z + delta.z })
+  const neighbour = project.features.filter(isWall).find((f) => f.id !== id && wallEndpoints(f).some((p) => distance(p, b) < 0.001))
+  let result = moveWallEndpoint(project, id, b, move(b))
+  if (neighbour) {
+    const far = wallEndpoints(neighbour).find((p) => distance(p, b) >= 0.001)
+    if (far && distance(far, a) > 0.001) result = moveWallEndpoint(result, neighbour.id, far, move(far))
+  }
+  return result
+}

@@ -604,3 +604,16 @@ button svg { flex-shrink: 0; }
 .opening-hinge { width: 100%; margin-top: 8px; }
 .app-compact .opening-styles button { min-height: 84px; font-size: 13px; }
 .app-compact .opening-sizes button { min-height: 46px; font-size: 14px; }
+.m-drawbar-stack { flex-direction: column; align-items: stretch; gap: 10px; }
+.m-drawbar-actions { display: flex; align-items: center; gap: 8px; }
+.m-drawbar-actions .primary-button, .m-drawbar-actions .secondary-button { flex: 1; }
+.m-drawbar-actions .secondary-button { min-height: 50px; font-size: 16px; background: transparent; color: #fff; border-color: #ffffff55; }
+.m-drawbar .primary-button:disabled { opacity: .5; }
+.m-build-tools { display: flex; flex: 2; padding: 3px; border-radius: 14px; background: #ffffff1a; }
+.m-build-tools button { flex: 1; min-height: 44px; border-radius: 11px; color: #fff; font-size: 15px; font-weight: 600; }
+.m-build-tools button[aria-pressed=true] { background: #fff; color: var(--ink); }
+.workspace > .m-drawbar { position: absolute; z-index: 6; left: 50%; right: auto; bottom: 64px; width: min(560px, calc(100% - 32px)); transform: translateX(-50%); }
+.wall-length-edit { cursor: pointer; border: 0; font: inherit; }
+.wall-length-edit:hover { background: var(--green); color: #fff; }
+.basket-badge { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--green); color: #fff; border: 2px solid #fff; box-shadow: var(--shadow); }
+.length-card { width: min(400px, 100%); }

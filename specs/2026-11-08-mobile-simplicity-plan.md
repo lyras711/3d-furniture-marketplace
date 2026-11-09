@@ -110,3 +110,4 @@ New `src/AddItemSheet.tsx`, a half-height bottom sheet:
   - Wall-mounted items as specified. Deviation: the sample items use the existing honest placeholder convention (no price, no retailer claim) rather than "sample prices".
   - Not done: snapping wall items to each other, moving a wall item to a different wall by dragging (re-hang it by deleting and re-adding), and wall items on curved or very short walls.
   - 97/97 tests pass.
+- 2026-11-09 — **User feedback round.** Basket badges on items; freehand sketch → walls (start option only); wall building redone Sims-style (drag-to-draw, Room box, Erase, tap a length to edit; works in 3D). User-confirmed choices: drag-to-draw replaces tap-to-chain; tools Room + Erase + tap-length; sketch is a start option only. 102/102 tests pass. Phase 6 (hints, undo toasts, user testing) is still open.

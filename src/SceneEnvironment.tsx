@@ -4,7 +4,7 @@ import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import { Edges, Environment, Grid, Html, Line } from '@react-three/drei'
 import { DoubleSide, Path, Plane, Raycaster, Shape, Vector2, Vector3 } from 'three'
 import { activeTouchCount, beyondSlop, cancelOnMultiTouch, isDoubleTap, TAP_MAX_TRAVEL_PX, type Tap } from './gestures'
-import { doorSwingSign, fitsFloor, floorColors, openingStyle, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
+import { doorSwingSign, fitsFloor, floorColors, openingStyle, snapWallDrag, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
 
 const floor = new Plane(new Vector3(0, 1, 0), 0)
 const dragType = 'application/x-forma-product'
@@ -49,8 +49,9 @@ function OpeningBody({ feature: f, low, y, openingHeight, thickness, selected, s
   </>
 }
 
-export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, lightingMode = 'default' }: {
+export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, onErase, onEditLength, lightingMode = 'default' }: {
   project: ProjectState; viewMode: '2d' | '3d'; cutaway: boolean; selectedId: string | null; tool: string
+  onErase?: (id: string) => void; onEditLength?: (id: string) => void
   onSelect: (id: string, point?: Point) => void; onPlace: (type: 'door' | 'window', x: number, z: number) => void
   onMoveEndpoint: (id: string, previous: Point, next: Point) => void
   onMoveOpening: (id: string, wallOffset: number) => void
@@ -58,9 +59,9 @@ export function Architecture({ project, viewMode, cutaway, selectedId, tool, onS
   lightingMode?: EditorLightingMode
 }) {
   const regions = useMemo(() => getFloorRegions(project.features), [project.features])
-  return <>{project.features.filter((f) => f.type === 'wall').map((wall) => <WallObject key={wall.id} {...{ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel, lightingMode, regions }} wall={wall} />)}</>
+  return <>{project.features.filter((f) => f.type === 'wall').map((wall) => <WallObject key={wall.id} {...{ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel, onErase, onEditLength, lightingMode, regions }} wall={wall} />)}</>
 }
-function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, lightingMode = 'default', wall, regions }: Parameters<typeof Architecture>[0] & { wall: RoomFeature; regions: FloorRegion[] }) {
+function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, onErase, onEditLength, lightingMode = 'default', wall, regions }: Parameters<typeof Architecture>[0] & { wall: RoomFeature; regions: FloorRegion[] }) {
   const { camera, controls } = useThree()
   const [front, setFront] = useState(false)
   const drag = useRef<Point | null>(null)
@@ -102,9 +103,10 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
   const xs = [...new Set([-wall.width / 2, wall.width / 2, ...openings.flatMap((f) => [(f.wallOffset || 0) - f.width / 2, (f.wallOffset || 0) + f.width / 2])])].sort((a, b) => a - b)
   const ys = [...new Set([0, height, ...openings.flatMap((f) => [Math.min(height, f.sillHeight || 0), Math.min(height, (f.sillHeight || 0) + f.height)])])].sort((a, b) => a - b)
   const click = (event: ThreeEvent<MouseEvent>, id: string) => {
-    if (tool === 'wall') return
+    if (GRID_TOOLS.includes(tool)) return
     event.stopPropagation()
     if (event.delta > TAP_MAX_TRAVEL_PX) return
+    if (tool === 'erase') { onErase?.(id); return }
     if (tool === 'door' || tool === 'window') onPlace(tool, event.point.x, event.point.z)
     else onSelect(id, { x: event.point.x, z: event.point.z })
   }
@@ -168,8 +170,8 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
       if (openings.some((f) => (f.sillHeight || 0) < 0.1 && Math.abs(x - (f.wallOffset || 0)) < f.width / 2)) return null
       return [-1, 1].map((side) => <mesh key={`${i}-${side}`} position={[x, 0.055, side * (thickness / 2 + 0.013)]} castShadow receiveShadow><boxGeometry args={[right - left, 0.11, 0.026]} /><meshStandardMaterial color="#e6dfd2" roughness={0.5} /></mesh>)
     })}
-    {selected && <Html center position={[0, height + 0.15, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{wall.width.toFixed(2)} m</span></Html>}
-    {plan && !selected && wall.width >= 0.6 && <Html center position={[0, height + 0.15, outside * (thickness / 2 + 0.24)]} style={{ pointerEvents: 'none' }}><span className="wall-length-tag">{wall.width.toFixed(2)} m</span></Html>}
+    {selected && <Html center position={[0, height + 0.15, 0]} style={{ pointerEvents: onEditLength ? 'auto' : 'none' }}>{onEditLength ? <button type="button" className="dimension-tag wall-length-edit" aria-label={`Change wall length, now ${wall.width.toFixed(2)} m`} onClick={() => onEditLength(wall.id)}>{wall.width.toFixed(2)} m ✎</button> : <span className="dimension-tag">{wall.width.toFixed(2)} m</span>}</Html>}
+    {plan && !selected && wall.width >= 0.6 && <Html center position={[0, height + 0.15, outside * (thickness / 2 + 0.46)]} style={{ pointerEvents: onEditLength && tool === 'select' ? 'auto' : 'none' }}>{onEditLength && tool === 'select' ? <button type="button" className="wall-length-tag wall-length-edit" aria-label={`Change wall length, now ${wall.width.toFixed(2)} m`} onClick={() => onEditLength(wall.id)}>{wall.width.toFixed(2)} m</button> : <span className="wall-length-tag">{wall.width.toFixed(2)} m</span>}</Html>}
     {selected && tool === 'select' && [-1, 1].map((side, index) => <mesh key={side} position={[side * wall.width / 2, plan ? 0.16 : height + 0.08, 0]}
       onPointerDown={(event) => {
         if (event.button !== 0 || (event.pointerType === 'touch' && activeTouchCount() > 1)) return
@@ -195,11 +197,17 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
   </group>
 }
 
-export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, lightingMode, onClear, onPlace, onDrop, onDrawWall, onAddAt }: {
+export type BuildAction = { tool: 'wall' | 'room' | 'erase'; a: Point; b: Point } | { tool: 'sketch'; points: Point[] }
+export const BUILD_TOOLS = ['wall', 'room', 'erase', 'sketch']
+/** Tools that draw on the build grid (the plan view shows the whole grid while they are active). */
+export const GRID_TOOLS = ['wall', 'room', 'sketch']
+
+export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, lightingMode, onClear, onPlace, onDrop, onBuild, sketch = [], onAddAt }: {
   project: ProjectState; viewMode: '2d' | '3d'; gridVisible: boolean; tool: string; snap: boolean; wallSnap: boolean; lightingMode: EditorLightingMode
   onClear: () => void; onPlace: (type: 'wall' | 'door' | 'window', x: number, z: number) => void
   onDrop: (id: string, x: number, z: number) => void
-  onDrawWall: (x: number, z: number, endX: number, endZ: number) => boolean
+  onBuild: (action: BuildAction) => void
+  sketch?: Point[][]
   onAddAt?: (x: number, z: number) => void
 }) {
   const lastTap = useRef<Tap | null>(null)
@@ -214,13 +222,10 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
   const regions = useMemo(() => getFloorRegions(project.features), [project.features])
   const editor3d = viewMode === '3d', day3d = editor3d && lightingMode === 'day', exterior3d = editor3d && lightingMode === 'default'
   const [ghost, setGhost] = useState<{ id: string; x: number; z: number; valid: boolean } | null>(null)
-  const wallStart = useRef<Point | null>(null)
-  const [wallEnd, setWallEnd] = useState<Point | null>(null)
-  const previewLength = wallStart.current && wallEnd ? Math.hypot(wallEnd.x - wallStart.current.x, wallEnd.z - wallStart.current.z) : 0
-  const previewWall = wallStart.current && wallEnd && previewLength >= 0.25 ? wallFromPoints('__preview__', wallStart.current, wallEnd, project.ceilingHeight) : null
-  const previewClosesRoom = previewWall ? getFloorRegions([...project.features, previewWall]).length > regions.length : false
-  const capture = useRef<{ element: Element; id: number } | null>(null)
-  const wallGesture = useRef<{ anchorOnly: boolean; moved: boolean; x: number; y: number; id: number; release: () => void } | null>(null)
+  // One press–drag–release gesture per wall, room box, erase stroke or sketch stroke (Sims-style), in plan or 3D view.
+  const building = BUILD_TOOLS.includes(tool)
+  const gesture = useRef<{ id: number; element: Element; start: Point; end: Point; points: Point[]; screen: { x: number; y: number }; moved: boolean; release: () => void } | null>(null)
+  const [preview, setPreview] = useState<{ start: Point; end: Point; points: Point[] } | null>(null)
   const current = useRef({ project, snap, wallSnap, onDrop, regions })
   current.current = { project, snap, wallSnap, onDrop, regions }
   useEffect(() => {
@@ -254,40 +259,39 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     canvas.addEventListener('dragover', over); canvas.addEventListener('dragleave', leave); canvas.addEventListener('drop', drop); window.addEventListener('dragend', leave)
     return () => { canvas.removeEventListener('dragover', over); canvas.removeEventListener('dragleave', leave); canvas.removeEventListener('drop', drop); window.removeEventListener('dragend', leave) }
   }, [camera, gl, invalidate])
-  const cancelWall = () => {
-    wallGesture.current?.release()
-    wallStart.current = null; wallGesture.current = null; setWallEnd(null)
-    if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
+  const stopGesture = () => {
+    const g = gesture.current
+    if (!g) return
+    g.release(); g.element.releasePointerCapture?.(g.id)
+    gesture.current = null; setPreview(null)
   }
   useEffect(() => {
-    if (tool !== 'wall') cancelWall()
-    const cancel = (event: KeyboardEvent) => { if (event.key === 'Escape') cancelWall() }
-    window.addEventListener('keydown', cancel); window.addEventListener('blur', cancelWall)
-    return () => { window.removeEventListener('keydown', cancel); window.removeEventListener('blur', cancelWall) }
-  }, [tool])
-  const wallPoint = (event: ThreeEvent<PointerEvent>) => {
-    const p = event.ray.intersectPlane(floor, new Vector3())
-    if (!p) return null
-    if (event.shiftKey && wallStart.current) {
-      if (Math.abs(p.x - wallStart.current.x) > Math.abs(p.z - wallStart.current.z)) p.z = wallStart.current.z
-      else p.x = wallStart.current.x
+    if (!building) stopGesture()
+    const cancel = (event: KeyboardEvent) => { if (event.key === 'Escape') stopGesture() }
+    window.addEventListener('keydown', cancel); window.addEventListener('blur', stopGesture)
+    return () => { window.removeEventListener('keydown', cancel); window.removeEventListener('blur', stopGesture) }
+  }, [building])
+  const floorPoint = (event: ThreeEvent<PointerEvent>) => { const p = event.ray.intersectPlane(floor, new Vector3()); return p ? { x: p.x, z: p.z } : null }
+  const endFor = (start: Point, raw: Point) => tool === 'sketch' ? raw : tool === 'room' ? snapBuildPoint(raw, project) : snapWallDrag(start, raw, project)
+  const previewWall = preview && tool === 'wall' && Math.hypot(preview.end.x - preview.start.x, preview.end.z - preview.start.z) >= 0.25 ? wallFromPoints('__preview__', preview.start, preview.end, project.ceilingHeight) : null
+  const previewClosesRoom = previewWall ? getFloorRegions([...project.features, previewWall]).length > regions.length : false
+  const ghostWall = (a: Point, b: Point, color: string, key: string | number) => {
+    const length = Math.hypot(b.x - a.x, b.z - a.z)
+    if (viewMode !== '3d' || length < 0.05) return null
+    return <mesh key={key} position={[(a.x + b.x) / 2, project.ceilingHeight / 2, (a.z + b.z) / 2]} rotation={[0, -Math.atan2(b.z - a.z, b.x - a.x), 0]} raycast={() => null}><boxGeometry args={[length, project.ceilingHeight, 0.12]} /><meshBasicMaterial color={color} transparent opacity={0.35} depthWrite={false} /></mesh>
+  }
+  const plan = (points: Point[], color: string, width = 6) => <Line points={points.map((p) => [p.x, 0.14, p.z] as [number, number, number])} color={color} lineWidth={width} raycast={() => null} />
+  const previewNode = preview && building && (() => {
+    const { start, end, points } = preview, mid = { x: (start.x + end.x) / 2, z: (start.z + end.z) / 2 }
+    const tag = (text: string, at: Point = mid) => <Html center position={[at.x, viewMode === '3d' ? project.ceilingHeight + 0.25 : 0.3, at.z]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{text}</span></Html>
+    if (tool === 'sketch') return plan(points, '#2f5d46', 4)
+    if (tool === 'room') {
+      const corners = [start, { x: end.x, z: start.z }, end, { x: start.x, z: end.z }]
+      return <>{plan([...corners, start], '#557e61')}{corners.map((p, i) => ghostWall(p, corners[(i + 1) % 4], '#7fa98f', i))}{Math.abs(end.x - start.x) >= 0.25 && Math.abs(end.z - start.z) >= 0.25 && tag(`${Math.abs(end.x - start.x).toFixed(2)} × ${Math.abs(end.z - start.z).toFixed(2)} m`)}</>
     }
-    return snapBuildPoint(p, project)
-  }
-  const finishWall = (event: ThreeEvent<PointerEvent>) => {
-    const gesture = wallGesture.current
-    if (!wallStart.current || !gesture || gesture.id !== event.pointerId) return
-    event.stopPropagation()
-    const start = wallStart.current, end = wallPoint(event)
-    if ((!gesture.anchorOnly || gesture.moved) && end && Math.hypot(end.x - start.x, end.z - start.z) >= 0.25) {
-      onDrawWall(start.x, start.z, end.x, end.z)
-      wallStart.current = end
-      setWallEnd(end)
-    } else setWallEnd(start)
-    gesture.release()
-    wallGesture.current = null
-    if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
-  }
+    const length = Math.hypot(end.x - start.x, end.z - start.z), erase = tool === 'erase', color = erase ? '#c0533f' : previewClosesRoom ? '#32804c' : '#557e61'
+    return <>{plan([start, end], color)}{ghostWall(start, end, erase ? '#d47a68' : '#7fa98f', 'wall')}<mesh position={[end.x, 0.16, end.z]} raycast={() => null}><sphereGeometry args={[0.1, 12, 8]} /><meshBasicMaterial color={color} /></mesh>{length >= 0.25 && tag(erase ? `Remove ${length.toFixed(2)} m` : `${length.toFixed(2)} m${previewClosesRoom ? ' · Room closes' : ''}`)}</>
+  })()
   return <>
     <color attach="background" args={[editor3d ? '#e8e4d9' : '#f4f3ef']} />
     {exterior3d && <Suspense fallback={null}><Environment files="/materials/forest.hdr" environmentIntensity={day3d ? 0.65 : 0.45} /></Suspense>}
@@ -312,40 +316,44 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
         onClear()
       }}
       onPointerDown={(event) => {
-        if (tool !== 'wall' || event.button !== 0 || (event.pointerType === 'touch' && activeTouchCount() > 1)) return
-        const point = wallPoint(event)
-        if (!point) return
+        if (!building || event.button !== 0 || (event.pointerType === 'touch' && activeTouchCount() > 1)) return
+        const raw = floorPoint(event)
+        if (!raw) return
         event.stopPropagation()
-        const anchorOnly = !wallStart.current
-        if (anchorOnly) wallStart.current = point
-        setWallEnd(point)
-        const id = event.pointerId
-        // A second finger means the user is zooming: drop this tap instead of drawing a wall.
-        const release = event.pointerType === 'touch' ? cancelOnMultiTouch(() => {
-          if (wallGesture.current?.id !== id) return
-          if (wallGesture.current.anchorOnly) wallStart.current = null
-          wallGesture.current = null; setWallEnd(wallStart.current)
-          if (capture.current) { capture.current.element.releasePointerCapture?.(capture.current.id); capture.current = null }
-        }) : () => undefined
-        wallGesture.current = { anchorOnly, moved: false, x: event.clientX, y: event.clientY, id, release }
-        capture.current = { element: event.target as Element, id }
-        capture.current.element.setPointerCapture?.(id)
+        const start = tool === 'sketch' ? raw : snapBuildPoint(raw, project), element = event.target as Element, id = event.pointerId
+        // A second finger means the user is zooming or orbiting: drop this stroke.
+        const release = event.pointerType === 'touch' ? cancelOnMultiTouch(stopGesture) : () => undefined
+        element.setPointerCapture?.(id)
+        gesture.current = { id, element, start, end: start, points: [start], screen: { x: event.clientX, y: event.clientY }, moved: false, release }
+        setPreview({ start, end: start, points: [start] })
       }}
       onPointerMove={(event) => {
-        const gesture = wallGesture.current
-        if (gesture?.id === event.pointerId && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 6) gesture.moved = true
-        if (wallStart.current && activeTouchCount() <= 1) { event.stopPropagation(); setWallEnd(wallPoint(event)) }
-      }} onPointerUp={finishWall} onPointerCancel={cancelWall}>
+        const g = gesture.current
+        if (!g || g.id !== event.pointerId) return
+        event.stopPropagation()
+        const raw = floorPoint(event)
+        if (!raw) return
+        g.moved ||= beyondSlop(g.screen, { x: event.clientX, y: event.clientY })
+        g.end = endFor(g.start, raw)
+        const last = g.points[g.points.length - 1]
+        if (tool === 'sketch' && Math.hypot(raw.x - last.x, raw.z - last.z) > 0.04) g.points = [...g.points, raw]
+        setPreview({ start: g.start, end: g.end, points: g.points })
+      }}
+      onPointerUp={(event) => {
+        const g = gesture.current
+        if (!g || g.id !== event.pointerId) return
+        event.stopPropagation()
+        stopGesture()
+        if (tool === 'sketch') { if (g.points.length > 2) onBuild({ tool: 'sketch', points: g.points }) }
+        else if (g.moved && (tool === 'wall' || tool === 'room' || tool === 'erase')) onBuild({ tool, a: g.start, b: g.end })
+      }} onPointerCancel={stopGesture}>
       <planeGeometry args={[project.width, project.length]} /><meshStandardMaterial color="#eeeee7" roughness={1} />
     </mesh>
     {regions.map((region) => <FloorSurface key={region.id} region={region} color={floorColors[project.floorMaterial]} finish={viewMode === '3d' ? project.floorMaterial : undefined} />)}
     {viewMode === '2d' && project.roomLabels?.map((label) => <Html key={label.id} center position={[label.x, 0.12, label.z]} style={{ pointerEvents: 'none' }}><span className="room-name-tag">{label.name}</span></Html>)}
-    {(gridVisible || tool === 'wall' || !regions.length) && <Grid position={[0, 0.005, 0]} args={[project.width, project.length]} cellSize={0.25} sectionSize={1} cellThickness={0.5} sectionThickness={0.9} cellColor="#d0d4c8" sectionColor="#adb8a5" fadeDistance={70} fadeStrength={1} raycast={() => null} />}
-    {wallStart.current && wallEnd && <>
-      <Line points={[[wallStart.current.x, 0.14, wallStart.current.z], [wallEnd.x, 0.14, wallEnd.z]]} color={previewClosesRoom ? '#32804c' : '#557e61'} lineWidth={6} raycast={() => null} />
-      <mesh position={[wallEnd.x, 0.16, wallEnd.z]} raycast={() => null}><sphereGeometry args={[0.1, 12, 8]} /><meshBasicMaterial color={previewClosesRoom ? '#32804c' : '#557e61'} /></mesh>
-      {previewLength >= 0.25 && <Html center position={[(wallStart.current.x + wallEnd.x) / 2, 0.3, (wallStart.current.z + wallEnd.z) / 2]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{previewLength.toFixed(2)} m{previewClosesRoom ? ' · Room closes' : ''}</span></Html>}
-    </>}
+    {(gridVisible || building || !regions.length) && <Grid position={[0, 0.005, 0]} args={[project.width, project.length]} cellSize={0.25} sectionSize={1} cellThickness={0.5} sectionThickness={0.9} cellColor="#d0d4c8" sectionColor="#adb8a5" fadeDistance={70} fadeStrength={1} raycast={() => null} />}
+    {previewNode}
+    {sketch.map((stroke, i) => <group key={i}>{plan(stroke, '#557e61', 4)}</group>)}
     {ghost && (() => { const p = productById.get(ghost.id)!; return <group position={[ghost.x, 0.035, ghost.z]}><mesh raycast={() => null}><boxGeometry args={[p.width / 100, 0.025, p.depth / 100]} /><meshBasicMaterial color={ghost.valid ? '#729982' : '#bd7868'} transparent opacity={0.5} /></mesh><Html center position={[0, 0.4, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{ghost.valid ? `Release to place · ${p.width} × ${p.depth} cm` : 'Place inside a closed room'}</span></Html></group> })()}
   </>
 }
