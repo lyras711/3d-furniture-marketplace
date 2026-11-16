@@ -32,7 +32,7 @@ Related: [[2026-11-08-mobile-simplicity-plan]]
 - Open: custom email sender domain (needs DNS), Firebase public-facing app name in email templates, removing Editor from the default compute SA, budget alerts, EU Storage bucket.
 
 ## Catalogue detail and retailer metadata crawl (2026-11-16)
-- Catalogue rows open `/admin/catalog/:id`, which shows the product record, extracted attributes, source images, warnings, missing fields, and current GLB. Names, dimensions, and pricing remain read-only.
+- Clicking a catalogue product slot opens `/admin/catalog/:id` (including its image and details), which shows the product record, extracted attributes, source images, warnings, missing fields, and current GLB. Names, dimensions, and pricing remain read-only.
 - Admins can preview a selected `.glb` locally, then upload it (18 MiB maximum). The server validates the GLB 2.0 JSON chunk and stores it at `catalog/<brand>/<product>/models/<sha256>.glb`; `catalogEdits` carries the active model URL and uploader metadata.
 - Each product variant can have its own PNG, JPEG, or WebP texture (10 MiB maximum), stored by content hash under the variant's brand/product folder and overlaid from `catalogEdits.variantTextures`. The detail page previews the texture on the selected GLB material; uploads must match that material's UV layout.
 - The Ingestion tab starts metadata-and-image-only crawls. It discovers same-host product URLs from sitemaps or shop/category links, observes robots.txt, rate-limits requests, and stores product metadata in `catalogProducts`. It does not generate GLBs. New crawl results start hidden and need positive dimensions plus an uploaded GLB before they can be listed.

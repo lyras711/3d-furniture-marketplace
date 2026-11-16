@@ -36,8 +36,11 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
     <p className="admin-help">{filtered.length} of {data.catalog.length} products. Names, prices and dimensions come from partners and are read-only here.</p>
     {filtered.length ? <div className="admin-table-wrap"><table className="admin-table admin-catalog-table"><thead><tr><th>Product</th><th>Retailer · SKU</th><th>Size (cm)</th><th>Price</th><th>Review</th><th>Visibility</th></tr></thead><tbody>{filtered.map((item) => {
       const product = item
-      return <tr key={item.id} id={`catalog-${item.id}`} className={`${item.hidden ? 'admin-row-muted' : ''} ${focus === item.id ? 'admin-row-focus' : ''}`}>
-        <td><div className="admin-product-cell">{product && <ProductThumb product={product} compact />}<span><a className="admin-product-open" href={`/admin/catalog/${encodeURIComponent(item.id)}`}><strong>{item.name}</strong><small>{item.brand} · {item.category}{item.variants?.length ? ` · ${item.variants.length} variants` : ''}</small></a><small className="admin-request-catalog-status">{item.status}</small>{item.missingFields?.length ? <small className="admin-row-error">{item.missingFields.length} fields missing</small> : null}</span></div></td>
+      return <tr key={item.id} id={`catalog-${item.id}`} className={`${item.hidden ? 'admin-row-muted' : ''} ${focus === item.id ? 'admin-row-focus' : ''}`} onClick={(event) => {
+        if (!(event.target instanceof Element) || event.target.closest('a,button,select,input')) return
+        window.location.href = `/admin/catalog/${encodeURIComponent(item.id)}`
+      }}>
+        <td><a className="admin-product-cell admin-product-slot" href={`/admin/catalog/${encodeURIComponent(item.id)}`}>{product && <ProductThumb product={product} compact />}<span><strong>{item.name}</strong><small>{item.brand} · {item.category}{item.variants?.length ? ` · ${item.variants.length} variants` : ''}</small><small className="admin-request-catalog-status">{item.status}</small>{item.missingFields?.length ? <small className="admin-row-error">{item.missingFields.length} fields missing</small> : null}</span></a></td>
         <td>{item.retailer}<small className="admin-request-catalog-status">{item.sku || 'SKU missing'}</small></td>
         <td>{item.width || 'Missing'} × {item.depth || 'Missing'} × {item.height || 'Missing'}</td>
         <td>{euro(item.price)}</td>

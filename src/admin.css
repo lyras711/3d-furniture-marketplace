@@ -125,6 +125,10 @@ body:has(.admin-shell), body:has(.admin-auth-shell) { overflow: auto; background
 .admin-product-cell { display: flex; align-items: center; gap: 12px; min-width: 240px; }
 .admin-product-cell .product-thumb { flex: 0 0 56px; width: 56px; height: 48px; }
 .admin-product-cell > span { display: flex; flex-direction: column; gap: 2px; }
+.admin-product-slot { color: inherit; text-decoration: none; }
+.admin-product-slot:hover strong, .admin-product-slot:focus-visible strong { text-decoration: underline; }
+.admin-catalog-table tbody tr { cursor: pointer; }
+.admin-catalog-table tbody tr:hover td { background: #f8faf6; }
 .admin-product-cell small { color: #8a9489; font-size: 11px; }
 .admin-catalog-table td:nth-child(3), .admin-catalog-table td:nth-child(4) { white-space: nowrap; }
 
@@ -152,9 +156,8 @@ body:has(.admin-shell), body:has(.admin-auth-shell) { overflow: auto; background
 }
 
 .admin-product-detail { display: grid; gap: 14px; }
-.admin-back-link, .admin-product-open { color: #507759; font-weight: 700; text-decoration: none; }
-.admin-product-open { display: inline-flex; flex-direction: column; }
-.admin-product-open:hover, .admin-back-link:hover { text-decoration: underline; }
+.admin-back-link { color: #507759; font-weight: 700; text-decoration: none; }
+.admin-back-link:hover { text-decoration: underline; }
 .admin-product-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 20px; margin: 12px 0 24px; }
 .admin-product-facts div { padding: 12px 0; border-bottom: 1px solid #e7e8e2; min-width: 0; }
 .admin-product-facts dt { color: #758074; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }

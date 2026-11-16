@@ -187,6 +187,18 @@ test('viewer accounts only see read-only sections', async ({ page }) => {
   await expect(page.getByRole('button', { name: /^Hide / })).toHaveCount(0)
 })
 
+test('the whole catalogue product slot opens its detail page', async ({ page }) => {
+  await mockBackend(page)
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await page.locator('#catalog-sofa-haven .product-thumb').click()
+  await expect(page).toHaveURL(/\/admin\/catalog\/sofa-haven/)
+  await page.goBack()
+  await expect(page.locator('#catalog-sofa-haven')).toBeVisible()
+  await page.locator('#catalog-sofa-haven td:nth-child(4)').click()
+  await expect(page).toHaveURL(/\/admin\/catalog\/sofa-haven/)
+})
+
 test('catalogue opens a separate product details page with metadata and model preview upload input', async ({ page }) => {
   await mockBackend(page)
   await signIn(page)
