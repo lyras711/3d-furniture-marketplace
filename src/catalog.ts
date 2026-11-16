@@ -6,6 +6,26 @@ export type CategoryFilter = 'All' | 'Seating' | 'Tables' | 'Lighting' | 'Decor'
 export type CatalogReview = 'pending' | 'approved' | 'needs-work'
 export const catalogReviews: CatalogReview[] = ['pending', 'approved', 'needs-work']
 
+export type ProductSourceImage = { url: string; sourceUrl: string; role: string; altText: string | null; width: number | null; height: number | null }
+export type ProductMetadata = {
+  sourceBrand?: string | null
+  pageTitle?: string | null
+  canonicalUrl?: string | null
+  description: string | null
+  availabilityStatus: string | null
+  attributes: { label: string; value: string }[]
+  materials: Record<string, string | null>
+  packageCount: number | null
+  weightKg: number | null
+  packageDimensions: { length: number | null; width: number | null; height: number | null }[]
+  extractedAt: string
+  extractor: string
+  warnings: string[]
+  missingFields: string[]
+  fieldSources: Record<string, { source: string; confidence: 'high' | 'medium' | 'low' }>
+  images: ProductSourceImage[]
+}
+
 export interface ProductVariant {
   id: string
   name: string
@@ -15,6 +35,8 @@ export interface ProductVariant {
   accent?: string
   modelPath?: string | null
   thumbnailPath?: string | null
+  texturePath?: string | null
+  textureMaterial?: string | null
   materialReference?: string
   sourceAvailability?: string | null
 }
@@ -49,6 +71,7 @@ export interface Product {
   thumbnailPath?: string | null
   variants?: ProductVariant[]
   sourceImages?: string[]
+  metadata?: ProductMetadata
   verification?: {
     productData: string
     model: string

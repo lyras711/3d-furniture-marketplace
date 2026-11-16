@@ -1,17 +1,18 @@
 import { auth } from '../firebase'
-import type { CatalogReview } from '../catalog'
+import type { CatalogReview, Product } from '../catalog'
 import type { AdminMetrics, AdminPurchaseRequest } from '../purchase'
 import type { Partner } from '../partners'
 
 export type ItemStatus = 'queued' | 'scraping' | 'skipped-existing' | 'needs-model-recipe' | 'generated' | 'failed'
 export type CrawlItem = { url: string; status: ItemStatus; sku: string | null; productId: string | null; artifactRoot: string | null; error: string | null; updatedAt: string }
 export type Job = { id: string; siteUrl: string; retailerId: string; maxProducts: number; delayMs: number; status: string; discoveredUrls: string[]; items: CrawlItem[]; currentUrl: string | null; error: string | null; createdAt: string; updatedAt: string }
-export type CatalogItem = { id: string; sku: string | null; name: string; brand: string; retailer: string; retailerId: string | null; group: string; category: string; width: number; depth: number; height: number; price: number | null; status: string; thumbnailPath: string | null; modelPath: string | null; variantCount: number; verification: { dimensions: string; model: string; humanReview: string } | null; hidden: boolean; review: CatalogReview; updatedAt: string | null }
+export type CatalogItem = Product & { hidden: boolean; review: CatalogReview; updatedAt: string | null; missingFields?: string[] }
+export type MetadataCrawlJob = { id: string; brandName: string; retailerId: string; website: string; maxProducts: number; delayMs: number; status: string; discoveredUrls: string[]; items: { url: string; productId: string | null; status: string; error: string | null; updatedAt: string }[]; currentUrl: string | null; error: string | null; createdAt: string; updatedAt: string }
 export type AdminUser = { uid: string; email: string; role: string; status: string }
 export type AuditEntry = { id: string; actorEmail: string; action: string; target: string; createdAt?: { _seconds?: number } }
 export type Role = 'viewer' | 'editor' | 'admin' | 'owner'
-export type AdminData = { jobs: Job[]; catalog: CatalogItem[]; users: AdminUser[]; audit: AuditEntry[]; requests: AdminPurchaseRequest[]; metrics: AdminMetrics | null; partners: Partner[] }
-export const emptyData: AdminData = { jobs: [], catalog: [], users: [], audit: [], requests: [], metrics: null, partners: [] }
+export type AdminData = { jobs: Job[]; catalogCrawls: MetadataCrawlJob[]; catalog: CatalogItem[]; users: AdminUser[]; audit: AuditEntry[]; requests: AdminPurchaseRequest[]; metrics: AdminMetrics | null; partners: Partner[] }
+export const emptyData: AdminData = { jobs: [], catalogCrawls: [], catalog: [], users: [], audit: [], requests: [], metrics: null, partners: [] }
 
 export const roleRank: Record<string, number> = { viewer: 1, editor: 2, admin: 3, owner: 4 }
 export const atLeast = (role: string, minimum: Role) => (roleRank[role] || 0) >= roleRank[minimum]

@@ -95,7 +95,7 @@ export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
 export function ProductThumb({ product, compact = false }: { product: Product; compact?: boolean }) {
   const seating = product.group === 'Seating', table = product.group === 'Tables'
   const className = `product-thumb ${compact ? 'product-thumb-compact' : ''}`
-  if (product.thumbnailPath) return <div className={className}><img className="product-thumb-image" src={product.thumbnailPath} alt={`${product.name} generated thumbnail`} /></div>
+  if (product.thumbnailPath) return <div className={className}><img className="product-thumb-image" src={product.thumbnailPath} alt={`${product.name} product image`} loading="lazy" decoding="async" /></div>
   return <div className={className}>
     <svg viewBox="0 0 180 130" role="img" aria-label={`${product.name} — illustrative preview`}>
       <ellipse cx="92" cy="108" rx="65" ry="10" fill="#ddd7cb" opacity="0.45" />

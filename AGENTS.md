@@ -58,7 +58,7 @@
 - Fabric maps are generated from photo-sampled colour, a square fabric-only crop and procedural nap/weave, not measured material scans. Blender's included NumPy performs bulk mesh deformation/UV writes; avoid per-vertex normal recomputation in deformation loops. Catalog GLB/thumbnail URLs include content hashes to invalidate old browser assets.
 - Editor regression captures for the detailed sofa: `/tmp/forma-vancouver-detailed-desktop.png` and `/tmp/forma-vancouver-detailed-mobile.png`. Asset generation and validation replace normalized JSON atomically; `product:model --recover-from <snapshot.json>` restores only an empty or missing product file before regenerating.
 - Start the controlled catalog API with `npm run admin:server` and open `/admin` through Vite. The API persists jobs under ignored `artifacts/jobs/`, caps jobs at 100 products by default, checks robots/sitemaps, delays requests, deduplicates by existing SKU, and only runs the current Vancouver model recipe. Unsupported products stop as `needs-model-recipe` instead of receiving generic geometry.
-- One SKU owns one shared GLB. Colour variants reuse that geometry and provide material colour overrides; do not regenerate identical meshes per colour.
+- One SKU owns one shared GLB. Colour variants reuse that geometry and use material colour overrides or `texturePath` on a named material; do not regenerate identical meshes per colour.
 
 # Deployment (2026-09-17)
 
@@ -193,3 +193,11 @@
   The default compute account still has Editor; remove it only after checking what else uses that account.
 - Deploy the API with `gcloud run deploy forma-admin-worker --source . --region europe-west1 --project forma-furniture-marketplace --quiet`. Env and service account are kept. App Check is lazy (`getAppCheck()`), so the reCAPTCHA script loads only when AI plan detection runs.
 
+# Catalogue detail and metadata intake (2026-11-16)
+
+- `/admin/catalog/:id` is the product detail page. The record is read-only except for existing review/visibility controls and the admin-only GLB replacement. GLB uploads are capped at 18 MiB, checked for a valid GLB 2.0 JSON chunk, stored under `catalog/<brand>/<product>/models/<sha256>.glb`, and overlaid from `catalogEdits`.
+- Each existing `ProductVariant` can also carry a texture override. Admin uploads are stored by content hash under `catalog/<brand>/<product>/variants/<variant>/textures/` and overlaid from `catalogEdits.variantTextures`; the selected material name must exist in the GLB, and the image must match its UV layout. The automatic target matches material names containing upholstery, cushion, or fabric.
+- The preview uses Drei `useGLTF`; selecting a file previews the local blob before upload. The public catalogue endpoint applies the saved model URL to variants too, so planner `ProductModel` uses the replacement without a frontend build.
+- Ingestion now starts metadata-and-image crawls (`scripts/catalog-metadata-crawl.ts`), not model generation. Crawls are editor-only, require HTTPS/public DNS, check robots/sitemaps, stay on the retailer host for pages, delay requests, and cap at 500 products. They store extracted metadata in `catalogProducts` and content-hashed images under `catalog/<brand>/<product>/images/`; imported products start hidden and cannot be listed until dimensions are complete and a GLB is uploaded.
+- Storage objects use `public,max-age=31536000,immutable`; hashed paths make browser caching safe across replacements. Product thumbnails use native lazy loading. `GET /api/catalog/products` feeds the editor; `bootstrapCatalogProducts()` fetches all records before project validation, then keeps hidden products in `productById` so existing saved designs still render.
+- The old model-recipe jobs remain visible as history only. Do not describe metadata-only crawling as producing or validating 3D models.

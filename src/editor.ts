@@ -23,6 +23,10 @@ export interface ProjectState {
 }
 export type FloorRegion = { id: string; points: Point[]; holes: Point[][]; area: number }
 export const productById = new Map(products.map((product) => [product.id, product]))
+export function replaceCatalogProducts(next: Product[]) {
+  productById.clear()
+  for (const product of [...products, ...next]) productById.set(product.id, product)
+}
 export type RoomItemShape = Pick<Product, 'name' | 'width' | 'depth' | 'height' | 'category' | 'tone' | 'accent'>
 export function roomItemShape(object: RoomObject): RoomItemShape | null {
   if (object.custom) return { name: object.custom.name, width: object.custom.width, depth: object.custom.depth, height: object.custom.height, category: object.custom.kind === 'rug' ? 'Rug' : 'Custom', tone: object.custom.color, accent: object.custom.color }

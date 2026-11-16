@@ -8,6 +8,7 @@ import PartnersTab from './admin/PartnersTab'
 import CatalogTab from './admin/CatalogTab'
 import IngestionTab, { activeJobStatuses } from './admin/IngestionTab'
 import TeamTab from './admin/TeamTab'
+import CatalogDetailPage from './admin/CatalogDetailPage'
 import './admin.css'
 
 export type TabId = 'overview' | 'orders' | 'partners' | 'catalogue' | 'ingestion' | 'team'
@@ -22,7 +23,7 @@ const tabs: { id: TabId; title: string; intro: string; minimum: Role }[] = [
   { id: 'team', title: 'Team & audit', intro: 'Admin roles and the change log.', minimum: 'admin' },
 ]
 
-const initialTab = () => { const value = new URLSearchParams(location.search).get('tab'); return tabs.some((tab) => tab.id === value) ? value as TabId : 'overview' }
+const initialTab = () => { const value = new URLSearchParams(location.search).get('tab'); return location.pathname.startsWith('/admin/catalog/') ? 'catalogue' : tabs.some((tab) => tab.id === value) ? value as TabId : 'overview' }
 
 function AuthCard({ children, onSubmit }: { children: ReactNode; onSubmit?: (event: FormEvent) => void }) {
   return <div className="admin-auth-shell">{onSubmit ? <form className="admin-auth-card" onSubmit={onSubmit}>{children}</form> : <div className="admin-auth-card">{children}</div>}</div>
@@ -58,8 +59,9 @@ export default function Admin() {
     setRole(me.role); setAccessChecked(true)
     const failed: string[] = [], admin = atLeast(me.role, 'admin')
     const get = <T,>(section: string, path: string, fallback: T, allowed = true) => allowed ? send<T>(path).catch(() => { failed.push(section); return fallback }) : Promise.resolve(fallback)
-    const [jobs, catalog, users, audit, requests, metrics, partners] = await Promise.all([
+    const [jobs, catalogCrawls, catalog, users, audit, requests, metrics, partners] = await Promise.all([
       get('ingestion', '/api/admin/jobs', emptyData.jobs),
+      get('ingestion', '/api/admin/catalog-crawls', emptyData.catalogCrawls),
       get('catalogue', '/api/admin/catalog', { products: emptyData.catalog }),
       get('team', '/api/admin/users', emptyData.users, admin),
       get('audit', '/api/admin/audit', emptyData.audit, admin),
@@ -67,20 +69,22 @@ export default function Admin() {
       get('metrics', '/api/admin/metrics', null, admin),
       get('partners', '/api/admin/partners', emptyData.partners, admin),
     ])
-    setData({ jobs: jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), catalog: catalog.products, users, audit, requests, metrics, partners })
+    setData({ jobs: jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), catalogCrawls, catalog: catalog.products, users, audit, requests, metrics, partners })
     setError(failed.length ? `Could not load: ${failed.join(', ')}. Check the admin API and Firebase credentials.` : '')
   }, [])
 
   useEffect(() => { if (user) void load() }, [user, load])
   useEffect(() => {
-    if (!user || !data.jobs.some((job) => activeJobStatuses.has(job.status))) return
-    const timer = window.setInterval(() => void send<Job[]>('/api/admin/jobs').then((jobs) => setData((current) => ({ ...current, jobs: jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) }))).catch(() => {}), 2000)
+    if (!user || (!data.jobs.some((job) => activeJobStatuses.has(job.status)) && !data.catalogCrawls.some((job) => activeJobStatuses.has(job.status)))) return
+    const timer = window.setInterval(() => {
+      void Promise.all([send<Job[]>('/api/admin/jobs'), send<AdminData['catalogCrawls']>('/api/admin/catalog-crawls')]).then(([jobs, catalogCrawls]) => setData((current) => ({ ...current, jobs: jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), catalogCrawls }))).catch(() => {})
+    }, 2000)
     return () => window.clearInterval(timer)
   }, [data.jobs, user])
 
   const go = (next: TabId, target?: string) => {
     setTab(next); setFocus(target ?? null); setError('')
-    const url = new URL(location.href); url.searchParams.set('tab', next); history.replaceState(null, '', url)
+    const url = new URL(location.href); url.pathname = '/admin'; url.searchParams.set('tab', next); history.replaceState(null, '', url)
     window.scrollTo({ top: 0 })
   }
 
@@ -122,7 +126,7 @@ export default function Admin() {
       {current.id === 'overview' && <OverviewTab {...props} />}
       {current.id === 'orders' && <OrdersTab {...props} />}
       {current.id === 'partners' && <PartnersTab {...props} />}
-      {current.id === 'catalogue' && <CatalogTab {...props} />}
+      {current.id === 'catalogue' && location.pathname.startsWith('/admin/catalog/') ? <CatalogDetailPage productId={decodeURIComponent(location.pathname.split('/').pop() || '')} role={role} onError={setError} reload={load} /> : current.id === 'catalogue' ? <CatalogTab {...props} /> : null}
       {current.id === 'ingestion' && <IngestionTab {...props} />}
       {current.id === 'team' && <TeamTab {...props} />}
     </main>

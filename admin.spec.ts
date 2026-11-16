@@ -14,12 +14,22 @@ function order(id: string, status: AdminPurchaseRequest['status'], createdAt: st
   return { id, projectId: `project-${id}`, projectName: `${name}'s living room`, customer: { name, email: `${name.toLowerCase()}@example.com`, phone: '+30 210 000 0000', city: 'Athens', notes: id === 'order-1' ? 'Please deliver after 5pm.' : '' }, items: [{ id: '["sofa-haven",""]', productId: 'sofa-haven', name: 'Haven sofa', retailer: 'Minoa Studio', sku: 'SOFA-1', quantity: 1, unitPrice: 899, catalogStatus: 'Sample', availability: status === 'pending' ? 'pending' : 'available', included: true }], estimatedTotal: 899, currency: 'EUR', status, createdAt, updatedAt: createdAt, history: [{ status: 'pending', at: createdAt, by: 'customer' }], adminNotes: [] }
 }
 
+function minimalGlb() {
+  const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [] }] }))
+  const padded = Buffer.concat([json, Buffer.alloc((4 - json.length % 4) % 4, 0x20)])
+  const glb = Buffer.alloc(20 + padded.length)
+  glb.write('glTF', 0); glb.writeUInt32LE(2, 4); glb.writeUInt32LE(glb.length, 8)
+  glb.writeUInt32LE(padded.length, 12); glb.writeUInt32LE(0x4e4f534a, 16); padded.copy(glb, 20)
+  return glb
+}
+
 /** Stateful stand-in for scripts/admin-server.ts so the dashboard can be driven without Firebase Admin credentials. */
 async function mockBackend(page: Page, role = 'owner') {
   const calls: { method: string; path: string; body: unknown }[] = []
   const requests = [order('order-1', 'pending', '2026-11-01T10:00:00.000Z', 'Maria'), order('order-2', 'ready-to-place', '2026-11-02T10:00:00.000Z', 'Nikos'), order('order-3', 'delivered', '2026-10-20T10:00:00.000Z', 'Eleni')]
   const partners: Partner[] = []
   const edits = new Map<string, { hidden?: boolean; review?: string }>([['sofa-haven', { review: 'needs-work' }]])
+  const texturePaths = new Map<string, string>()
   const catalog = () => ({ products: products.slice(0, 8).map((product) => ({ id: product.id, sku: product.sku, name: product.name, brand: product.brand, retailer: product.retailer, retailerId: product.retailerId || null, group: product.group, category: product.category, width: product.width, depth: product.depth, height: product.height, price: product.price, status: product.status, thumbnailPath: product.thumbnailPath || null, modelPath: product.modelPath || null, variantCount: product.variants?.length || 0, verification: null, hidden: Boolean(edits.get(product.id)?.hidden), review: edits.get(product.id)?.review || 'pending', updatedAt: null })) })
   await page.route('https://identitytoolkit.googleapis.com/**', (route) => {
     const path = new URL(route.request().url()).pathname
@@ -34,6 +44,8 @@ async function mockBackend(page: Page, role = 'owner') {
     const at = new Date().toISOString()
     if (path === '/api/admin/me') return route.fulfill({ json: { uid: 'admin-uid', email: 'ops@formivo3d.com', role } })
     if (path === '/api/admin/jobs') return route.fulfill({ json: [] })
+    if (path === '/api/admin/catalog-crawls' && method === 'GET') return route.fulfill({ json: [] })
+    if (path === '/api/admin/catalog-crawls' && method === 'POST') return route.fulfill({ status: 202, json: { id: 'crawl-1', brandName: body.brandName, status: 'queued', items: [] } })
     if (path === '/api/admin/catalog' && method === 'GET') return route.fulfill({ json: catalog() })
     if (path === '/api/admin/users') return route.fulfill({ json: [{ uid: 'admin-uid', email: 'ops@formivo3d.com', role: 'owner', status: 'active' }] })
     if (path === '/api/admin/audit') return route.fulfill({ json: [] })
@@ -62,7 +74,18 @@ async function mockBackend(page: Page, role = 'owner') {
       return route.fulfill({ json: target })
     }
     const catalogMatch = path.match(/^\/api\/admin\/catalog\/([^/]+)$/)
+    const textureMatch = path.match(/^\/api\/admin\/catalog\/([^/]+)\/variants\/([^/]+)\/texture$/)
+    if (textureMatch && method === 'PUT') {
+      const texturePath = `https://storage.googleapis.com/test/${textureMatch[1]}/${textureMatch[2]}.png`
+      texturePaths.set(`${textureMatch[1]}:${textureMatch[2]}`, texturePath)
+      return route.fulfill({ json: { id: textureMatch[1], variantId: textureMatch[2], texturePath } })
+    }
     if (catalogMatch && method === 'PUT') { edits.set(catalogMatch[1], { ...edits.get(catalogMatch[1]), ...body }); return route.fulfill({ json: { id: catalogMatch[1], ...body } }) }
+    if (catalogMatch && method === 'GET') {
+      const product = products.find((item) => item.id === catalogMatch[1])
+      if (!product) return route.fulfill({ status: 404, json: { error: 'Not found' } })
+      return route.fulfill({ json: { ...product, variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edits.get(product.id)?.hidden), review: edits.get(product.id)?.review || 'pending', updatedAt: null, missingFields: [] } })
+    }
     return route.fulfill({ status: 404, json: { error: `Unmocked ${method} ${path}` } })
   })
   return calls
@@ -164,6 +187,61 @@ test('viewer accounts only see read-only sections', async ({ page }) => {
   await expect(page.getByRole('button', { name: /^Hide / })).toHaveCount(0)
 })
 
+test('catalogue opens a separate product details page with metadata and model preview upload input', async ({ page }) => {
+  await mockBackend(page)
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
+  await expect(page).toHaveURL(/\/admin\/catalog\/sofa-haven/)
+  await expect(page.getByRole('heading', { name: 'Haven three-seat sofa' })).toBeVisible()
+  await expect(page.getByText('No GLB uploaded yet.')).toBeVisible()
+  await expect(page.getByLabel(/Replace 3D model/)).toBeVisible()
+  const glb = minimalGlb()
+  await page.getByLabel(/Replace 3D model/).setInputFiles({ name: 'preview.glb', mimeType: 'model/gltf-binary', buffer: glb })
+  await expect(page.getByRole('button', { name: 'Upload this model' })).toBeVisible()
+  await expect(page.locator('.admin-model-preview canvas')).toBeVisible()
+  await page.screenshot({ path: '/tmp/formivo-catalog-detail-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-catalog-detail-mobile.png', fullPage: true })
+})
+
+test('admins can preview and save a texture independently for a product variant', async ({ page }) => {
+  const calls = await mockBackend(page)
+  const product = products.find((item) => item.variants?.length && item.modelPath)!
+  const variant = product.variants![0]
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4XcAAAAASUVORK5CYII=', 'base64')
+  await page.route('https://storage.googleapis.com/**', (route) => route.fulfill({ status: 200, body: route.request().url().endsWith('.png') ? png : minimalGlb(), contentType: route.request().url().endsWith('.png') ? 'image/png' : 'model/gltf-binary', headers: { 'access-control-allow-origin': '*' } }))
+  await signIn(page)
+  await page.goto(`${origin}/admin/catalog/${encodeURIComponent(product.id)}`)
+  await expect(page.getByRole('heading', { name: 'Colour variant textures' })).toBeVisible()
+  const variantCard = page.locator('.admin-variant-texture').filter({ hasText: variant.name })
+  await variantCard.getByLabel(/Texture image/).setInputFiles({ name: 'fabric.png', mimeType: 'image/png', buffer: png })
+  await expect(variantCard.getByRole('img', { name: `${variant.name} texture preview` })).toBeVisible()
+  await expect(page.getByRole('button', { name: `Save ${variant.name} texture` })).toBeVisible()
+  await page.getByRole('button', { name: `Save ${variant.name} texture` }).click()
+  await expect(page.getByRole('img', { name: `${variant.name} texture preview` })).toHaveAttribute('src', `https://storage.googleapis.com/test/${product.id}/${variant.id}.png`)
+  const call = calls.find((item) => item.method === 'PUT' && item.path.endsWith(`/variants/${variant.id}/texture`))
+  expect(call?.body).toMatchObject({ mimeType: 'image/png', materialName: '' })
+  expect((call?.body as { data?: string })?.data).toBeTruthy()
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.screenshot({ path: '/tmp/formivo-variant-texture-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-variant-texture-mobile.png', fullPage: true })
+})
+
+test('ingestion submits a metadata-only crawl for a retailer brand', async ({ page }) => {
+  const calls = await mockBackend(page)
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: 'Ingestion' }).click()
+  await page.getByLabel('Brand name').fill('Acme Furniture')
+  await page.getByLabel('Brand website').fill('https://acme.example')
+  await page.getByRole('button', { name: 'Start metadata crawl' }).click()
+  await expect.poll(() => calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog-crawls')?.body).toEqual({ website: 'https://acme.example', brandName: 'Acme Furniture', retailerId: 'Acme Furniture', maxProducts: 100, delayMs: 1000 })
+  await page.screenshot({ path: '/tmp/formivo-catalog-ingestion-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-catalog-ingestion-mobile.png', fullPage: true })
+})
+
 test.describe('compact admin', () => {
   test.use({ viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true })
   test('orders open as a full-width detail with a way back', async ({ page }) => {
@@ -210,7 +288,7 @@ test('profile sign-in offers a password reset and new accounts get a confirmatio
 })
 
 test('products hidden by an admin leave the planner catalogue', async ({ page }) => {
-  await page.route(`${origin}/api/catalog/visibility`, (route) => route.fulfill({ json: { hidden: ['sofa-haven'] } }))
+  await page.route(`${origin}/api/catalog/products`, (route) => route.fulfill({ json: { products, hidden: ['sofa-haven'] } }))
   await page.goto(`${origin}/planner`)
   await page.evaluate(() => localStorage.clear())
   await page.reload()

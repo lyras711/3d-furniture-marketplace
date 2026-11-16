@@ -1,6 +1,7 @@
 import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { products } from './catalog'
+import { bootstrapCatalogProducts } from './catalogVisibility'
 import './styles.css'
 
 const App = lazy(() => import('./App'))
@@ -12,7 +13,7 @@ const Business = lazy(() => import('./Business'))
 const requestedArt = new URLSearchParams(location.search).get('art')
 const art = requestedArt === 'room' || products.some((product) => product.id === requestedArt) ? requestedArt : null
 const pathname = location.pathname.replace(/\/$/, '')
-const admin = pathname === '/admin'
+const admin = pathname === '/admin' || /^\/admin\/catalog\/[^/]+$/.test(pathname)
 const profile = pathname === '/profile'
 const shopper = pathname === '/for-shoppers'
 const planner = pathname === '/planner' || location.hash.startsWith('#project=')
@@ -30,10 +31,9 @@ if (business) {
 }
 if (admin) document.title = 'Formivo — admin dashboard'
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <Suspense fallback={<div role="status" style={{ padding: 32 }}>Opening Formivo…</div>}>
-      {admin ? <Admin /> : profile ? <Profile /> : planner ? <App /> : art ? <div style={{ width: '100vw', height: '100dvh' }}><ShowcaseScene art product={art === 'room' ? undefined : art} /></div> : business ? <Business /> : <Showcase />}
-    </Suspense>
-  </StrictMode>,
-)
+const root = createRoot(document.getElementById('root')!)
+const page = <StrictMode><Suspense fallback={<div role="status" style={{ padding: 32 }}>Opening Formivo…</div>}>{admin ? <Admin /> : profile ? <Profile /> : planner ? <App /> : art ? <div style={{ width: '100vw', height: '100dvh' }}><ShowcaseScene art product={art === 'room' ? undefined : art} /></div> : business ? <Business /> : <Showcase />}</Suspense></StrictMode>
+if (planner) {
+  root.render(<div role="status" style={{ padding: 32 }}>Opening your catalogue…</div>)
+  void bootstrapCatalogProducts().then(() => root.render(page))
+} else root.render(page)

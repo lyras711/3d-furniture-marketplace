@@ -40,9 +40,13 @@ function contentType(file: string) {
 
 export async function uploadFile(localPath: string, storageKey: string, options: { public?: boolean } = {}) {
   const buffer = await readFile(localPath)
+  return uploadBuffer(buffer, storageKey, contentType(localPath), options)
+}
+
+export async function uploadBuffer(buffer: Buffer, storageKey: string, mimeType: string, options: { public?: boolean } = {}) {
   const bucket = firebaseStore().storage.bucket()
   const file = bucket.file(storageKey)
-  await file.save(buffer, { resumable: false, metadata: { contentType: contentType(localPath), cacheControl: 'public,max-age=31536000,immutable' } })
+  await file.save(buffer, { resumable: false, metadata: { contentType: mimeType, cacheControl: 'public,max-age=31536000,immutable' } })
   if (options.public) {
     try { await file.makePublic(); return file.publicUrl() } catch {}
   }

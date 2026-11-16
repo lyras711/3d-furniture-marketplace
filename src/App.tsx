@@ -3,7 +3,7 @@ import SurfaceMaterial from './SurfaceMaterial'
 
 const RenderStudio = lazy(() => import('./RenderStudio'))
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF } from '@react-three/drei'
+import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF, useTexture } from '@react-three/drei'
 import SceneEnvironment, { Architecture, BUILD_TOOLS, GRID_TOOLS, type BuildAction, type EditorLightingMode } from './SceneEnvironment'
 import { wallsFromSketch } from './sketch'
 import MeasureRoom from './MeasureRoom'
@@ -21,6 +21,7 @@ import { accountApi, AccountApiError, cloudProjectKey, type SavedProject, type S
 import { purchaseItemId } from './purchase'
 import { auth, getAppCheck } from './firebase'
 import type { CategoryFilter, Product } from './catalog'
+import { cloneProductScene } from './productScene'
 import { useListedProducts } from './catalogVisibility'
 import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, addWallSegment, eraseWallSegment, hangOnWall, isWallMounted, placeObject, setWallLength, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
@@ -165,28 +166,23 @@ function Cushion({ width, height, depth, color }: { width: number; height: numbe
   return <group><RoundedBox args={[width, height, depth]} radius={Math.min(0.065, height / 2 - 0.001)} smoothness={4} castShadow receiveShadow><SurfaceMaterial kind="linen" color={color} /></RoundedBox><mesh castShadow><tubeGeometry args={[seam, 96, 0.0018, 5, true]} /><meshStandardMaterial color={color} roughness={0.95} /></mesh></group>
 }
 
+function TexturedProductModel({ scene, tone, texturePath, textureMaterial }: { scene: Group; tone: string; texturePath: string; textureMaterial?: string | null }) {
+  const texture = useTexture(texturePath)
+  const model = useMemo(() => cloneProductScene(scene, tone, texture, textureMaterial), [scene, tone, texture, textureMaterial])
+  return <primitive object={model} />
+}
+
+function ColoredProductModel({ scene, path, tone }: { scene: Group; path: string; tone: string }) {
+  const model = useMemo(() => cloneProductScene(scene, tone), [scene, path, tone])
+  return <primitive object={model} />
+}
+
 function ImportedProductModel({ path, product, variantId }: { path: string; product: Product; variantId?: string }) {
   const { scene } = useGLTF(path)
   const variant = product.variants?.find((candidate) => candidate.id === variantId)
   const tone = variant?.tone || product.tone
-  const model = useMemo(() => {
-    const clone = scene.clone(true)
-    clone.traverse((object) => {
-      object.castShadow = true
-      object.receiveShadow = true
-      const mesh = object as unknown as { isMesh?: boolean; material?: unknown }
-      if (!mesh.isMesh || !mesh.material) return
-      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-      const cloned = materials.map((material) => {
-        const next = (material as { clone: () => { name?: string; color?: { set: (value: string) => void } } }).clone()
-        if (next.color && /upholstery|cushion|fabric/i.test(next.name || '')) next.color.set(tone)
-        return next
-      })
-      mesh.material = Array.isArray(mesh.material) ? cloned : cloned[0]
-    })
-    return clone
-  }, [scene, path, tone])
-  return <primitive object={model} />
+  if (variant?.texturePath) return <TexturedProductModel scene={scene} tone={tone} texturePath={variant.texturePath} textureMaterial={variant.textureMaterial} />
+  return <ColoredProductModel scene={scene} path={path} tone={tone} />
 }
 
 export function ProductModel({ product, variantId }: { product: Product; variantId?: string }) {

@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { loadEnvFile } from 'node:process'
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 
 try { loadEnvFile('.env.local') } catch {}
 import { CloudTasksClient } from '@google-cloud/tasks'
@@ -14,6 +15,9 @@ import { getFloorRegions, isProject, migrateProject, productById, type ProjectSt
 import { catalogReviews, products, type CatalogReview } from '../src/catalog'
 import { partnerFields, type Partner, type PartnerNote } from '../src/partners'
 import { VertexPlanVisionProvider } from './plan-vision'
+import { createMetadataCrawl, getMetadataCrawl, listMetadataCrawls, runMetadataCrawl } from './catalog-metadata-crawl'
+import { uploadBuffer } from './firebase-store'
+import { validateGlb, validateTexture } from './catalog-asset'
 
 type Role = 'viewer' | 'editor' | 'admin' | 'owner'
 const roleRank: Record<Role, number> = { viewer: 1, editor: 2, admin: 3, owner: 4 }
@@ -103,13 +107,39 @@ async function catalogEdits() {
   return new Map(snapshot.docs.map((doc) => [doc.id, doc.data()]))
 }
 
+async function allCatalogProducts() {
+  const productsById = new Map(products.map((product) => [product.id, product as unknown as Record<string, unknown>]))
+  try {
+    const snapshot = await firebase().db.collection('catalogProducts').get()
+    for (const doc of snapshot.docs) productsById.set(doc.id, { ...productsById.get(doc.id), ...doc.data() })
+  } catch {}
+  return [...productsById.values()]
+}
+
+function catalogVariants(product: Record<string, unknown>, edit: Record<string, unknown>, modelPath: unknown) {
+  const variants = Array.isArray(product.variants) ? product.variants as Record<string, unknown>[] : []
+  const textures = edit.variantTextures && typeof edit.variantTextures === 'object' ? edit.variantTextures as Record<string, unknown> : {}
+  return variants.map((variant) => {
+    const texture = textures[String(variant.id)]
+    const override = texture && typeof texture === 'object' ? texture as Record<string, unknown> : {}
+    return {
+      ...variant,
+      ...(typeof modelPath === 'string' ? { modelPath } : {}),
+      ...(typeof override.texturePath === 'string' ? { texturePath: override.texturePath } : {}),
+      ...(Object.hasOwn(override, 'textureMaterial') ? { textureMaterial: typeof override.textureMaterial === 'string' ? override.textureMaterial : null } : {}),
+    }
+  })
+}
+
 /** Bundled catalogue (what the planner ships) plus admin visibility/review state. Name, price and dimensions are partner-owned and read-only here. */
 async function catalogView() {
   let edits = new Map<string, Record<string, unknown>>()
   try { edits = await catalogEdits() } catch {}
-  return { products: products.map((product) => {
-    const edit = edits.get(product.id) || {}
-    return { id: product.id, sku: product.sku, name: product.name, brand: product.brand, retailer: product.retailer, retailerId: product.retailerId || null, group: product.group, category: product.category, width: product.width, depth: product.depth, height: product.height, price: product.price, status: product.status, thumbnailPath: product.thumbnailPath || null, modelPath: product.modelPath || null, variantCount: product.variants?.length || 0, verification: product.verification || null, hidden: hiddenEdit(edit), review: catalogReviews.includes(edit.review as CatalogReview) ? edit.review as CatalogReview : 'pending', updatedAt: typeof edit.updatedAt === 'object' && edit.updatedAt && 'toDate' in edit.updatedAt ? (edit.updatedAt as { toDate(): Date }).toDate().toISOString() : null }
+  return { products: (await allCatalogProducts()).map((product) => {
+    const edit = edits.get(String(product.id)) || {}, modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : product.modelPath
+    const metadata = product.metadata as { missingFields?: string[] } | undefined
+    const missingFields = [...(metadata?.missingFields || []), ...(!product.sku ? ['SKU'] : []), ...(product.price == null ? ['Price'] : []), ...(!product.width ? ['Width'] : []), ...(!product.depth ? ['Depth'] : []), ...(!product.height ? ['Height'] : []), ...(!Array.isArray(product.sourceImages) || !product.sourceImages.length ? ['Images'] : []), ...(!modelPath ? ['3D model'] : [])]
+    return { ...product, id: product.id, modelPath, variants: catalogVariants(product, edit, modelPath), missingFields: [...new Set(missingFields)], hidden: hiddenEdit(edit), review: catalogReviews.includes(edit.review as CatalogReview) ? edit.review as CatalogReview : 'pending', updatedAt: typeof edit.updatedAt === 'object' && edit.updatedAt && 'toDate' in edit.updatedAt ? (edit.updatedAt as { toDate(): Date }).toDate().toISOString() : (product.updatedAt || null) }
   }) }
 }
 
@@ -126,6 +156,15 @@ async function enqueueJob(jobId: string) {
   const queue = process.env.CLOUD_TASKS_QUEUE || 'forma-ingestion'
   const parent = tasks.queuePath(project, region, queue)
   await tasks.createTask({ parent, task: { httpRequest: { httpMethod: 'POST', url: `${workerUrl.replace(/\/$/, '')}/api/worker/jobs`, headers: { 'content-type': 'application/json', 'x-forma-worker-secret': workerSecret }, body: Buffer.from(JSON.stringify({ jobId })).toString('base64') } } })
+  return true
+}
+
+async function enqueueMetadataCrawl(jobId: string) {
+  const workerUrl = process.env.WORKER_URL, secret = process.env.WORKER_TASK_SECRET?.trim()
+  if (!workerUrl || !secret) return false
+  const project = process.env.GCLOUD_PROJECT || 'forma-furniture-marketplace'
+  const parent = tasks.queuePath(project, process.env.CLOUD_TASKS_REGION || 'europe-west1', process.env.CLOUD_TASKS_QUEUE || 'forma-ingestion')
+  await tasks.createTask({ parent, task: { dispatchDeadline: { seconds: 1800 }, httpRequest: { httpMethod: 'POST', url: `${workerUrl.replace(/\/$/, '')}/api/worker/catalog-crawls`, headers: { 'content-type': 'application/json', 'x-forma-worker-secret': secret }, body: Buffer.from(JSON.stringify({ jobId })).toString('base64') } } })
   return true
 }
 
@@ -251,10 +290,11 @@ const server = createServer(async (request, response) => {
         throw new ApiError(503, 'Vertex AI plan detection is unavailable. Use the local fallback or try again later.')
       }
     }
-    if (request.method === 'POST' && url.pathname === '/api/worker/jobs') {
+    if (request.method === 'POST' && (url.pathname === '/api/worker/jobs' || url.pathname === '/api/worker/catalog-crawls')) {
       if (!process.env.WORKER_TASK_SECRET?.trim() || request.headers['x-forma-worker-secret'] !== process.env.WORKER_TASK_SECRET.trim()) throw new ApiError(401, 'Worker task authentication is required.')
       const input = await body(request)
       if (typeof input.jobId !== 'string') throw new ApiError(400, 'jobId is required.')
+      if (url.pathname.endsWith('/catalog-crawls')) { const job = await runMetadataCrawl(input.jobId); if (!job) throw new ApiError(404, 'Catalog crawl not found.'); json(response, 200, job); return }
       const job = await runCrawlJob(input.jobId)
       if (job.status === 'failed') throw new ApiError(500, job.error || 'Ingestion job failed.')
       json(response, 200, job); return
@@ -343,11 +383,29 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=60', 'access-control-allow-origin': '*' })
       response.end(JSON.stringify({ hidden })); return
     }
+    if (request.method === 'GET' && url.pathname === '/api/catalog/products') {
+      const { products: catalog } = await catalogView()
+      json(response, 200, { products: catalog.map(({ hidden: _hidden, review: _review, updatedAt: _updatedAt, ...product }) => product), hidden: catalog.filter((product) => product.hidden).map((product) => product.id) }); return
+    }
     if (!url.pathname.startsWith('/api/admin/')) { json(response, 404, { error: 'Not found.' }); return }
     const me = await context(request, url.pathname === '/api/admin/me' ? 'viewer' : 'viewer')
     if (request.method === 'GET' && url.pathname === '/api/admin/me') { json(response, 200, { uid: me.uid, email: me.email, role: me.role }); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/jobs') { json(response, 200, await listJobs()); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/catalog') { json(response, 200, await catalogView()); return }
+    if (request.method === 'GET' && url.pathname === '/api/admin/catalog-crawls') { json(response, 200, await listMetadataCrawls()); return }
+    const metadataCrawlId = url.pathname.match(/^\/api\/admin\/catalog-crawls\/([A-Za-z0-9_-]+)$/)?.[1]
+    if (request.method === 'GET' && metadataCrawlId) { const job = await getMetadataCrawl(metadataCrawlId); if (!job) throw new ApiError(404, 'Catalog crawl not found.'); json(response, 200, job); return }
+    if (request.method === 'POST' && url.pathname === '/api/admin/catalog-crawls') {
+      const actor = await context(request, 'editor'), input = await body(request)
+      if (typeof input.brandName !== 'string' || typeof input.website !== 'string' || typeof input.retailerId !== 'string') throw new ApiError(400, 'Brand name, retailer id and HTTPS website are required.')
+      let job: Awaited<ReturnType<typeof createMetadataCrawl>>
+      try { job = await createMetadataCrawl({ brandName: requestText(input.brandName, 'Brand name', 100), retailerId: requestText(input.retailerId, 'Retailer id', 72), website: input.website, maxProducts: Number(input.maxProducts || 100), delayMs: Number(input.delayMs || 1000) }) }
+      catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'Invalid catalogue crawl request.') }
+      await audit(actor, 'catalog.metadata-crawl-started', job.id, { brand: job.brandName, website: job.website })
+      try { if (!await enqueueMetadataCrawl(job.id)) throw new Error('Cloud Tasks is not configured.') }
+      catch (error) { console.warn(`Metadata crawl enqueue failed: ${error instanceof Error ? error.message : String(error)}`); void runMetadataCrawl(job.id) }
+      json(response, 202, job); return
+    }
     if (request.method === 'GET' && url.pathname === '/api/admin/metrics') {
       await context(request, 'admin')
       const db = firebase().db, requestsByStatus = Object.fromEntries(purchaseStatuses.map((status) => [status, 0])) as Record<PurchaseRequest['status'], number>
@@ -478,12 +536,61 @@ const server = createServer(async (request, response) => {
       await audit(actor, 'user.revoked', uid); json(response, 200, { uid, status: 'revoked' }); return
     }
     const productId = catalogId(url.pathname)
+    if (request.method === 'GET' && productId) {
+      const id = recordId(productId), product = (await allCatalogProducts()).find((item) => item.id === id)
+      if (!product) throw new ApiError(404, 'Catalog product not found.')
+      const edit = (await catalogEdits()).get(id) || {}, modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : product.modelPath
+      const metadata = product.metadata as { missingFields?: string[] } | undefined
+      const missingFields = [...(metadata?.missingFields || []), ...(!product.sku ? ['SKU'] : []), ...(product.price == null ? ['Price'] : []), ...(!product.width ? ['Width'] : []), ...(!product.depth ? ['Depth'] : []), ...(!product.height ? ['Height'] : []), ...(!Array.isArray(product.sourceImages) || !product.sourceImages.length ? ['Images'] : []), ...(!modelPath ? ['3D model'] : [])]
+      json(response, 200, { ...product, modelPath, variants: catalogVariants(product, edit, modelPath), hidden: hiddenEdit(edit), review: edit.review || 'pending', missingFields: [...new Set(missingFields)] }); return
+    }
+    const modelUploadMatch = url.pathname.match(/^\/api\/admin\/catalog\/([^/]+)\/model$/)
+    if (request.method === 'PUT' && modelUploadMatch) {
+      const actor = await context(request, 'admin'), id = recordId(modelUploadMatch[1]), product = (await allCatalogProducts()).find((item) => item.id === id)
+      if (!product) throw new ApiError(404, 'Catalog product not found.')
+      const input = await body(request, 25 * 1024 * 1024)
+      if (input.mimeType !== 'model/gltf-binary' || typeof input.data !== 'string') throw new ApiError(400, 'Upload a valid binary GLB file.')
+      let bytes: Buffer
+      try { bytes = validateGlb(input.data) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'GLB file is invalid.') }
+      const hash = createHash('sha256').update(bytes).digest('hex'), brand = String(product.brand || product.retailer || 'brand').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'brand'
+      const modelPath = await uploadBuffer(bytes, `catalog/${brand}/${id}/models/${hash}.glb`, 'model/gltf-binary', { public: true })
+      await firebase().db.collection('catalogEdits').doc(id).set({ modelPath, modelHash: hash, modelSize: bytes.length, modelUpdatedAt: new Date().toISOString(), modelUpdatedBy: actor.uid }, { merge: true })
+      await audit(actor, 'catalog.model-uploaded', id, { hash, size: bytes.length })
+      json(response, 200, { id, modelPath, hash, size: bytes.length }); return
+    }
+    const textureUploadMatch = url.pathname.match(/^\/api\/admin\/catalog\/([^/]+)\/variants\/([^/]+)\/texture$/)
+    if (request.method === 'PUT' && textureUploadMatch) {
+      const actor = await context(request, 'admin'), id = recordId(textureUploadMatch[1]), variantId = recordId(textureUploadMatch[2])
+      const product = (await allCatalogProducts()).find((item) => item.id === id)
+      const variant = Array.isArray(product?.variants) ? (product.variants as Record<string, unknown>[]).find((item) => item.id === variantId) : undefined
+      if (!product || !variant) throw new ApiError(404, 'Catalog variant not found.')
+      const input = await body(request, 14 * 1024 * 1024)
+      if (typeof input.data !== 'string' || typeof input.mimeType !== 'string') throw new ApiError(400, 'Texture image data is required.')
+      let asset: ReturnType<typeof validateTexture>
+      try { asset = validateTexture(input.data, input.mimeType) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'Texture image is invalid.') }
+      const materialName = typeof input.materialName === 'string' ? input.materialName.trim() : ''
+      if (materialName.length > 120) throw new ApiError(400, 'Material name must be 120 characters or less.')
+      const hash = createHash('sha256').update(asset.bytes).digest('hex')
+      const brand = String(product.brand || product.retailer || 'brand').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'brand'
+      const modelVariant = variantId.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 72) || 'variant'
+      const texturePath = await uploadBuffer(asset.bytes, `catalog/${brand}/${id}/variants/${modelVariant}/textures/${hash}.${asset.ext}`, input.mimeType, { public: true })
+      const ref = firebase().db.collection('catalogEdits').doc(id), current = (await ref.get()).data() || {}
+      const existing = current.variantTextures && typeof current.variantTextures === 'object' ? current.variantTextures as Record<string, unknown> : {}
+      await ref.set({ variantTextures: { ...existing, [variantId]: { texturePath, textureMaterial: materialName || null, hash, size: asset.bytes.length, updatedAt: new Date().toISOString(), updatedBy: actor.uid } }, updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      await audit(actor, 'catalog.variant-texture-uploaded', id, { variantId, hash, size: asset.bytes.length })
+      json(response, 200, { id, variantId, texturePath, hash, size: asset.bytes.length }); return
+    }
     if (request.method === 'PUT' && productId) {
       const id = recordId(productId)
-      if (!productById.has(id)) throw new ApiError(404, 'Catalog product not found.')
+      const product = (await allCatalogProducts()).find((item) => item.id === id)
+      if (!product) throw new ApiError(404, 'Catalog product not found.')
       const input = await body(request), patch: Record<string, unknown> = {}
       if (input.review !== undefined) { if (!catalogReviews.includes(input.review as CatalogReview)) throw new ApiError(400, 'Review must be pending, approved or needs-work.'); patch.review = input.review }
       if (input.hidden !== undefined) { if (typeof input.hidden !== 'boolean') throw new ApiError(400, 'hidden must be true or false.'); patch.hidden = input.hidden }
+      if (patch.hidden === false && product.importedBy === 'metadata-crawl') {
+        const edit = (await catalogEdits()).get(id) || {}
+        if (typeof (edit.modelPath || product.modelPath) !== 'string' || Number(product.width) <= 0 || Number(product.depth) <= 0 || Number(product.height) <= 0) throw new ApiError(409, 'Upload a GLB and complete the product dimensions before listing this imported item.')
+      }
       if (!Object.keys(patch).length) throw new ApiError(400, 'Only visibility and review state can be changed here; product data comes from partners.')
       const actor = await context(request, patch.hidden === undefined ? 'editor' : 'admin')
       await firebase().db.collection('catalogEdits').doc(id).set({ ...patch, ...(patch.hidden === false ? { deletedAt: FieldValue.delete() } : {}), updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })

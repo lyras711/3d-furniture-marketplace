@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 import { extractorFor } from './extractors'
 import { runModelGeneration } from './generate-sofa'
 import { registerCatalog } from './register-catalog'
@@ -43,6 +45,29 @@ export interface CrawlJob {
 
 const running = new Set<string>()
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+function publicAddress(address: string) {
+  if (isIP(address) === 4) {
+    const [a, b] = address.split('.').map(Number)
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168 || b === 2)) || (a === 198 && (b === 18 || b === 19 || b === 51)) || (a === 203 && b === 0))
+  }
+  const ip = address.toLowerCase()
+  if (ip.startsWith('::ffff:')) return publicAddress(ip.slice(7))
+  return isIP(ip) === 6 && ip !== '::' && ip !== '::1' && !ip.startsWith('fc') && !ip.startsWith('fd') && !/^fe[89ab]/.test(ip) && !ip.startsWith('ff')
+}
+const checkedHosts = new Map<string, boolean>()
+export async function validatePublicUrl(value: string, allowedHost?: string) {
+  const url = new URL(value)
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !url.hostname || url.hostname === 'localhost' || url.hostname.endsWith('.localhost')) throw new Error('Use a public HTTPS brand website.')
+  if (allowedHost && url.hostname !== allowedHost) throw new Error('The page redirected outside the brand website.')
+  let valid = checkedHosts.get(url.hostname)
+  if (valid === undefined) {
+    const addresses = isIP(url.hostname) ? [{ address: url.hostname }] : await lookup(url.hostname, { all: true, verbatim: true }).catch(() => [])
+    valid = addresses.length > 0 && addresses.every(({ address }) => publicAddress(address))
+    checkedHosts.set(url.hostname, valid)
+  }
+  if (!valid) throw new Error('The website must resolve to a public IP address.')
+  return url
+}
 
 function jobPath(id: string) {
   return path.join(JOB_ROOT, `${id}.json`)
@@ -86,7 +111,8 @@ function slug(value: string) {
 }
 
 async function fetchText(url: string) {
-  const response = await fetch(url, { headers: { 'user-agent': 'FormaCatalogAdmin/0.1 (+controlled internal catalog review)', accept: 'text/html,application/xml,text/plain;q=0.9,*/*;q=0.1' } })
+  await validatePublicUrl(url)
+  const response = await fetch(url, { redirect: 'error', headers: { 'user-agent': 'FormaCatalogAdmin/0.1 (+controlled internal catalog review)', accept: 'text/html,application/xml,text/plain;q=0.9,*/*;q=0.1' } })
   if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`)
   return response.text()
 }
@@ -95,15 +121,18 @@ function locations(xml: string) {
   return [...xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)].map((match) => match[1].trim())
 }
 
-async function robotsPolicy(siteUrl: string) {
+export async function robotsPolicy(siteUrl: string) {
   const origin = new URL(siteUrl).origin
   try {
     const text = await fetchText(`${origin}/robots.txt`)
     const sitemaps = [...text.matchAll(/^sitemap:\s*(\S+)/gim)].map((match) => match[1])
-    const disallowed = text.split(/^user-agent:/im).slice(1).find((block) => /^\s*\*/m.test(block))?.split(/\n\s*user-agent:/i)[0].match(/^disallow:\s*(\S+)/gim)?.map((line) => line.replace(/^disallow:\s*/i, '').trim()) || []
-    return { sitemaps, disallowed }
-  } catch {
-    return { sitemaps: [], disallowed: [] }
+    const wildcard = text.split(/^user-agent:/im).slice(1).find((block) => /^\s*\*/m.test(block))?.split(/\n\s*user-agent:/i)[0] || ''
+    const disallowed = wildcard.match(/^disallow:\s*(\S+)/gim)?.map((line) => line.replace(/^disallow:\s*/i, '').trim()) || []
+    const delay = Number(wildcard.match(/^crawl-delay:\s*(\d+(?:\.\d+)?)/im)?.[1] || 0) * 1000
+    return { sitemaps, disallowed, crawlDelayMs: Math.min(60_000, Math.max(0, delay)) }
+  } catch (error) {
+    if (error instanceof Error && /\bHTTP 404\b/.test(error.message)) return { sitemaps: [], disallowed: [], crawlDelayMs: 0 }
+    throw new Error(`Could not check robots.txt: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -112,43 +141,54 @@ function allowed(url: string, disallowed: string[]) {
   return !disallowed.some((rule) => rule && pathname.startsWith(rule))
 }
 
-export async function discoverProductUrls(siteUrl: string, maxProducts = DEFAULT_MAX_PRODUCTS) {
+const productPath = (pathname: string) => /\/(?:products?|items?|p)\/[^/]+/i.test(pathname)
+
+export async function discoverProductUrls(siteUrl: string, maxProducts = DEFAULT_MAX_PRODUCTS, suppliedPolicy?: Awaited<ReturnType<typeof robotsPolicy>>) {
   const base = new URL(siteUrl)
-  const extractor = extractorFor(siteUrl)
-  const policy = await robotsPolicy(siteUrl)
+  const policy = suppliedPolicy || await robotsPolicy(siteUrl)
   const disallowed = policy.disallowed
-  const sitemapQueue = [...new Set([...policy.sitemaps, `${base.origin}/sitemap.xml`, `${base.origin}/sitemap_index.xml`])]
+  const sitemapQueue = [...new Set([...policy.sitemaps, `${base.origin}/sitemap.xml`, `${base.origin}/sitemap_index.xml`])].filter((value) => { try { const url = new URL(value); return url.protocol === 'https:' && url.hostname === base.hostname } catch { return false } })
   const seenSitemaps = new Set<string>()
   const products = new Set<string>()
   const submitted = normalizeUrl(siteUrl)
-  if (/\/products?\//i.test(base.pathname) && allowed(submitted, disallowed)) products.add(submitted)
+  if (productPath(base.pathname) && allowed(submitted, disallowed)) products.add(submitted)
   while (sitemapQueue.length && products.size < maxProducts && seenSitemaps.size < 50) {
     const sitemap = sitemapQueue.shift()!
     if (seenSitemaps.has(sitemap)) continue
     seenSitemaps.add(sitemap)
     try {
       const xml = await fetchText(sitemap)
+      await sleep(Math.max(250, policy.crawlDelayMs))
       for (const location of locations(xml)) {
         const candidate = normalizeUrl(location)
-        if (/<sitemap|\.xml($|\?)/i.test(candidate)) sitemapQueue.push(candidate)
-        else if (new URL(candidate).hostname === base.hostname && /\/products?\//i.test(new URL(candidate).pathname) && allowed(candidate, disallowed)) products.add(candidate)
+        if (/<sitemap|\.xml($|\?)/i.test(candidate) && new URL(candidate).hostname === base.hostname && new URL(candidate).protocol === 'https:') sitemapQueue.push(candidate)
+        else if (new URL(candidate).hostname === base.hostname && productPath(new URL(candidate).pathname) && allowed(candidate, disallowed)) products.add(candidate)
         if (products.size >= maxProducts) break
       }
     } catch {}
   }
   if (!products.size) {
-    const html = await fetchText(siteUrl)
-    const origin = base.origin
-    for (const match of html.matchAll(/href=["']([^"']+)["']/gi)) {
+    const queue = [siteUrl], visited = new Set<string>()
+    while (queue.length && visited.size < 30 && products.size < maxProducts) {
+      const page = normalizeUrl(queue.shift()!)
+      if (visited.has(page) || !allowed(page, disallowed)) continue
+      visited.add(page)
       try {
-        const candidate = normalizeUrl(new URL(match[1], siteUrl).toString())
-        if (new URL(candidate).hostname === base.hostname && /\/products?\//i.test(new URL(candidate).pathname) && allowed(candidate, disallowed)) products.add(candidate)
+        const html = await fetchText(page)
+        await sleep(Math.max(300, policy.crawlDelayMs))
+        for (const match of html.matchAll(/href=["']([^"'#]+)["']/gi)) {
+          try {
+            const candidate = normalizeUrl(new URL(match[1], page).toString()), parsed = new URL(candidate)
+            if (parsed.hostname !== base.hostname || !allowed(candidate, disallowed)) continue
+            if (productPath(parsed.pathname)) products.add(candidate)
+            else if (/^\/$|\/(?:shop|categor(?:y|ies)|collections?|catalog(?:ue)?)(?:\/|$)/i.test(parsed.pathname)) queue.push(candidate)
+          } catch {}
+          if (products.size >= maxProducts) break
+        }
       } catch {}
-      if (products.size >= maxProducts) break
     }
-    void origin
   }
-  if (!products.size) throw new Error(`No product URLs discovered for ${extractor.id}. Check the site URL, sitemap, robots.txt, or retailer adapter.`)
+  if (!products.size) throw new Error(`No product URLs discovered for ${base.hostname}. Check the site URL, sitemap, robots.txt, or retailer adapter.`)
   return [...products].slice(0, maxProducts)
 }
 
