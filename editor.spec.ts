@@ -1134,6 +1134,69 @@ test.describe('touch room workflow', () => {
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-floor-area', '12.00')
   })
 
+  test('AR tracking keeps the measuring controls responsive during hit-test jitter', async ({ page }) => {
+    await page.addInitScript(() => {
+      class Session extends EventTarget {
+        x = 0
+        inputSources: unknown[] = []
+        renderState = {}
+        enabledFeatures = ['hit-test', 'dom-overlay']
+        requestAnimationFrame(callback: (time: number, frame: unknown) => void) {
+          return window.requestAnimationFrame((time) => {
+            this.x += 0.02
+            const matrix = new Float32Array(16)
+            matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1
+            matrix[12] = this.x
+            const view = { transform: { matrix }, projectionMatrix: matrix }
+            callback(time, {
+              getViewerPose: () => ({ views: [view] }),
+              getHitTestResults: () => [{ getPose: () => ({ transform: { matrix } }) }],
+            })
+          })
+        }
+        cancelAnimationFrame(id: number) { window.cancelAnimationFrame(id) }
+        requestReferenceSpace() { return Promise.resolve({}) }
+        requestHitTestSource() { return Promise.resolve({ cancel() {} }) }
+        updateRenderState() {}
+        end() { this.dispatchEvent(new Event('end')); return Promise.resolve() }
+      }
+      Object.defineProperty(window, 'XRWebGLBinding', { configurable: true, value: undefined })
+      Object.defineProperty(window, 'XRWebGLLayer', { configurable: true, value: class {
+        framebuffer = null
+        framebufferWidth = 128
+        framebufferHeight = 128
+        ignoreDepthValues = true
+        getViewport() { return { x: 0, y: 0, width: 128, height: 128 } }
+      } })
+      for (const Context of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+        if (Context) Object.defineProperty(Context.prototype, 'makeXRCompatible', { configurable: true, value: async function () {} })
+      }
+      Object.defineProperty(navigator, 'xr', { configurable: true, value: Object.assign(new EventTarget(), { isSessionSupported: async () => true, requestSession: async () => new Session() }) })
+    })
+    await page.setViewportSize({ width: 375, height: 812 })
+    await page.reload()
+    await page.getByRole('button', { name: 'Measure my room' }).tap()
+    const dialog = page.getByRole('dialog', { name: 'Measure your room' })
+    await dialog.getByRole('button', { name: /Measure with your camera/ }).tap()
+    const overlay = page.locator('.ar-overlay')
+    await expect(overlay).toBeVisible()
+    const mark = overlay.getByRole('button', { name: 'Mark point' })
+    await expect(mark).toBeEnabled()
+    await mark.tap()
+    const updates = await page.evaluate(() => new Promise<number>((resolve) => {
+      const status = document.querySelector('.ar-top > span')!
+      let updates = 0
+      const observer = new MutationObserver(() => updates++)
+      observer.observe(status, { childList: true, characterData: true, subtree: true })
+      window.setTimeout(() => { observer.disconnect(); resolve(updates) }, 1000)
+    }))
+    expect(updates).toBeGreaterThan(0)
+    expect(updates).toBeLessThan(16)
+    await mark.tap()
+    await expect(overlay.locator('.ar-top strong')).toContainText('Wall 2:')
+    await overlay.getByRole('button', { name: 'Exit' }).tap()
+  })
+
   test('selection keeps the inspector shut while touch controls move, rotate, replace, and basket items', async ({ page }) => {
     await drawOnScreen(page)
     await touchSquare(page)

@@ -96,7 +96,7 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
     reticle.matrixAutoUpdate = false; reticle.visible = false; pending.visible = false
     scene.add(reticle, pending, marks)
     const walls: { wall: MeasuredWall; group: Group }[] = []
-    let start: { point: Point3; dot: Mesh } | null = null, current: Point3 | null = null, floorY: number | null = null, liveKey = '', hitSource: XRHitTestSource | undefined
+    let start: { point: Point3; dot: Mesh } | null = null, current: Point3 | null = null, floorY: number | null = null, liveKey = '', lastLiveUpdate = -Infinity, hitSource: XRHitTestSource | undefined
     const onFloor = (point: Point3) => floorY === null || Math.abs(point.y - floorY) <= FLOOR_TOLERANCE
     const placeLine = (mesh: Mesh, a: Point3, b: Point3) => {
       mesh.position.set((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.003, (a.z + b.z) / 2)
@@ -136,26 +136,26 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
     xr.current = { session, mark, undo, finish: false }
     setArWalls([]); setLive({ status: 'searching', distance: null }); setMode('ar')
     try {
-      await renderer.xr.setSession(session)
       hitSource = await session.requestHitTestSource?.({ space: await session.requestReferenceSpace('viewer') })
       if (!hitSource) throw new Error('Hit testing is unavailable.')
+      renderer.setAnimationLoop((time, frame) => {
+        const space = renderer.xr.getReferenceSpace()
+        const pose = frame && space ? frame.getHitTestResults(hitSource!)[0]?.getPose(space) : undefined
+        const m = pose?.transform.matrix
+        current = m && m[5] > 0.8 ? { x: m[12], y: m[13], z: m[14] } : null
+        reticle.visible = Boolean(current)
+        if (m && current) reticle.matrix.fromArray(m)
+        pending.visible = Boolean(start && current)
+        if (start && current) placeLine(pending, start.point, current)
+        const next: Live = { status: !current ? 'searching' : onFloor(current) ? 'floor' : 'off-floor', distance: start && current ? dist(start.point, current) : null }
+        const key = `${next.status}:${next.distance === null ? '' : Math.round(next.distance * 100)}`
+        if (key !== liveKey && time - lastLiveUpdate >= 100) { liveKey = key; lastLiveUpdate = time; setLive(next) }
+        renderer.render(scene, camera)
+      })
+      await renderer.xr.setSession(session)
     } catch {
       setMessage('This device could not start AR floor tracking. Enter the wall lengths instead.'); session.end().catch(() => undefined); return
     }
-    renderer.setAnimationLoop((_, frame) => {
-      const space = renderer.xr.getReferenceSpace()
-      const pose = frame && space ? frame.getHitTestResults(hitSource!)[0]?.getPose(space) : undefined
-      const m = pose?.transform.matrix
-      current = m && m[5] > 0.8 ? { x: m[12], y: m[13], z: m[14] } : null
-      reticle.visible = Boolean(current)
-      if (m && current) reticle.matrix.fromArray(m)
-      pending.visible = Boolean(start && current)
-      if (start && current) placeLine(pending, start.point, current)
-      const next: Live = { status: !current ? 'searching' : onFloor(current) ? 'floor' : 'off-floor', distance: start && current ? dist(start.point, current) : null }
-      const key = `${next.status}:${next.distance === null ? '' : Math.round(next.distance * 100)}`
-      if (key !== liveKey) { liveKey = key; setLive(next) }
-      renderer.render(scene, camera)
-    })
   }
   const endAr = (finish: boolean) => { if (!xr.current) return; xr.current.finish = finish; xr.current.session.end().catch(() => undefined) }
 
