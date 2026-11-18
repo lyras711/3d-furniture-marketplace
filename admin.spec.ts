@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test'
-import { products } from './src/catalog'
+import { products, type Product } from './src/catalog'
 import { partnerFields, type Partner } from './src/partners'
 import type { AdminPurchaseRequest } from './src/purchase'
 
@@ -9,9 +9,19 @@ const origin = (process.env.TEST_URL || 'http://127.0.0.1:5174').replace(/\/$/, 
 const base64url = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url')
 const now = Math.floor(Date.now() / 1000)
 const idToken = `${base64url({ alg: 'none', typ: 'JWT' })}.${base64url({ iss: 'https://securetoken.google.com/forma-furniture-marketplace', aud: 'forma-furniture-marketplace', sub: 'admin-uid', user_id: 'admin-uid', email: 'ops@formivo3d.com', iat: now, exp: now + 3600, auth_time: now, firebase: { sign_in_provider: 'password' } })}.sig`
+type MockCrawlJob = { id: string; siteUrl: string; retailerId: string; maxProducts: number; delayMs: number; status: string; discoveredUrls: string[]; items: { url: string; status: string; sku: string | null; productId: string | null; artifactRoot: string | null; error: string | null; updatedAt: string }[]; currentUrl: string | null; error: string | null; createdAt: string; updatedAt: string }
+type MockMetadataCrawl = { id: string; brandName: string; retailerId: string; website: string; maxProducts: number; delayMs: number; status: string; discoveredUrls: string[]; items: { url: string; productId: string | null; status: string; error: string | null; updatedAt: string }[]; currentUrl: string | null; error: string | null; createdAt: string; updatedAt: string }
 
 function order(id: string, status: AdminPurchaseRequest['status'], createdAt: string, name: string): AdminPurchaseRequest {
   return { id, projectId: `project-${id}`, projectName: `${name}'s living room`, customer: { name, email: `${name.toLowerCase()}@example.com`, phone: '+30 210 000 0000', city: 'Athens', notes: id === 'order-1' ? 'Please deliver after 5pm.' : '' }, items: [{ id: '["sofa-haven",""]', productId: 'sofa-haven', name: 'Haven sofa', retailer: 'Minoa Studio', sku: 'SOFA-1', quantity: 1, unitPrice: 899, catalogStatus: 'Sample', availability: status === 'pending' ? 'pending' : 'available', included: true }], estimatedTotal: 899, currency: 'EUR', status, createdAt, updatedAt: createdAt, history: [{ status: 'pending', at: createdAt, by: 'customer' }], adminNotes: [] }
+}
+
+function metadataCrawl(id: string, status: string, brandName: string): MockMetadataCrawl {
+  return { id, brandName, retailerId: id, website: `https://${id}.example`, maxProducts: 10, delayMs: 1000, status, discoveredUrls: [], items: [], currentUrl: null, error: null, createdAt: '2026-11-01T10:00:00.000Z', updatedAt: '2026-11-01T10:00:00.000Z' }
+}
+
+function legacyCrawl(id: string, status: string, siteUrl: string): MockCrawlJob {
+  return { id, siteUrl, retailerId: id, maxProducts: 10, delayMs: 1000, status, discoveredUrls: [], items: [], currentUrl: null, error: null, createdAt: '2026-11-01T10:00:00.000Z', updatedAt: '2026-11-01T10:00:00.000Z' }
 }
 
 function minimalGlb() {
@@ -24,13 +34,16 @@ function minimalGlb() {
 }
 
 /** Stateful stand-in for scripts/admin-server.ts so the dashboard can be driven without Firebase Admin credentials. */
-async function mockBackend(page: Page, role = 'owner') {
+async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJob[]; catalogCrawls?: MockMetadataCrawl[] } = {}) {
   const calls: { method: string; path: string; body: unknown }[] = []
   const requests = [order('order-1', 'pending', '2026-11-01T10:00:00.000Z', 'Maria'), order('order-2', 'ready-to-place', '2026-11-02T10:00:00.000Z', 'Nikos'), order('order-3', 'delivered', '2026-10-20T10:00:00.000Z', 'Eleni')]
+  let jobs = [...(seed.jobs || [])]
+  let catalogCrawls = [...(seed.catalogCrawls || [])]
   const partners: Partner[] = []
-  const edits = new Map<string, { hidden?: boolean; review?: string }>([['sofa-haven', { review: 'needs-work' }]])
+  const createdCatalogProducts: Product[] = []
+  const edits = new Map<string, { hidden?: boolean; review?: string; deletedAt?: string; overrides?: Record<string, unknown> }>([['sofa-haven', { review: 'needs-work' }]])
   const texturePaths = new Map<string, string>()
-  const catalog = () => ({ products: products.slice(0, 8).map((product) => ({ id: product.id, sku: product.sku, name: product.name, brand: product.brand, retailer: product.retailer, retailerId: product.retailerId || null, group: product.group, category: product.category, width: product.width, depth: product.depth, height: product.height, price: product.price, status: product.status, thumbnailPath: product.thumbnailPath || null, modelPath: product.modelPath || null, variantCount: product.variants?.length || 0, verification: null, hidden: Boolean(edits.get(product.id)?.hidden), review: edits.get(product.id)?.review || 'pending', updatedAt: null })) })
+  const catalog = () => ({ products: [...products.slice(0, 8), ...createdCatalogProducts].map((product) => { const edit = edits.get(product.id); return { ...product, ...edit?.overrides, hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null } }) })
   await page.route('https://identitytoolkit.googleapis.com/**', (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('accounts:signInWithPassword')) return route.fulfill({ json: { kind: 'identitytoolkit#VerifyPasswordResponse', localId: 'admin-uid', email: 'ops@formivo3d.com', idToken, refreshToken: 'refresh', expiresIn: '3600', registered: true } })
@@ -43,10 +56,46 @@ async function mockBackend(page: Page, role = 'owner') {
     expect(request.headers().authorization).toBe(`Bearer ${idToken}`)
     const at = new Date().toISOString()
     if (path === '/api/admin/me') return route.fulfill({ json: { uid: 'admin-uid', email: 'ops@formivo3d.com', role } })
-    if (path === '/api/admin/jobs') return route.fulfill({ json: [] })
-    if (path === '/api/admin/catalog-crawls' && method === 'GET') return route.fulfill({ json: [] })
+    if (path === '/api/admin/jobs' && method === 'GET') return route.fulfill({ json: jobs })
+    if (path === '/api/admin/jobs' && method === 'DELETE') {
+      const finished = jobs.filter((job) => ['completed', 'cancelled', 'failed'].includes(job.status))
+      jobs = jobs.filter((job) => !['completed', 'cancelled', 'failed'].includes(job.status))
+      return route.fulfill({ json: { deleted: finished.length, skippedActive: jobs.length } })
+    }
+    const deleteJobMatch = path.match(/^\/api\/admin\/jobs\/([^/]+)$/)
+    if (deleteJobMatch && method === 'DELETE') {
+      const index = jobs.findIndex((job) => job.id === deleteJobMatch[1])
+      if (index < 0) return route.fulfill({ status: 404, json: { error: 'Not found' } })
+      if (!['completed', 'cancelled', 'failed'].includes(jobs[index].status)) return route.fulfill({ status: 409, json: { error: 'Only finished crawl history can be deleted.' } })
+      jobs.splice(index, 1); return route.fulfill({ json: { id: deleteJobMatch[1], deleted: true } })
+    }
+    if (path === '/api/admin/catalog-crawls' && method === 'GET') return route.fulfill({ json: catalogCrawls })
     if (path === '/api/admin/catalog-crawls' && method === 'POST') return route.fulfill({ status: 202, json: { id: 'crawl-1', brandName: body.brandName, status: 'queued', items: [] } })
+    if (path === '/api/admin/catalog-crawls' && method === 'DELETE') {
+      const finished = catalogCrawls.filter((job) => ['completed', 'failed'].includes(job.status))
+      catalogCrawls = catalogCrawls.filter((job) => !['completed', 'failed'].includes(job.status))
+      return route.fulfill({ json: { deleted: finished.length, skippedActive: catalogCrawls.length } })
+    }
+    const deleteMetadataMatch = path.match(/^\/api\/admin\/catalog-crawls\/([^/]+)$/)
+    if (deleteMetadataMatch && method === 'DELETE') {
+      const index = catalogCrawls.findIndex((job) => job.id === deleteMetadataMatch[1])
+      if (index < 0) return route.fulfill({ status: 404, json: { error: 'Not found' } })
+      if (!['completed', 'failed'].includes(catalogCrawls[index].status)) return route.fulfill({ status: 409, json: { error: 'Only finished crawl history can be deleted.' } })
+      const deleteImportedData = (body as { deleteImportedData?: boolean } | null)?.deleteImportedData === true
+      catalogCrawls.splice(index, 1); return route.fulfill({ json: { id: deleteMetadataMatch[1], deleted: true, productsDeleted: deleteImportedData ? 1 : 0, productsSkipped: 0, imagesDeleted: deleteImportedData ? 2 : 0 } })
+    }
     if (path === '/api/admin/catalog' && method === 'GET') return route.fulfill({ json: catalog() })
+    if (path === '/api/admin/catalog' && method === 'POST') {
+      const input = body as Record<string, unknown>, id = 'manual-coffee-table'
+      createdCatalogProducts.push({ ...input, id, tone: '#b8ab95', accent: '#816b54', status: 'Manual draft · review required', modelPath: null, variants: [], sourceImages: input.thumbnailUrl ? [String(input.thumbnailUrl)] : [] } as unknown as Product)
+      edits.set(id, { hidden: true, review: 'pending' })
+      return route.fulfill({ status: 201, json: { id, hidden: true, review: 'pending' } })
+    }
+    if (path === '/api/admin/catalog/bulk-archive' && method === 'POST') {
+      const ids = (body as { ids: string[] }).ids
+      for (const id of ids) edits.set(id, { ...edits.get(id), deletedAt: at })
+      return route.fulfill({ json: { archived: ids.length, alreadyArchived: 0 } })
+    }
     if (path === '/api/admin/users') return route.fulfill({ json: [{ uid: 'admin-uid', email: 'ops@formivo3d.com', role: 'owner', status: 'active' }] })
     if (path === '/api/admin/audit') return route.fulfill({ json: [] })
     if (path === '/api/admin/metrics') return route.fulfill({ json: { savedProjects: 12, requestsByStatus: {} } })
@@ -75,6 +124,15 @@ async function mockBackend(page: Page, role = 'owner') {
     }
     const catalogMatch = path.match(/^\/api\/admin\/catalog\/([^/]+)$/)
     const textureMatch = path.match(/^\/api\/admin\/catalog\/([^/]+)\/variants\/([^/]+)\/texture$/)
+    const restoreCatalogMatch = path.match(/^\/api\/admin\/catalog\/([^/]+)\/restore$/)
+    if (restoreCatalogMatch && method === 'POST') { const edit = edits.get(restoreCatalogMatch[1]) || {}; delete edit.deletedAt; edits.set(restoreCatalogMatch[1], edit); return route.fulfill({ json: { id: restoreCatalogMatch[1], deleted: false } }) }
+    if (catalogMatch && method === 'PATCH') {
+      const edit = edits.get(catalogMatch[1]) || {}
+      if (body.overrides === null) delete edit.overrides
+      else edit.overrides = { ...edit.overrides, ...body.overrides }
+      edits.set(catalogMatch[1], edit); return route.fulfill({ json: { id: catalogMatch[1], overrides: edit.overrides || {} } })
+    }
+    if (catalogMatch && method === 'DELETE') { edits.set(catalogMatch[1], { ...edits.get(catalogMatch[1]), deletedAt: at }); return route.fulfill({ json: { id: catalogMatch[1], deleted: true } }) }
     if (textureMatch && method === 'PUT') {
       const texturePath = `https://storage.googleapis.com/test/${textureMatch[1]}/${textureMatch[2]}.png`
       texturePaths.set(`${textureMatch[1]}:${textureMatch[2]}`, texturePath)
@@ -82,9 +140,10 @@ async function mockBackend(page: Page, role = 'owner') {
     }
     if (catalogMatch && method === 'PUT') { edits.set(catalogMatch[1], { ...edits.get(catalogMatch[1]), ...body }); return route.fulfill({ json: { id: catalogMatch[1], ...body } }) }
     if (catalogMatch && method === 'GET') {
-      const product = products.find((item) => item.id === catalogMatch[1])
+      const product = [...products, ...createdCatalogProducts].find((item) => item.id === catalogMatch[1])
       if (!product) return route.fulfill({ status: 404, json: { error: 'Not found' } })
-      return route.fulfill({ json: { ...product, variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edits.get(product.id)?.hidden), review: edits.get(product.id)?.review || 'pending', updatedAt: null, missingFields: [] } })
+      const edit = edits.get(product.id)
+      return route.fulfill({ json: { ...product, ...edit?.overrides, variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null, missingFields: [] } })
     }
     return route.fulfill({ status: 404, json: { error: `Unmocked ${method} ${path}` } })
   })
@@ -179,12 +238,20 @@ test('admin dashboard: partners pipeline and catalogue visibility/review', async
 })
 
 test('viewer accounts only see read-only sections', async ({ page }) => {
-  await mockBackend(page, 'viewer')
+  await mockBackend(page, 'viewer', { catalogCrawls: [metadataCrawl('crawl-viewer', 'failed', 'Viewer retailer')], jobs: [legacyCrawl('legacy-viewer', 'completed', 'https://viewer.example')] })
   await signIn(page)
   await expect(page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button')).toHaveText(['Overview', /^Catalogue/, 'Ingestion'])
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
   await expect(page.locator('.admin-catalog-table select')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^Hide / })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Add product' })).toHaveCount(0)
+  await expect(page.getByLabel('Select all visible products')).toHaveCount(0)
+  await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
+  await expect(page.getByRole('button', { name: 'Delete product' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Edit catalogue metadata' })).toHaveCount(0)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: 'Ingestion' }).click()
+  await expect(page.getByRole('button', { name: /Delete .* crawl/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Clear finished .* crawls/ })).toHaveCount(0)
 })
 
 test('the whole catalogue product slot opens its detail page', async ({ page }) => {
@@ -215,6 +282,84 @@ test('catalogue opens a separate product details page with metadata and model pr
   await page.screenshot({ path: '/tmp/formivo-catalog-detail-desktop.png', fullPage: true })
   await page.setViewportSize({ width: 375, height: 812 })
   await page.screenshot({ path: '/tmp/formivo-catalog-detail-mobile.png', fullPage: true })
+})
+
+test('admins can edit, archive and restore a bundled catalogue product', async ({ page }) => {
+  const calls = await mockBackend(page)
+  await signIn(page)
+  page.on('dialog', (dialog) => void dialog.accept())
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
+  await page.getByLabel('Product name').fill('Haven sofa edited')
+  await page.getByLabel('Width (cm)').fill('225')
+  await page.getByRole('button', { name: 'Save metadata' }).click()
+  await expect(page.getByRole('heading', { name: 'Haven sofa edited' })).toBeVisible()
+  expect(calls.find((call) => call.method === 'PATCH' && call.path === '/api/admin/catalog/sofa-haven')?.body).toMatchObject({ overrides: { name: 'Haven sofa edited', width: 225 } })
+
+  await page.getByRole('button', { name: 'Delete product' }).click()
+  await expect(page.getByText('Archived', { exact: true })).toBeVisible()
+  expect(calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/catalog/sofa-haven')).toBe(true)
+  await page.getByRole('button', { name: 'Restore product' }).click()
+  await expect(page.getByRole('button', { name: 'Delete product' })).toBeVisible()
+  expect(calls.some((call) => call.method === 'POST' && call.path === '/api/admin/catalog/sofa-haven/restore')).toBe(true)
+  await page.screenshot({ path: '/tmp/formivo-admin-catalog-edit-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-admin-catalog-edit-mobile.png', fullPage: true })
+})
+
+test('admins can multi-select products and archive them together', async ({ page }) => {
+  const calls = await mockBackend(page)
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await page.getByLabel('Select all visible products').check()
+  await expect(page.getByText('8 selected', { exact: true })).toBeVisible()
+  await page.getByLabel('Select all visible products').uncheck()
+
+  const selected = products.slice(0, 2)
+  for (const product of selected) await page.getByLabel(`Select ${product.name}`).check()
+  page.once('dialog', (dialog) => void dialog.accept())
+  await page.getByRole('button', { name: 'Archive selected' }).click()
+  await expect(page.getByRole('status')).toContainText('2 products archived')
+  expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog/bulk-archive')?.body).toEqual({ ids: selected.map((product) => product.id) })
+  for (const product of selected) await expect(page.locator(`#catalog-${product.id}`)).toContainText('Archived')
+  await page.screenshot({ path: '/tmp/formivo-admin-catalog-bulk-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-admin-catalog-bulk-mobile.png', fullPage: true })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+})
+
+test('admins can manually create a hidden catalogue product draft', async ({ page }) => {
+  const calls = await mockBackend(page)
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await page.getByRole('button', { name: 'Add product' }).click()
+  const form = page.getByRole('region', { name: 'New catalogue product' })
+  await form.getByLabel('Product name').fill('Studio coffee table')
+  await form.getByLabel('Brand').fill('Formivo')
+  await form.getByLabel('Retailer').fill('Formivo')
+  await form.getByLabel('SKU (optional)').fill('TABLE-01')
+  await form.getByLabel('Product group').selectOption('Tables')
+  await form.getByLabel('Category').fill('Coffee tables')
+  await form.getByLabel('Width (cm)').fill('120')
+  await form.getByLabel('Depth (cm)').fill('65')
+  await form.getByLabel('Height (cm)').fill('42')
+  await form.getByLabel('Price (€; optional)').fill('399')
+  await form.getByLabel('Source product URL (optional)').fill('https://formivo3d.com/studio-table')
+  await form.getByLabel('Thumbnail image URL (optional)').fill('https://images.example/studio-table.jpg')
+  await page.screenshot({ path: '/tmp/formivo-admin-catalog-create-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-admin-catalog-create-mobile.png', fullPage: true })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await form.getByRole('button', { name: 'Create product' }).click()
+  await expect(page).toHaveURL(/\/admin\/catalog\/manual-coffee-table$/)
+  await expect(page.getByRole('heading', { name: 'Studio coffee table' })).toBeVisible()
+  await expect(page.getByText('No GLB uploaded yet.')).toBeVisible()
+  expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog')?.body).toEqual({
+    name: 'Studio coffee table', brand: 'Formivo', retailer: 'Formivo', sku: 'TABLE-01', group: 'Tables',
+    category: 'Coffee tables', width: 120, depth: 65, height: 42, price: 399,
+    sourceUrl: 'https://formivo3d.com/studio-table', thumbnailUrl: 'https://images.example/studio-table.jpg',
+  })
 })
 
 test('admins can preview and save a texture independently for a product variant', async ({ page }) => {
@@ -252,6 +397,68 @@ test('ingestion submits a metadata-only crawl for a retailer brand', async ({ pa
   await page.screenshot({ path: '/tmp/formivo-catalog-ingestion-desktop.png', fullPage: true })
   await page.setViewportSize({ width: 375, height: 812 })
   await page.screenshot({ path: '/tmp/formivo-catalog-ingestion-mobile.png', fullPage: true })
+})
+
+test('admins can delete and clear finished crawl history without deleting products or active jobs', async ({ page }) => {
+  const calls = await mockBackend(page, 'owner', {
+    catalogCrawls: [
+      metadataCrawl('crawl-old', 'failed', 'Old retailer'),
+      metadataCrawl('crawl-linked', 'completed', 'Linked retailer'),
+      metadataCrawl('crawl-newer', 'completed', 'Finished retailer'),
+      metadataCrawl('crawl-active', 'running', 'Active retailer'),
+    ],
+    jobs: [
+      legacyCrawl('legacy-old', 'completed', 'https://old.example'),
+      legacyCrawl('legacy-clear', 'failed', 'https://finished.example'),
+      legacyCrawl('legacy-active', 'running', 'https://active.example'),
+    ],
+  })
+  await signIn(page)
+  page.on('dialog', (dialog) => void dialog.accept())
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: 'Ingestion' }).click()
+  await page.screenshot({ path: '/tmp/forma-admin-crawl-history-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/forma-admin-crawl-history-mobile.png', fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+
+  const metadataList = page.locator('.admin-job-list').nth(0)
+  await expect(metadataList.getByRole('button', { name: 'Delete Active retailer crawl' })).toBeDisabled()
+  await metadataList.getByRole('button', { name: 'Delete Old retailer crawl' }).click()
+  await expect(page.getByRole('alertdialog')).toBeVisible()
+  await page.getByRole('button', { name: 'Delete history only' }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/catalog-crawls/crawl-old' && JSON.stringify(call.body) === '{"deleteImportedData":false}')).toBe(true)
+  await expect(metadataList).not.toContainText('Old retailer')
+  await expect(metadataList).toContainText('Linked retailer')
+
+  await metadataList.getByRole('button', { name: 'Delete Linked retailer crawl' }).click()
+  await expect(page.getByRole('alertdialog')).toContainText('Uploaded 3D models and textures are preserved')
+  await page.screenshot({ path: '/tmp/forma-admin-crawl-delete-choice-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/forma-admin-crawl-delete-choice-mobile.png', fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.getByRole('button', { name: 'Delete linked drafts and images' }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/catalog-crawls/crawl-linked' && JSON.stringify(call.body) === '{"deleteImportedData":true}')).toBe(true)
+  await expect(page.getByRole('status')).toContainText('1 linked product drafts')
+  await expect(metadataList).not.toContainText('Linked retailer')
+
+  await page.getByRole('button', { name: 'Clear finished metadata crawls' }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/catalog-crawls')).toBe(true)
+  await expect(metadataList).not.toContainText('Finished retailer')
+  await expect(metadataList).toContainText('Active retailer')
+
+  const legacyList = page.locator('.admin-job-list').nth(1)
+  await legacyList.getByRole('button', { name: 'Delete legacy-old crawl' }).click()
+  await expect(page.getByRole('alertdialog')).toContainText('This release can remove only the crawl history')
+  await expect(page.getByRole('button', { name: 'Delete linked drafts and images' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Delete history only' }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/jobs/legacy-old' && JSON.stringify(call.body) === '{"deleteImportedData":false}')).toBe(true)
+  await expect(legacyList).not.toContainText('https://old.example')
+  await page.getByRole('button', { name: 'Clear finished legacy crawls' }).click()
+  await expect.poll(() => calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/jobs')).toBe(true)
+  await expect(legacyList).not.toContainText('https://finished.example')
+  await expect(legacyList).toContainText('https://active.example')
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await expect(page.locator('.admin-catalog-table')).toContainText('Haven three-seat sofa')
 })
 
 test.describe('compact admin', () => {

@@ -9,13 +9,14 @@ import { getApps, initializeApp } from 'firebase-admin/app'
 import { getAuth, type DecodedIdToken } from 'firebase-admin/auth'
 import { getAppCheck } from 'firebase-admin/app-check'
 import { FieldValue, getFirestore } from 'firebase-admin/firestore'
-import { cancelCrawlJob, createCrawlJob, getJob, listJobs, runCrawlJob } from './catalog-workflow'
+import { cancelCrawlJob, clearFinishedCrawlJobs, createCrawlJob, deleteCrawlJob, getJob, listJobs, runCrawlJob } from './catalog-workflow'
 import { activePurchaseStatuses, adminTransitionAllowed, decidePurchaseItems, estimatePurchase, purchaseItemId, purchaseStatuses, reviewPurchaseItems, type AdminNote, type AdminPurchaseRequest, type AdminStatusChange, type AvailabilityUpdate, type PurchaseHistoryEntry, type PurchaseItem, type PurchaseRequest } from '../src/purchase'
 import { getFloorRegions, isProject, migrateProject, productById, type ProjectState } from '../src/editor'
 import { catalogReviews, products, type CatalogReview } from '../src/catalog'
 import { partnerFields, type Partner, type PartnerNote } from '../src/partners'
+import { applyCatalogMetadataOverrides, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseManualCatalogProduct, readCatalogMetadataOverrides } from './catalog-admin'
 import { VertexPlanVisionProvider } from './plan-vision'
-import { createMetadataCrawl, getMetadataCrawl, listMetadataCrawls, runMetadataCrawl } from './catalog-metadata-crawl'
+import { clearFinishedMetadataCrawls, createMetadataCrawl, deleteMetadataCrawl, getMetadataCrawl, listMetadataCrawls, runMetadataCrawl } from './catalog-metadata-crawl'
 import { uploadBuffer } from './firebase-store'
 import { validateGlb, validateTexture } from './catalog-asset'
 
@@ -67,8 +68,6 @@ function userId(pathname: string) {
 function catalogId(pathname: string) {
   return pathname.match(/^\/api\/admin\/catalog\/([^/]+)$/)?.[1] || null
 }
-
-const hiddenEdit = (data: Record<string, unknown>) => data.hidden === true || (data.hidden === undefined && Boolean(data.deletedAt))
 
 function roleFromValue(value: unknown): Role | null {
   return value === 'viewer' || value === 'editor' || value === 'admin' || value === 'owner' ? value : null
@@ -131,20 +130,52 @@ function catalogVariants(product: Record<string, unknown>, edit: Record<string, 
   })
 }
 
-/** Bundled catalogue (what the planner ships) plus admin visibility/review state. Name, price and dimensions are partner-owned and read-only here. */
+function catalogProductView(source: Record<string, unknown>, edit: Record<string, unknown>) {
+  const overrides = readCatalogMetadataOverrides(edit.overrides), product = applyCatalogMetadataOverrides(source, overrides)
+  const modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : product.modelPath
+  const metadata = product.metadata as { missingFields?: string[] } | undefined
+  const resolved: Record<string, boolean> = {
+    name: Boolean(product.name), sku: Boolean(product.sku), price: product.price != null,
+    width: Number(product.width) > 0, depth: Number(product.depth) > 0, height: Number(product.height) > 0,
+    images: Array.isArray(product.sourceImages) && product.sourceImages.length > 0,
+  }
+  const missing = (metadata?.missingFields || []).filter((field) => !Object.hasOwn(resolved, field.toLowerCase()) || !resolved[field.toLowerCase()])
+  const missingFields = [
+    ...missing,
+    ...(!resolved.sku ? ['SKU'] : []),
+    ...(!resolved.price ? ['Price'] : []),
+    ...(!resolved.width ? ['Width'] : []),
+    ...(!resolved.depth ? ['Depth'] : []),
+    ...(!resolved.height ? ['Height'] : []),
+    ...(!resolved.images ? ['Images'] : []),
+    ...(!modelPath ? ['3D model'] : []),
+  ]
+  const updatedAt = typeof edit.updatedAt === 'object' && edit.updatedAt && 'toDate' in edit.updatedAt
+    ? (edit.updatedAt as { toDate(): Date }).toDate().toISOString()
+    : (product.updatedAt || null)
+  return {
+    ...product,
+    id: source.id,
+    modelPath,
+    variants: catalogVariants(product, edit, modelPath),
+    missingFields: [...new Set(missingFields)],
+    hidden: catalogIsHidden(edit),
+    deleted: catalogIsDeleted(edit),
+    hasOverrides: Object.keys(overrides).length > 0,
+    overrides,
+    review: catalogReviews.includes(edit.review as CatalogReview) ? edit.review as CatalogReview : 'pending',
+    updatedAt,
+  }
+}
+
 async function catalogView() {
   let edits = new Map<string, Record<string, unknown>>()
   try { edits = await catalogEdits() } catch {}
-  return { products: (await allCatalogProducts()).map((product) => {
-    const edit = edits.get(String(product.id)) || {}, modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : product.modelPath
-    const metadata = product.metadata as { missingFields?: string[] } | undefined
-    const missingFields = [...(metadata?.missingFields || []), ...(!product.sku ? ['SKU'] : []), ...(product.price == null ? ['Price'] : []), ...(!product.width ? ['Width'] : []), ...(!product.depth ? ['Depth'] : []), ...(!product.height ? ['Height'] : []), ...(!Array.isArray(product.sourceImages) || !product.sourceImages.length ? ['Images'] : []), ...(!modelPath ? ['3D model'] : [])]
-    return { ...product, id: product.id, modelPath, variants: catalogVariants(product, edit, modelPath), missingFields: [...new Set(missingFields)], hidden: hiddenEdit(edit), review: catalogReviews.includes(edit.review as CatalogReview) ? edit.review as CatalogReview : 'pending', updatedAt: typeof edit.updatedAt === 'object' && edit.updatedAt && 'toDate' in edit.updatedAt ? (edit.updatedAt as { toDate(): Date }).toDate().toISOString() : (product.updatedAt || null) }
-  }) }
+  return { products: (await allCatalogProducts()).map((product) => catalogProductView(product, edits.get(String(product.id)) || {})) }
 }
 
 async function hiddenProductIds() {
-  return new Set([...(await catalogEdits())].filter(([, data]) => hiddenEdit(data)).map(([id]) => id))
+  return new Set([...(await catalogEdits())].filter(([, data]) => catalogIsHidden(data)).map(([id]) => id))
 }
 
 async function enqueueJob(jobId: string) {
@@ -265,7 +296,7 @@ function requestText(value: unknown, label: string, max: number, required = true
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || host}`)
-    if (request.method === 'OPTIONS') { response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type,x-firebase-appcheck' }); response.end(); return }
+    if (request.method === 'OPTIONS') { response.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS', 'access-control-allow-headers': 'authorization,content-type,x-firebase-appcheck' }); response.end(); return }
     if (request.method === 'POST' && url.pathname === '/api/planner/detect-floor-plan') {
       const uid = await plannerUser(request), input = await body(request, 18 * 1024 * 1024)
       const validBase64 = (value: unknown): value is string => typeof value === 'string' && /^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
@@ -385,16 +416,72 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/catalog/products') {
       const { products: catalog } = await catalogView()
-      json(response, 200, { products: catalog.map(({ hidden: _hidden, review: _review, updatedAt: _updatedAt, ...product }) => product), hidden: catalog.filter((product) => product.hidden).map((product) => product.id) }); return
+      json(response, 200, { products: catalog.map(({ hidden: _hidden, review: _review, updatedAt: _updatedAt, deleted: _deleted, hasOverrides: _hasOverrides, overrides: _overrides, ...product }) => product), hidden: catalog.filter((product) => product.hidden).map((product) => product.id) }); return
     }
     if (!url.pathname.startsWith('/api/admin/')) { json(response, 404, { error: 'Not found.' }); return }
     const me = await context(request, url.pathname === '/api/admin/me' ? 'viewer' : 'viewer')
     if (request.method === 'GET' && url.pathname === '/api/admin/me') { json(response, 200, { uid: me.uid, email: me.email, role: me.role }); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/jobs') { json(response, 200, await listJobs()); return }
     if (request.method === 'GET' && url.pathname === '/api/admin/catalog') { json(response, 200, await catalogView()); return }
+    if (request.method === 'POST' && url.pathname === '/api/admin/catalog') {
+      const actor = await context(request, 'admin')
+      let input: ReturnType<typeof parseManualCatalogProduct>
+      try { input = parseManualCatalogProduct(await body(request)) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'Catalog product is invalid.') }
+      const db = firebase().db, ref = db.collection('catalogProducts').doc(), timestamp = FieldValue.serverTimestamp()
+      const batch = db.batch()
+      batch.create(ref, {
+        id: ref.id, name: input.name, brand: input.brand, retailer: input.retailer, sku: input.sku,
+        group: input.group, category: input.category, width: input.width, depth: input.depth, height: input.height,
+        price: input.price, currency: 'EUR', tone: '#b8ab95', accent: '#816b54',
+        status: 'Manual draft · review required', importedBy: 'admin-manual', sourceUrl: input.sourceUrl,
+        thumbnailPath: input.thumbnailUrl, sourceImages: input.thumbnailUrl ? [input.thumbnailUrl] : [],
+        modelPath: null, variants: [], createdAt: timestamp, updatedAt: timestamp,
+      })
+      batch.set(db.collection('catalogEdits').doc(ref.id), { hidden: true, review: 'pending', createdAt: timestamp, updatedAt: timestamp, updatedBy: actor.uid }, { merge: true })
+      await batch.commit()
+      await audit(actor, 'catalog.created', ref.id, { name: input.name, importedBy: 'admin-manual' })
+      json(response, 201, { id: ref.id, hidden: true, review: 'pending' }); return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/admin/catalog/bulk-archive') {
+      const actor = await context(request, 'admin')
+      let ids: string[]
+      try { ids = parseCatalogArchiveIds(await body(request)) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'Catalog product ids are invalid.') }
+      const db = firebase().db, [catalog, edits] = await Promise.all([allCatalogProducts(), catalogEdits()])
+      const knownIds = new Set(catalog.map((product) => String(product.id)))
+      if (ids.some((id) => !knownIds.has(id))) throw new ApiError(404, 'One or more catalog products were not found.')
+      const activeIds = ids.filter((id) => !catalogIsDeleted(edits.get(id) || {}))
+      if (activeIds.length) {
+        const batch = db.batch()
+        for (const id of activeIds) batch.set(db.collection('catalogEdits').doc(id), {
+          deletedAt: FieldValue.serverTimestamp(), deletedBy: actor.uid,
+          updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid,
+        }, { merge: true })
+        await batch.commit()
+        await audit(actor, 'catalog.bulk-archived', 'selected', { ids: activeIds, assetsPreserved: true })
+      }
+      json(response, 200, { archived: activeIds.length, alreadyArchived: ids.length - activeIds.length }); return
+    }
     if (request.method === 'GET' && url.pathname === '/api/admin/catalog-crawls') { json(response, 200, await listMetadataCrawls()); return }
+    if (request.method === 'DELETE' && url.pathname === '/api/admin/catalog-crawls') {
+      const actor = await context(request, 'admin'), result = await clearFinishedMetadataCrawls()
+      await audit(actor, 'catalog.metadata-crawls-cleared', 'finished', result)
+      json(response, 200, result); return
+    }
     const metadataCrawlId = url.pathname.match(/^\/api\/admin\/catalog-crawls\/([A-Za-z0-9_-]+)$/)?.[1]
     if (request.method === 'GET' && metadataCrawlId) { const job = await getMetadataCrawl(metadataCrawlId); if (!job) throw new ApiError(404, 'Catalog crawl not found.'); json(response, 200, job); return }
+    if (request.method === 'DELETE' && metadataCrawlId) {
+      const actor = await context(request, 'admin'), input = await body(request)
+      if (input.deleteImportedData !== undefined && typeof input.deleteImportedData !== 'boolean') throw new ApiError(400, 'deleteImportedData must be true or false.')
+      let result: Awaited<ReturnType<typeof deleteMetadataCrawl>>
+      try { result = await deleteMetadataCrawl(metadataCrawlId, input.deleteImportedData === true) } catch (error) {
+        if (error instanceof Error && error.message === 'Only finished crawl history can be deleted.') throw new ApiError(409, error.message)
+        throw error
+      }
+      if (!result) throw new ApiError(404, 'Catalog crawl not found.')
+      const { job, ...deleted } = result
+      await audit(actor, 'catalog.metadata-crawl-deleted', job.id, { brandName: job.brandName, status: job.status, deleteImportedData: input.deleteImportedData === true, ...deleted })
+      json(response, 200, { id: job.id, deleted: true, ...deleted }); return
+    }
     if (request.method === 'POST' && url.pathname === '/api/admin/catalog-crawls') {
       const actor = await context(request, 'editor'), input = await body(request)
       if (typeof input.brandName !== 'string' || typeof input.website !== 'string' || typeof input.retailerId !== 'string') throw new ApiError(400, 'Brand name, retailer id and HTTPS website are required.')
@@ -507,6 +594,25 @@ const server = createServer(async (request, response) => {
       const snapshot = await firebase().db.collection('adminUsers').get()
       json(response, 200, snapshot.docs.map((doc) => ({ uid: doc.id, ...doc.data() }))); return
     }
+    if (request.method === 'DELETE' && url.pathname === '/api/admin/jobs') {
+      const actor = await context(request, 'admin'), result = await clearFinishedCrawlJobs()
+      await audit(actor, 'crawl.history-cleared', 'finished', result)
+      json(response, 200, result); return
+    }
+    const crawlDeleteId = url.pathname.match(/^\/api\/admin\/jobs\/([A-Za-z0-9_-]+)$/)?.[1]
+    if (request.method === 'DELETE' && crawlDeleteId) {
+      const actor = await context(request, 'admin'), input = await body(request)
+      if (input.deleteImportedData === true) throw new ApiError(409, 'Legacy products and generated assets are not safely linked to this crawl; no safe delete operation is available for them yet.')
+      if (input.deleteImportedData !== undefined && typeof input.deleteImportedData !== 'boolean') throw new ApiError(400, 'deleteImportedData must be true or false.')
+      let job
+      try { job = await deleteCrawlJob(crawlDeleteId) } catch (error) {
+        if (error instanceof Error && error.message === 'Only finished crawl history can be deleted.') throw new ApiError(409, error.message)
+        throw error
+      }
+      if (!job) throw new ApiError(404, 'Ingestion job not found.')
+      await audit(actor, 'crawl.deleted', job.id, { siteUrl: job.siteUrl, status: job.status, historyOnly: true })
+      json(response, 200, { id: job.id, deleted: true }); return
+    }
     const id = jobId(url.pathname)
     if (request.method === 'GET' && id) { json(response, 200, await getJob(id)); return }
     if (request.method === 'POST' && url.pathname === '/api/admin/jobs') {
@@ -535,19 +641,32 @@ const server = createServer(async (request, response) => {
       await firebase().db.collection('adminUsers').doc(uid).set({ status: 'revoked', updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
       await audit(actor, 'user.revoked', uid); json(response, 200, { uid, status: 'revoked' }); return
     }
+    const restoreProductMatch = url.pathname.match(/^\/api\/admin\/catalog\/([^/]+)\/restore$/)
+    if (request.method === 'POST' && restoreProductMatch) {
+      const actor = await context(request, 'admin'), id = recordId(restoreProductMatch[1])
+      const product = (await allCatalogProducts()).find((item) => item.id === id)
+      if (!product) throw new ApiError(404, 'Catalog product not found.')
+      const ref = firebase().db.collection('catalogEdits').doc(id), edit = (await ref.get()).data() || {}
+      if (!catalogIsDeleted(edit)) throw new ApiError(409, 'This catalog product is not deleted.')
+      const effective = applyCatalogMetadataOverrides(product, readCatalogMetadataOverrides(edit.overrides))
+      const modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : effective.modelPath
+      if ((product.importedBy === 'metadata-crawl' || product.importedBy === 'admin-manual') && edit.hidden !== true && (typeof modelPath !== 'string' || !modelPath.trim() || !catalogHasDimensions(effective))) throw new ApiError(409, 'Upload a GLB and complete the product dimensions before restoring this draft to the planner.')
+      await ref.set({ deletedAt: FieldValue.delete(), deletedBy: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      await audit(actor, 'catalog.restored', id, { name: product.name })
+      json(response, 200, { id, deleted: false }); return
+    }
     const productId = catalogId(url.pathname)
     if (request.method === 'GET' && productId) {
       const id = recordId(productId), product = (await allCatalogProducts()).find((item) => item.id === id)
       if (!product) throw new ApiError(404, 'Catalog product not found.')
-      const edit = (await catalogEdits()).get(id) || {}, modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : product.modelPath
-      const metadata = product.metadata as { missingFields?: string[] } | undefined
-      const missingFields = [...(metadata?.missingFields || []), ...(!product.sku ? ['SKU'] : []), ...(product.price == null ? ['Price'] : []), ...(!product.width ? ['Width'] : []), ...(!product.depth ? ['Depth'] : []), ...(!product.height ? ['Height'] : []), ...(!Array.isArray(product.sourceImages) || !product.sourceImages.length ? ['Images'] : []), ...(!modelPath ? ['3D model'] : [])]
-      json(response, 200, { ...product, modelPath, variants: catalogVariants(product, edit, modelPath), hidden: hiddenEdit(edit), review: edit.review || 'pending', missingFields: [...new Set(missingFields)] }); return
+      const edit = (await catalogEdits()).get(id) || {}
+      json(response, 200, catalogProductView(product, edit)); return
     }
     const modelUploadMatch = url.pathname.match(/^\/api\/admin\/catalog\/([^/]+)\/model$/)
     if (request.method === 'PUT' && modelUploadMatch) {
       const actor = await context(request, 'admin'), id = recordId(modelUploadMatch[1]), product = (await allCatalogProducts()).find((item) => item.id === id)
       if (!product) throw new ApiError(404, 'Catalog product not found.')
+      if (catalogIsDeleted((await firebase().db.collection('catalogEdits').doc(id).get()).data() || {})) throw new ApiError(409, 'Restore this product before uploading a model.')
       const input = await body(request, 25 * 1024 * 1024)
       if (input.mimeType !== 'model/gltf-binary' || typeof input.data !== 'string') throw new ApiError(400, 'Upload a valid binary GLB file.')
       let bytes: Buffer
@@ -564,6 +683,7 @@ const server = createServer(async (request, response) => {
       const product = (await allCatalogProducts()).find((item) => item.id === id)
       const variant = Array.isArray(product?.variants) ? (product.variants as Record<string, unknown>[]).find((item) => item.id === variantId) : undefined
       if (!product || !variant) throw new ApiError(404, 'Catalog variant not found.')
+      if (catalogIsDeleted((await firebase().db.collection('catalogEdits').doc(id).get()).data() || {})) throw new ApiError(409, 'Restore this product before uploading a texture.')
       const input = await body(request, 14 * 1024 * 1024)
       if (typeof input.data !== 'string' || typeof input.mimeType !== 'string') throw new ApiError(400, 'Texture image data is required.')
       let asset: ReturnType<typeof validateTexture>
@@ -580,6 +700,36 @@ const server = createServer(async (request, response) => {
       await audit(actor, 'catalog.variant-texture-uploaded', id, { variantId, hash, size: asset.bytes.length })
       json(response, 200, { id, variantId, texturePath, hash, size: asset.bytes.length }); return
     }
+    if (request.method === 'PATCH' && productId) {
+      const actor = await context(request, 'admin'), id = recordId(productId), input = await body(request)
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => key !== 'overrides') || !Object.hasOwn(input, 'overrides')) throw new ApiError(400, 'Provide only an overrides object or null.')
+      const product = (await allCatalogProducts()).find((item) => item.id === id)
+      if (!product) throw new ApiError(404, 'Catalog product not found.')
+      const ref = firebase().db.collection('catalogEdits').doc(id), snapshot = await ref.get(), edit = snapshot.data() || {}
+      if (catalogIsDeleted(edit)) throw new ApiError(409, 'Restore this product before editing it.')
+      let overrides
+      if (input.overrides === null) {
+        await ref.set({ overrides: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      } else {
+        let patch
+        try { patch = parseCatalogMetadataOverrides(input.overrides) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'Catalog metadata is invalid.') }
+        overrides = { ...readCatalogMetadataOverrides(edit.overrides), ...patch }
+        await ref.set({ overrides, updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      }
+      await audit(actor, input.overrides === null ? 'catalog.metadata-reset' : 'catalog.metadata-updated', id, { fields: input.overrides === null ? Object.keys(readCatalogMetadataOverrides(edit.overrides)) : Object.keys(overrides || {}) })
+      const updated = (await ref.get()).data() || {}
+      json(response, 200, catalogProductView(product, updated)); return
+    }
+    if (request.method === 'DELETE' && productId) {
+      const actor = await context(request, 'admin'), id = recordId(productId)
+      const product = (await allCatalogProducts()).find((item) => item.id === id)
+      if (!product) throw new ApiError(404, 'Catalog product not found.')
+      const ref = firebase().db.collection('catalogEdits').doc(id), edit = (await ref.get()).data() || {}
+      if (catalogIsDeleted(edit)) throw new ApiError(409, 'Catalog product is already deleted.')
+      await ref.set({ deletedAt: FieldValue.serverTimestamp(), deletedBy: actor.uid, updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      await audit(actor, 'catalog.deleted', id, { name: product.name, assetsPreserved: true })
+      json(response, 200, { id, deleted: true }); return
+    }
     if (request.method === 'PUT' && productId) {
       const id = recordId(productId)
       const product = (await allCatalogProducts()).find((item) => item.id === id)
@@ -587,13 +737,20 @@ const server = createServer(async (request, response) => {
       const input = await body(request), patch: Record<string, unknown> = {}
       if (input.review !== undefined) { if (!catalogReviews.includes(input.review as CatalogReview)) throw new ApiError(400, 'Review must be pending, approved or needs-work.'); patch.review = input.review }
       if (input.hidden !== undefined) { if (typeof input.hidden !== 'boolean') throw new ApiError(400, 'hidden must be true or false.'); patch.hidden = input.hidden }
-      if (patch.hidden === false && product.importedBy === 'metadata-crawl') {
+      if (patch.hidden === false && (product.importedBy === 'metadata-crawl' || product.importedBy === 'admin-manual')) {
         const edit = (await catalogEdits()).get(id) || {}
-        if (typeof (edit.modelPath || product.modelPath) !== 'string' || Number(product.width) <= 0 || Number(product.depth) <= 0 || Number(product.height) <= 0) throw new ApiError(409, 'Upload a GLB and complete the product dimensions before listing this imported item.')
+        if (catalogIsDeleted(edit)) throw new ApiError(409, 'Restore this deleted item before listing it.')
+        const effective = applyCatalogMetadataOverrides(product, readCatalogMetadataOverrides(edit.overrides))
+        const modelPath = edit.modelPath || effective.modelPath
+        if (typeof modelPath !== 'string' || !modelPath.trim() || !catalogHasDimensions(effective)) throw new ApiError(409, 'Upload a GLB and complete the product dimensions before listing this draft.')
       }
       if (!Object.keys(patch).length) throw new ApiError(400, 'Only visibility and review state can be changed here; product data comes from partners.')
       const actor = await context(request, patch.hidden === undefined ? 'editor' : 'admin')
-      await firebase().db.collection('catalogEdits').doc(id).set({ ...patch, ...(patch.hidden === false ? { deletedAt: FieldValue.delete() } : {}), updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
+      if (patch.hidden === false) {
+        const edit = (await firebase().db.collection('catalogEdits').doc(id).get()).data() || {}
+        if (catalogIsDeleted(edit)) throw new ApiError(409, 'Restore this deleted item before showing it.')
+      }
+      await firebase().db.collection('catalogEdits').doc(id).set({ ...patch, updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid }, { merge: true })
       await audit(actor, patch.hidden === undefined ? 'catalog.reviewed' : patch.hidden ? 'catalog.hidden' : 'catalog.shown', id, patch); json(response, 200, { id, ...patch }); return
     }
     json(response, 404, { error: 'Not found.' })

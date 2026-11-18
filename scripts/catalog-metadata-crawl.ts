@@ -13,10 +13,33 @@ export type MetadataCrawlJob = {
 }
 
 const collection = () => firebaseStore().db.collection('catalogCrawlJobs')
+const finishedStatuses = new Set<MetadataCrawlStatus>(['completed', 'failed'])
 const now = () => new Date().toISOString()
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-const slug = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'brand'
-const setJob = async (job: MetadataCrawlJob) => { job.updatedAt = now(); await collection().doc(job.id).set(job) }
+const slug = (value: string) => {
+  const normalized = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72)
+  if (!/[^\x00-\x7f]/.test(value) && normalized) return normalized
+  return `${normalized.slice(0, 59) || 'item'}-${createHash('sha256').update(value).digest('hex').slice(0, 12)}`
+}
+
+export function metadataProductBelongsToCrawl(product: { importedBy?: unknown }, edit: { importedFromCrawlId?: unknown }, crawlId: string) {
+  return product.importedBy === 'metadata-crawl' && edit.importedFromCrawlId === crawlId
+}
+
+const setJob = async (job: MetadataCrawlJob) => { job.updatedAt = now(); await collection().doc(job.id).update(job) }
+
+export function metadataProductId(retailerId: string, sku: string | null, name: string, url: string) {
+  const path = new URL(url).pathname.split('/').filter(Boolean).pop()
+  return `${retailerId}-${slug(sku || name || path || 'product')}`.slice(0, 128)
+}
+
+const comparableName = (value: string) => value.normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase()
+
+export function isProductName(value: unknown, brandName: string) {
+  if (typeof value !== 'string') return false
+  const name = comparableName(value.trim())
+  return Boolean(name && name !== comparableName(brandName.trim()))
+}
 
 export async function createMetadataCrawl(input: { brandName: string; retailerId: string; website: string; maxProducts: number; delayMs: number }) {
   const website = await validatePublicUrl(input.website)
@@ -26,7 +49,7 @@ export async function createMetadataCrawl(input: { brandName: string; retailerId
   const maxProducts = Number.isFinite(input.maxProducts) ? Math.max(1, Math.min(500, Math.floor(input.maxProducts))) : 100
   const delayMs = Number.isFinite(input.delayMs) ? Math.max(1000, Math.min(60000, Math.floor(input.delayMs))) : 1000
   const job: MetadataCrawlJob = { id: randomUUID(), brandName, retailerId, website: website.origin, maxProducts, delayMs, status: 'queued', discoveredUrls: [], items: [], currentUrl: null, error: null, createdAt: now(), updatedAt: now() }
-  await setJob(job)
+  await collection().doc(job.id).create(job)
   return job
 }
 
@@ -40,7 +63,74 @@ export async function listMetadataCrawls() {
   return snapshot.docs.map((doc) => doc.data() as MetadataCrawlJob)
 }
 
-function safeProduct(raw: Record<string, unknown>, job: MetadataCrawlJob, url: string, images: ProductMetadata['images'], imageUrls: string[]): Product {
+export async function deleteMetadataCrawl(id: string, deleteImportedData = false) {
+  const db = firebaseStore().db, ref = collection().doc(id)
+  const job = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref)
+    if (!snapshot.exists) return null
+    const job = snapshot.data() as MetadataCrawlJob
+    if (!finishedStatuses.has(job.status)) throw new Error('Only finished crawl history can be deleted.')
+    return job
+  })
+  if (!job) return null
+  let productsDeleted = 0, productsSkipped = 0, imagesDeleted = 0
+  if (deleteImportedData) {
+    const productIds = [...new Set(job.items.map((item) => item.productId).filter((productId): productId is string => Boolean(productId)))]
+    for (const productId of productIds) {
+      if (!/^[a-z0-9-]{1,128}$/.test(productId)) { productsSkipped += 1; continue }
+      const prefix = `catalog/${slug(job.brandName)}/${productId}/crawls/${job.id}/images/`
+      const [files] = await firebaseStore().storage.bucket().getFiles({ prefix })
+      for (let index = 0; index < files.length; index += 25) await Promise.all(files.slice(index, index + 25).map((file) => file.delete({ ignoreNotFound: true })))
+      imagesDeleted += files.length
+      const productRef = db.collection('catalogProducts').doc(productId), editRef = db.collection('catalogEdits').doc(productId)
+      const result = await db.runTransaction(async (transaction) => {
+        const [latestJob, productSnapshot, editSnapshot] = await Promise.all([transaction.get(ref), transaction.get(productRef), transaction.get(editRef)])
+        if (!latestJob.exists || !productSnapshot.exists) return 'missing'
+        const latest = latestJob.data() as MetadataCrawlJob
+        if (!finishedStatuses.has(latest.status)) throw new Error('Only finished crawl history can be deleted.')
+        if (!latest.items.some((item) => item.productId === productId)) return 'unlinked'
+        const product = productSnapshot.data() as { importedBy?: string }, edit = editSnapshot.data() || {}
+        if (!metadataProductBelongsToCrawl(product, edit, job.id)) return 'unlinked'
+        const textures = edit.variantTextures && typeof edit.variantTextures === 'object' ? edit.variantTextures as Record<string, unknown> : {}
+        transaction.delete(productRef)
+        if (typeof edit.modelPath !== 'string' && !Object.keys(textures).length) transaction.delete(editRef)
+        else transaction.set(editRef, { importedFromCrawlId: null }, { merge: true })
+        return 'deleted'
+      })
+      if (result === 'deleted') productsDeleted += 1
+      if (result === 'unlinked') productsSkipped += 1
+    }
+  }
+  const deletedJob = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref)
+    if (!snapshot.exists) return null
+    const latest = snapshot.data() as MetadataCrawlJob
+    if (!finishedStatuses.has(latest.status)) throw new Error('Only finished crawl history can be deleted.')
+    transaction.delete(ref)
+    return latest
+  })
+  return deletedJob ? { job: deletedJob, productsDeleted, productsSkipped, imagesDeleted } : null
+}
+
+export async function clearFinishedMetadataCrawls() {
+  const db = firebaseStore().db, snapshot = await collection().get()
+  let deleted = 0, skippedActive = 0
+  for (const doc of snapshot.docs) {
+    const result = await db.runTransaction(async (transaction) => {
+      const latest = await transaction.get(doc.ref)
+      if (!latest.exists) return 'missing'
+      const job = latest.data() as MetadataCrawlJob
+      if (!finishedStatuses.has(job.status)) return 'active'
+      transaction.delete(doc.ref)
+      return 'deleted'
+    })
+    if (result === 'deleted') deleted += 1
+    if (result === 'active') skippedActive += 1
+  }
+  return { deleted, skippedActive }
+}
+
+export function safeProduct(raw: Record<string, unknown>, job: MetadataCrawlJob, url: string, images: ProductMetadata['images'], imageUrls: string[]): Product {
   const attrs = Array.isArray(raw.attributes) ? raw.attributes as { label: string; value: string }[] : []
   const dimensionText = attrs.find((item) => /dimension|size|διαστάσ|διάστασ|μέγεθ/i.test(item.label))?.value || ''
   const unitFactor = /mm\b/i.test(dimensionText) ? 0.1 : /\bm\b/i.test(dimensionText) && !/\bcm\b/i.test(dimensionText) ? 100 : 1
@@ -55,7 +145,7 @@ function safeProduct(raw: Record<string, unknown>, job: MetadataCrawlJob, url: s
   const name = String(raw.name || '').trim().slice(0, 160)
   const width = Number(raw.width) || values[0] || 0, depth = Number(raw.depth) || values[1] || 0, height = Number(raw.height) || values[2] || 0
   const price = Number.isFinite(Number(raw.price)) && Number(raw.price) > 0 ? Number(raw.price) : null
-  const id = `${job.retailerId}-${slug(sku || name || new URL(url).pathname.split('/').filter(Boolean).pop() || 'product')}`.slice(0, 128)
+  const id = metadataProductId(job.retailerId, sku, name, url)
   const missingFields = [['name', name], ['SKU', sku], ['price', price], ['width', width], ['depth', depth], ['height', height], ['images', images.length]].filter(([, value]) => !value).map(([field]) => String(field))
   const warnings = [...(Array.isArray(raw.warnings) ? raw.warnings.filter((item): item is string => typeof item === 'string') : []), ...missingFields.map((field) => `Missing ${field}.`), 'No 3D model was generated; upload a reviewed GLB from the product detail page.']
   const metadata: ProductMetadata = {
@@ -77,25 +167,51 @@ function safeProduct(raw: Record<string, unknown>, job: MetadataCrawlJob, url: s
   } as Product
 }
 
-const captureMetadata = `(() => {
+export const captureMetadata = `(() => {
   const clean = value => (value || '').replace(/\\s+/g, ' ').trim()
   const json = [...document.querySelectorAll('script[type="application/ld+json"]')].flatMap(node => { try { const value = JSON.parse(node.textContent || 'null'); return Array.isArray(value) ? value : [value] } catch { return [] } })
   const flatten = values => values.flatMap(value => value && typeof value === 'object' ? [value, ...(Array.isArray(value['@graph']) ? flatten(value['@graph']) : [])] : [])
   const product = flatten(json).find(value => String(value['@type'] || '').toLowerCase().includes('product')) || {}
+  const productNode = [...document.querySelectorAll('[itemscope][itemtype]')].find(node => /schema\\.org\\/product/i.test(node.getAttribute('itemtype') || '') && node.querySelector('h1[itemprop="name"]'))
+  const property = (scope, name) => scope?.querySelector('[itemprop="' + name + '"]')
+  const valueOf = node => node?.getAttribute('content') || node?.getAttribute('href') || node?.getAttribute('src') || clean(node?.textContent)
+  const productValue = name => valueOf(property(productNode, name))
+  const offerNode = property(productNode, 'offers')
+  const offerValue = name => valueOf(property(offerNode, name))
   const meta = selector => document.querySelector(selector)?.content || ''
   const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers || {}
   const number = value => { const match = String(value || '').replace(',', '.').match(/[0-9]+(?:\\.[0-9]+)?/); return match ? Number(match[0]) : null }
-  const rows = [...document.querySelectorAll('table tr, .woocommerce-product-attributes tr, dl')].map(row => {
-    const label = clean(row.querySelector('th,dt')?.textContent || row.querySelector('td')?.getAttribute('data-label'))
-    const value = clean(row.querySelector('td,dd')?.textContent)
+  const absoluteUrl = value => { try { return new URL(value, location.href).href } catch { return '' } }
+  const scope = productNode || document
+  const rows = [...scope.querySelectorAll('table tr, .woocommerce-product-attributes tr, dl')].map(row => {
+    const labelNode = row.querySelector('th,dt,.data-label') || row.querySelector('td[data-label]')
+    const cells = [...row.querySelectorAll('td')]
+    const label = clean(labelNode?.textContent || labelNode?.getAttribute('data-label'))
+    const value = clean(row.querySelector('dd')?.textContent || cells.find(cell => cell !== labelNode)?.textContent)
     return label && value ? { label, value } : null
   }).filter(Boolean)
-  const dimension = key => { const value = product[key]; if (!value) return null; return number(typeof value === 'object' ? value.value : value) }
-  const images = [...document.querySelectorAll('img')].map(image => ({ url: image.dataset.src || image.dataset.lazySrc || image.getAttribute('data-lazy-src') || image.currentSrc || image.src, altText: clean(image.alt), width: image.naturalWidth || null, height: image.naturalHeight || null })).filter(image => /^https?:/.test(image.url) && !/logo|icon|sprite|avatar/i.test(image.url)).slice(0, 12)
-  const name = clean(product.name || document.querySelector('h1')?.textContent || meta('meta[property="og:title"]') || document.title).slice(0, 160)
-  const brand = typeof product.brand === 'string' ? product.brand : product.brand?.name || ''
-  const category = Array.isArray(product.category) ? product.category.at(-1) : product.category || ''
-  return { name, category: clean(category), sku: product.sku || product.gtin || '', price: number(offer.price || offer.lowPrice || meta('meta[property="product:price:amount"]')), currency: offer.priceCurrency || meta('meta[property="product:price:currency"]') || 'EUR', description: clean(product.description || meta('meta[name="description"]')).slice(0, 4000), availability: String(offer.availability || '').split('/').pop(), width: dimension('width'), depth: dimension('depth'), height: dimension('height'), sourceBrand: brand, pageTitle: document.title, canonicalUrl: document.querySelector('link[rel="canonical"]')?.href || null, attributes: rows.slice(0,60).map(item => ({ label: item.label.slice(0, 200), value: item.value.slice(0, 500) })), images }
+  const dimension = key => { const value = product[key] || productValue(key); if (!value) return null; return number(typeof value === 'object' ? value.value : value) }
+  const visibleText = document.body.innerText || ''
+  const skuFromText = visibleText.match(/(?:sku|product\\s*(?:code|id)|κωδικός προϊόντος)\\s*[:#]?\\s*([a-z0-9_-]+)/i)?.[1]
+  const urlSlug = new URL(location.href).pathname.split('/').filter(Boolean).pop() || ''
+  const skuFromUrl = urlSlug.match(/^(\\d+)(?:-|$)|(?:^|-)(\\d+)$/)
+  const name = clean(product.name || productValue('name') || document.querySelector('h1')?.textContent || meta('meta[property="og:title"]')).slice(0, 160)
+  const brand = typeof product.brand === 'string' ? product.brand : product.brand?.name || productValue('brand')
+  const categoryLink = [...document.querySelectorAll('a[href]')].map(link => clean(link.textContent)).find(text => text.toLowerCase().includes('επιστροφ') || text.toLowerCase().startsWith('back to:')) || ''
+  const category = Array.isArray(product.category) ? product.category.at(-1) : product.category || productValue('category') || categoryLink.slice(categoryLink.indexOf(':') + 1).trim()
+  const productImages = (Array.isArray(product.image) ? product.image : [product.image]).map(image => {
+    const source = typeof image === 'string' ? image : image && typeof image === 'object' ? image.url || image.contentUrl || image['@id'] || '' : ''
+    return { url: absoluteUrl(source), altText: image && typeof image === 'object' ? clean(String(image.caption || image.name || '')) : '', width: Number(image?.width) || null, height: Number(image?.height) || null }
+  })
+  const imageNodes = [...scope.querySelectorAll('[itemprop="image"]')]
+  const pageImages = (imageNodes.length ? imageNodes : [...scope.querySelectorAll('img')]).map(image => ({ url: absoluteUrl(image.dataset?.src || image.dataset?.lazySrc || image.getAttribute('data-lazy-src') || image.currentSrc || image.src || image.getAttribute('href')), altText: clean(image.alt || image.getAttribute('alt')), width: image.naturalWidth || null, height: image.naturalHeight || null }))
+  const seenImages = new Set()
+  const images = [...productImages, ...pageImages].filter(image => {
+    if (!/^https?:/i.test(image.url) || new URL(image.url).pathname === location.pathname && new URL(image.url).hostname === location.hostname || /logo|icon|sprite|avatar/i.test(image.url) || seenImages.has(image.url)) return false
+    seenImages.add(image.url)
+    return true
+  }).slice(0, 12)
+  return { name, category: clean(category), sku: String(product.sku || product.gtin || productValue('sku') || skuFromText || skuFromUrl?.[1] || skuFromUrl?.[2] || ''), price: number(offer.price || offer.lowPrice || offerValue('price') || meta('meta[property="product:price:amount"]')), currency: offer.priceCurrency || offerValue('priceCurrency') || meta('meta[property="product:price:currency"]') || 'EUR', description: clean(product.description || productValue('description') || meta('meta[name="description"]')).slice(0, 4000), availability: String(offer.availability || offerValue('availability') || '').split('/').pop(), width: dimension('width'), depth: dimension('depth'), height: dimension('height'), sourceBrand: brand, pageTitle: document.title, canonicalUrl: document.querySelector('link[rel="canonical"]')?.href || null, attributes: rows.slice(0,60).map(item => ({ label: item.label.slice(0, 200), value: item.value.slice(0, 500) })), images }
 })()`
 
 function imageExtension(type: string) {
@@ -128,9 +244,11 @@ async function readImage(url: string) {
 
 async function extractProduct(page: import('@playwright/test').Page, job: MetadataCrawlJob, url: string) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
+  await page.waitForTimeout(800)
   const raw = await page.evaluate(captureMetadata) as Record<string, unknown> & { images?: { url: string; altText: string; width: number | null; height: number | null }[] }
-  if (!raw.name || !Array.isArray(raw.images)) throw new Error('No product name or product images found on page.')
-  const id = `${job.retailerId}-${slug(typeof raw.sku === 'string' && raw.sku ? raw.sku : String(raw.name || new URL(url).pathname.split('/').filter(Boolean).pop() || 'product'))}`.slice(0, 128)
+  if (!isProductName(raw.name, job.brandName) || !Array.isArray(raw.images)) throw new Error('No product-specific name or image data found on page.')
+  const sku = typeof raw.sku === 'string' && raw.sku.trim() ? raw.sku.trim().slice(0, 100) : null
+  const id = metadataProductId(job.retailerId, sku, String(raw.name), url)
   const images: ProductMetadata['images'] = [], imageUrls: string[] = [], seen = new Set<string>()
   for (const [index, item] of raw.images.entries()) {
     if (seen.has(item.url)) continue
@@ -138,7 +256,7 @@ async function extractProduct(page: import('@playwright/test').Page, job: Metada
     try {
       const image = await readImage(item.url)
       const hash = createHash('sha256').update(image.bytes).digest('hex')
-      const key = `catalog/${slug(job.brandName)}/${id}/images/${hash}.${image.ext}`
+      const key = `catalog/${slug(job.brandName)}/${id}/crawls/${job.id}/images/${hash}.${image.ext}`
       const storedUrl = await uploadBuffer(image.bytes, key, image.type, { public: true })
       imageUrls.push(storedUrl)
       images.push({ url: storedUrl, sourceUrl: item.url, role: index === 0 ? 'hero' : 'gallery', altText: item.altText || null, width: item.width, height: item.height })
@@ -156,7 +274,7 @@ export async function runMetadataCrawl(id: string) {
       job.status = 'discovering'; await setJob(job)
       const policy = await robotsPolicy(job.website)
       job.delayMs = Math.max(job.delayMs, policy.crawlDelayMs)
-      job.discoveredUrls = await discoverProductUrls(job.website, job.maxProducts, policy)
+      job.discoveredUrls = await discoverProductUrls(job.website, job.maxProducts, policy, job.delayMs)
       job.items = job.discoveredUrls.map((url) => ({ url, productId: null, status: 'queued', error: null, updatedAt: now() }))
     }
     job.status = 'running'; await setJob(job)
@@ -165,7 +283,11 @@ export async function runMetadataCrawl(id: string) {
       const page = await browser.newPage()
       const originHost = new URL(job.website).hostname
       await page.route('**/*', async (route) => {
-        try { await validatePublicUrl(route.request().url(), originHost); await route.continue() } catch { await route.abort() }
+        try {
+          const request = route.request()
+          await validatePublicUrl(request.url(), request.isNavigationRequest() ? originHost : undefined)
+          await route.continue()
+        } catch { await route.abort() }
       })
       for (const item of job.items) {
         if (item.status === 'saved') continue
@@ -173,10 +295,13 @@ export async function runMetadataCrawl(id: string) {
         try {
           const product = await extractProduct(page, job, item.url)
           const db = firebaseStore().db, productRef = db.collection('catalogProducts').doc(product.id), editRef = db.collection('catalogEdits').doc(product.id)
-          const previous = await productRef.get()
-          await productRef.set({ ...product, createdAt: previous.data()?.createdAt || now(), updatedAt: now(), importedBy: 'metadata-crawl' }, { merge: true })
-          if (!(await editRef.get()).exists) await editRef.set({ hidden: true, updatedAt: now() })
-          item.productId = product.id; item.status = 'saved'; item.error = null
+          item.productId = product.id
+          await db.runTransaction(async (transaction) => {
+            const [previous, edit] = await Promise.all([transaction.get(productRef), transaction.get(editRef)])
+            transaction.set(productRef, { ...product, createdAt: previous.data()?.createdAt || now(), updatedAt: now(), importedBy: 'metadata-crawl' }, { merge: true })
+            transaction.set(editRef, { importedFromCrawlId: job.id, ...(!edit.exists ? { hidden: true, updatedAt: now() } : {}) }, { merge: true })
+          })
+          item.status = 'saved'; item.error = null
         } catch (error) { item.status = 'failed'; item.error = error instanceof Error ? error.message : String(error) }
         item.updatedAt = now(); await setJob(job); await sleep(job.delayMs)
       }

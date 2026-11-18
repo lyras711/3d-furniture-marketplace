@@ -16,7 +16,11 @@ export function firebaseStore() {
 }
 
 export async function persistJob(job: CrawlJob) {
-  await firebaseStore().db.collection('ingestionJobs').doc(job.id).set(job)
+  await firebaseStore().db.collection('ingestionJobs').doc(job.id).update(job)
+}
+
+export async function createStoredJob(job: CrawlJob) {
+  await firebaseStore().db.collection('ingestionJobs').doc(job.id).create(job)
 }
 
 export async function getStoredJob(id: string) {
@@ -27,6 +31,18 @@ export async function getStoredJob(id: string) {
 export async function listStoredJobs() {
   const snapshot = await firebaseStore().db.collection('ingestionJobs').get()
   return snapshot.docs.map((doc) => doc.data() as CrawlJob).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+}
+
+export async function deleteStoredJob(id: string) {
+  const ref = firebaseStore().db.collection('ingestionJobs').doc(id)
+  return firebaseStore().db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref)
+    if (!snapshot.exists) return null
+    const job = snapshot.data() as CrawlJob
+    if (!['completed', 'cancelled', 'failed'].includes(job.status)) throw new Error('Only finished crawl history can be deleted.')
+    transaction.delete(ref)
+    return job
+  })
 }
 
 export async function upsertCatalogProduct(record: CatalogProductRecord) {

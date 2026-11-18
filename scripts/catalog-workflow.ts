@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
@@ -9,7 +9,7 @@ import { registerCatalog } from './register-catalog'
 import { runScraper } from './scrape-product'
 import { runModelValidation } from './validate-model'
 import type { CatalogProductRecord, NormalizedProduct } from './product-types'
-import { getStoredJob, listStoredJobs, persistJob, uploadArtifactTree } from './firebase-store'
+import { createStoredJob, deleteStoredJob, getStoredJob, listStoredJobs, persistJob, uploadArtifactTree } from './firebase-store'
 
 export const JOB_ROOT = path.resolve('artifacts/jobs')
 export const DEFAULT_MAX_PRODUCTS = 100
@@ -44,6 +44,7 @@ export interface CrawlJob {
 }
 
 const running = new Set<string>()
+const finishedStatuses = new Set<CrawlStatus>(['completed', 'cancelled', 'failed'])
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 function publicAddress(address: string) {
   if (isIP(address) === 4) {
@@ -73,12 +74,12 @@ function jobPath(id: string) {
   return path.join(JOB_ROOT, `${id}.json`)
 }
 
-async function writeJob(job: CrawlJob) {
+async function writeJob(job: CrawlJob, create = false) {
   await mkdir(JOB_ROOT, { recursive: true })
   const filename = jobPath(job.id)
   await writeFile(`${filename}.pending`, JSON.stringify(job, null, 2), 'utf8')
   await rename(`${filename}.pending`, filename)
-  try { await persistJob(job) } catch (error) { console.warn(`Firestore job persistence unavailable: ${error instanceof Error ? error.message : String(error)}`) }
+  try { await (create ? createStoredJob(job) : persistJob(job)) } catch (error) { console.warn(`Firestore job persistence unavailable: ${error instanceof Error ? error.message : String(error)}`) }
 }
 
 export async function getJob(id: string) {
@@ -92,8 +93,11 @@ export async function getJob(id: string) {
 export async function listJobs() {
   try {
     const stored = await listStoredJobs()
-    if (stored.length) return stored
-  } catch (error) { console.warn(`Firestore job listing unavailable: ${error instanceof Error ? error.message : String(error)}`) }
+    if (stored.length || process.env.K_SERVICE) return stored
+  } catch (error) {
+    console.warn(`Firestore job listing unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    if (process.env.K_SERVICE) throw error
+  }
   await mkdir(JOB_ROOT, { recursive: true })
   const entries = await (await import('node:fs/promises')).readdir(JOB_ROOT)
   return Promise.all(entries.filter((entry) => entry.endsWith('.json')).map((entry) => readFile(path.join(JOB_ROOT, entry), 'utf8').then((value) => JSON.parse(value) as CrawlJob)))
@@ -111,10 +115,21 @@ function slug(value: string) {
 }
 
 async function fetchText(url: string) {
-  await validatePublicUrl(url)
-  const response = await fetch(url, { redirect: 'error', headers: { 'user-agent': 'FormaCatalogAdmin/0.1 (+controlled internal catalog review)', accept: 'text/html,application/xml,text/plain;q=0.9,*/*;q=0.1' } })
-  if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`)
-  return response.text()
+  const host = new URL(url).hostname
+  let target = url
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await validatePublicUrl(target, host)
+    const response = await fetch(target, { redirect: 'manual', headers: { 'user-agent': 'FormaCatalogAdmin/0.1 (+controlled internal catalog review)', accept: 'text/html,application/xml,text/plain;q=0.9,*/*;q=0.1' } })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      if (!location) throw new Error(`${target} returned a redirect without a location.`)
+      target = new URL(location, target).toString()
+      continue
+    }
+    if (!response.ok) throw new Error(`${target} returned HTTP ${response.status}`)
+    return response.text()
+  }
+  throw new Error(`${url} redirected too many times.`)
 }
 
 function locations(xml: string) {
@@ -143,26 +158,41 @@ function allowed(url: string, disallowed: string[]) {
 
 const productPath = (pathname: string) => /\/(?:products?|items?|p)\/[^/]+/i.test(pathname)
 
-export async function discoverProductUrls(siteUrl: string, maxProducts = DEFAULT_MAX_PRODUCTS, suppliedPolicy?: Awaited<ReturnType<typeof robotsPolicy>>) {
+export function isProductPageHtml(html: string) {
+  const productSchema = /itemtype=["'][^"']*schema\.org\/Product/i.test(html)
+  const namedHeading = /<h1\b[^>]*itemprop=["']name["']/i.test(html)
+  const openGraphProduct = /<meta[^>]+(?:property|name)=["']og:type["'][^>]+content=["']product["']/i.test(html)
+  const jsonLdProduct = /<script[^>]+type=["']application\/ld\+json["'][^>]*>[\s\S]*?"@type"\s*:\s*"Product"[\s\S]*?<\/script>/i.test(html)
+  return openGraphProduct || productSchema && namedHeading || jsonLdProduct && /<h1\b/i.test(html)
+}
+
+export async function discoverProductUrls(siteUrl: string, maxProducts = DEFAULT_MAX_PRODUCTS, suppliedPolicy?: Awaited<ReturnType<typeof robotsPolicy>>, delayMs = DEFAULT_DELAY_MS) {
   const base = new URL(siteUrl)
   const policy = suppliedPolicy || await robotsPolicy(siteUrl)
   const disallowed = policy.disallowed
+  const products = new Set<string>()
+  const isProductCandidate = async (url: string) => {
+    try {
+      const html = await fetchText(url)
+      await sleep(Math.max(delayMs, policy.crawlDelayMs))
+      return isProductPageHtml(html)
+    } catch { return false }
+  }
   const sitemapQueue = [...new Set([...policy.sitemaps, `${base.origin}/sitemap.xml`, `${base.origin}/sitemap_index.xml`])].filter((value) => { try { const url = new URL(value); return url.protocol === 'https:' && url.hostname === base.hostname } catch { return false } })
   const seenSitemaps = new Set<string>()
-  const products = new Set<string>()
   const submitted = normalizeUrl(siteUrl)
-  if (productPath(base.pathname) && allowed(submitted, disallowed)) products.add(submitted)
+  if (productPath(base.pathname) && allowed(submitted, disallowed) && await isProductCandidate(submitted)) products.add(submitted)
   while (sitemapQueue.length && products.size < maxProducts && seenSitemaps.size < 50) {
     const sitemap = sitemapQueue.shift()!
     if (seenSitemaps.has(sitemap)) continue
     seenSitemaps.add(sitemap)
     try {
       const xml = await fetchText(sitemap)
-      await sleep(Math.max(250, policy.crawlDelayMs))
+      await sleep(Math.max(delayMs, policy.crawlDelayMs))
       for (const location of locations(xml)) {
-        const candidate = normalizeUrl(location)
-        if (/<sitemap|\.xml($|\?)/i.test(candidate) && new URL(candidate).hostname === base.hostname && new URL(candidate).protocol === 'https:') sitemapQueue.push(candidate)
-        else if (new URL(candidate).hostname === base.hostname && productPath(new URL(candidate).pathname) && allowed(candidate, disallowed)) products.add(candidate)
+        const candidateUrl = normalizeUrl(location)
+        if (/<sitemap|\.xml($|\?)/i.test(candidateUrl) && new URL(candidateUrl).hostname === base.hostname && new URL(candidateUrl).protocol === 'https:') sitemapQueue.push(candidateUrl)
+        else if (new URL(candidateUrl).hostname === base.hostname && productPath(new URL(candidateUrl).pathname) && allowed(candidateUrl, disallowed) && await isProductCandidate(candidateUrl)) products.add(candidateUrl)
         if (products.size >= maxProducts) break
       }
     } catch {}
@@ -175,13 +205,13 @@ export async function discoverProductUrls(siteUrl: string, maxProducts = DEFAULT
       visited.add(page)
       try {
         const html = await fetchText(page)
-        await sleep(Math.max(300, policy.crawlDelayMs))
+        await sleep(Math.max(delayMs, policy.crawlDelayMs))
         for (const match of html.matchAll(/href=["']([^"'#]+)["']/gi)) {
           try {
-            const candidate = normalizeUrl(new URL(match[1], page).toString()), parsed = new URL(candidate)
-            if (parsed.hostname !== base.hostname || !allowed(candidate, disallowed)) continue
-            if (productPath(parsed.pathname)) products.add(candidate)
-            else if (/^\/$|\/(?:shop|categor(?:y|ies)|collections?|catalog(?:ue)?)(?:\/|$)/i.test(parsed.pathname)) queue.push(candidate)
+            const candidateUrl = normalizeUrl(new URL(match[1], page).toString()), parsed = new URL(candidateUrl)
+            if (parsed.hostname !== base.hostname || !allowed(candidateUrl, disallowed)) continue
+            if (productPath(parsed.pathname) && await isProductCandidate(candidateUrl)) products.add(candidateUrl)
+            else if (/^\/$|\/(?:shop|categor(?:y|ies)|collections?|catalog(?:ue)?)(?:\/|$)/i.test(parsed.pathname)) queue.push(candidateUrl)
           } catch {}
           if (products.size >= maxProducts) break
         }
@@ -206,7 +236,7 @@ export async function createCrawlJob(siteUrl: string, maxProducts = DEFAULT_MAX_
   const extractor = extractorFor(normalized)
   const now = new Date().toISOString()
   const job: CrawlJob = { id: randomUUID(), siteUrl: normalized, retailerId: extractor.id, maxProducts: Math.max(1, Math.min(500, maxProducts)), delayMs: Math.max(250, Math.min(60000, delayMs)), status: 'queued', discoveredUrls: [], items: [], currentUrl: null, error: null, createdAt: now, updatedAt: now }
-  await writeJob(job)
+  await writeJob(job, true)
   return job
 }
 
@@ -219,6 +249,34 @@ export async function cancelCrawlJob(id: string) {
   const job = await getJob(id)
   if (job.status === 'queued' || job.status === 'discovering' || job.status === 'running') await patchJob(job, { status: 'cancelled', currentUrl: null })
   return getJob(id)
+}
+
+export async function deleteCrawlJob(id: string) {
+  let job: CrawlJob
+  try { job = await getJob(id) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  if (running.has(id) || !finishedStatuses.has(job.status)) throw new Error('Only finished crawl history can be deleted.')
+  await deleteStoredJob(id)
+  try { await unlink(jobPath(id)) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  return job
+}
+
+export async function clearFinishedCrawlJobs() {
+  const jobs = await listJobs()
+  let deleted = 0, skippedActive = 0
+  for (const job of jobs) {
+    try {
+      if (await deleteCrawlJob(job.id)) deleted += 1
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Only finished crawl history can be deleted.') skippedActive += 1
+      else throw error
+    }
+  }
+  return { deleted, skippedActive }
 }
 
 export async function runCrawlJob(id: string) {

@@ -1,6 +1,8 @@
 import { generatedProducts } from './catalog.generated'
 
 export type CategoryFilter = 'All' | 'Seating' | 'Tables' | 'Lighting' | 'Decor' | 'Storage' | 'Bedroom' | 'Kitchen' | 'Bathroom'
+export type CatalogGroup = Exclude<CategoryFilter, 'All'>
+export const catalogGroups: CatalogGroup[] = ['Seating', 'Tables', 'Lighting', 'Decor', 'Storage', 'Bedroom', 'Kitchen', 'Bathroom']
 
 /** Admin human-review state, stored outside the bundle in Firestore `catalogEdits`. */
 export type CatalogReview = 'pending' | 'approved' | 'needs-work'
@@ -81,6 +83,20 @@ export interface Product {
     warnings: string[]
   }
 }
+
+export type CatalogMetadataOverrides = {
+  name: string
+  brand: string
+  retailer: string
+  sku: string | null
+  group: CatalogGroup
+  category: string
+  width: number
+  depth: number
+  height: number
+  price: number | null
+}
+export type CatalogMetadataOverridePatch = Partial<CatalogMetadataOverrides>
 
 export const products: Product[] = [
   {

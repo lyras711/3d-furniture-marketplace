@@ -5,7 +5,7 @@ Goal: one `/admin` dashboard to manage B2C orders, B2B retailer partners and cat
 ## Decisions (user-confirmed)
 - Modules: Orders (B2C lifecycle), B2B pipeline, Furniture catalogue. Customers & designs deferred.
 - B2B = **retailer partners** (brands/retailers that list products or embed the planner). Admin-only entry; the public business page keeps `mailto:`. No public lead form yet.
-- Catalogue: name, price and dimensions will come from partners, so admins **only** change visibility and human-review state. The old rename action is removed.
+- Catalogue: admins can change visibility and human-review state. The 2026-11-20 decision below adds metadata overrides and reversible archive/restore across the full catalogue; source records remain unchanged.
 - Layout: tabbed sections under one dashboard (`?tab=`): Overview, Orders, Partners, Catalogue, Ingestion, Team.
 - Production: `vercel.json` rewrites `/api/*` to Cloud Run `forma-admin-worker` (was 404 on formivo3d.com).
 
@@ -22,7 +22,7 @@ Goal: one `/admin` dashboard to manage B2C orders, B2B retailer partners and cat
 - `partners/{id}`: company, website, country, contact, `retailerId` link to catalogue, stage `lead|contacted|negotiating|onboarding|active|paused|lost`, notes, stage history. Validation in `src/partners.ts`.
 
 ## Roles
-- viewer: overview, catalogue, ingestion (read). editor: review state, ingestion jobs. admin/owner: orders, partners, visibility, team, audit.
+- viewer: overview, catalogue, ingestion (read). editor: review state, ingestion jobs. admin/owner: orders, partners, visibility, team, audit, crawl-history deletion.
 
 Related: [[2026-11-08-mobile-simplicity-plan]]
 
@@ -36,5 +36,21 @@ Related: [[2026-11-08-mobile-simplicity-plan]]
 - Admins can preview a selected `.glb` locally, then upload it (18 MiB maximum). The server validates the GLB 2.0 JSON chunk and stores it at `catalog/<brand>/<product>/models/<sha256>.glb`; `catalogEdits` carries the active model URL and uploader metadata.
 - Each product variant can have its own PNG, JPEG, or WebP texture (10 MiB maximum), stored by content hash under the variant's brand/product folder and overlaid from `catalogEdits.variantTextures`. The detail page previews the texture on the selected GLB material; uploads must match that material's UV layout.
 - The Ingestion tab starts metadata-and-image-only crawls. It discovers same-host product URLs from sitemaps or shop/category links, observes robots.txt, rate-limits requests, and stores product metadata in `catalogProducts`. It does not generate GLBs. New crawl results start hidden and need positive dimensions plus an uploaded GLB before they can be listed.
-- Images are stored at `catalog/<brand>/<product>/images/<sha256>.<ext>` with immutable one-year cache headers. `GET /api/catalog/products` feeds the editor; startup loads it before validating projects, resolves hidden items for existing projects, and lazy-loads product thumbnails.
+- Images are stored at `catalog/<brand>/<product>/crawls/<crawlId>/images/<sha256>.<ext>` with immutable one-year cache headers. Crawl-specific paths allow safe cleanup without deleting another crawl’s images. `GET /api/catalog/products` feeds the editor; startup loads it before validating projects, resolves hidden items for existing projects, and lazy-loads product thumbnails.
 - Crawl limits are 500 product pages and at least a one-second delay. Sites that block robots access or use nonstandard product URL structures may need a retailer-specific discovery adapter; crawled fields still require human review.
+
+## Crawl-history management (2026-11-20)
+- Admin/owner can delete one finished crawl or clear all finished history; queued, discovering, running, and unknown-status jobs are protected. Every deletion is audited. Bulk clearing is history-only.
+- Per-metadata-crawl deletion asks whether to remove history only or also remove product drafts exclusively linked to that crawl and its crawled images. Uploaded GLBs and variant textures are preserved. Existing records without an exclusive crawl link are kept.
+- Legacy model-recipe jobs can only be deleted as history because they do not safely own generated catalog products or files.
+
+## Catalogue metadata and archive controls (2026-11-20)
+- Initial user-confirmed scope: edit and delete/restore products across the entire catalogue, including bundled products and Firestore-backed imports. Manual product creation was deferred to the follow-up scope below.
+- Admins store overrides in `catalogEdits/{productId}.overrides` for name, brand, retailer, SKU, group, category, width, depth, height, and price. Source documents and bundled catalogue files are not modified. Overrides feed both Admin and the planner.
+- Dimension changes affect placement for saved designs because projects resolve products by ID. The editor warns admins before saving that dimension changes affect placement.
+- Delete is a reversible archive: `deletedAt` hides the product from the planner, while the source record, model/images/textures, and saved-design references remain. Restore clears the marker. Admin edits, archive, and restore are audited; viewers and editors cannot use these controls.
+
+## Bulk archive and manual catalogue products
+- Admins can select up to 500 non-archived products in the filtered catalogue and archive them in one action. The server validates every ID before writing, preserves product records and assets, and records an audit entry. Restore remains available per product.
+- Admins can create a product with name, brand, retailer, group, category, and positive dimensions. SKU, price, HTTPS source URL, and HTTPS thumbnail URL are optional. The server creates a Firestore-backed product with a generated ID and atomically sets it hidden with pending review.
+- Manual products cannot be listed until they have positive dimensions and an uploaded GLB. They use the existing metadata edit, model upload, visibility, review, archive, and restore controls.

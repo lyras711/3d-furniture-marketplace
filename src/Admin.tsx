@@ -18,7 +18,7 @@ const tabs: { id: TabId; title: string; intro: string; minimum: Role }[] = [
   { id: 'overview', title: 'Overview', intro: 'What needs attention across orders, partners and the catalogue.', minimum: 'viewer' },
   { id: 'orders', title: 'Orders', intro: 'Shopper purchase requests. Check availability with each retailer, then record placement and delivery by hand.', minimum: 'admin' },
   { id: 'partners', title: 'Partners', intro: 'Retailers and brands in the B2B pipeline, from first contact to live catalogue.', minimum: 'admin' },
-  { id: 'catalogue', title: 'Catalogue', intro: 'Every product the planner ships. Partners own names, prices and dimensions; here you set review state and visibility.', minimum: 'viewer' },
+  { id: 'catalogue', title: 'Catalogue', intro: 'Manage product metadata, review state, visibility, and archive or restore products across the full planner catalogue.', minimum: 'viewer' },
   { id: 'ingestion', title: 'Ingestion', intro: 'Controlled catalogue crawls. Use only with retailer permission; requests are rate-limited and capped.', minimum: 'viewer' },
   { id: 'team', title: 'Team & audit', intro: 'Admin roles and the change log.', minimum: 'admin' },
 ]

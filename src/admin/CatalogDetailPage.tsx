@@ -1,12 +1,17 @@
-import { Component, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Component, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, useGLTF, useTexture } from '@react-three/drei'
 import type { Group, Texture } from 'three'
-import type { Product, ProductVariant } from '../catalog'
+import { catalogGroups, type CatalogGroup, type ProductVariant } from '../catalog'
 import { cloneProductScene, productMaterialNames } from '../productScene'
 import { atLeast, errorText, euro, send, type CatalogItem } from './api'
 
 type TextureDraft = { file: File; url: string; materialName: string }
+type CatalogDraft = { name: string; brand: string; retailer: string; sku: string; group: CatalogGroup; category: string; width: string; depth: string; height: string; price: string }
+
+function catalogDraft(product: CatalogItem): CatalogDraft {
+  return { name: product.name, brand: product.brand, retailer: product.retailer, sku: product.sku || '', group: product.group as CatalogGroup, category: product.category, width: String(product.width), depth: String(product.depth), height: String(product.height), price: product.price == null ? '' : String(product.price) }
+}
 
 async function fileBase64(file: File) {
   const bytes = new Uint8Array(await file.arrayBuffer())
@@ -48,6 +53,8 @@ function ModelPreview({ url, tone, texturePath, textureMaterial, onFail, onMater
 export default function CatalogDetailPage({ productId, role, onError, reload }: { productId: string; role: string; onError: (message: string) => void; reload: () => Promise<void> }) {
   const [product, setProduct] = useState<CatalogItem | null>(null)
   const [busy, setBusy] = useState(false)
+  const [editBusy, setEditBusy] = useState(false)
+  const [editDraft, setEditDraft] = useState<CatalogDraft | null>(null)
   const [preview, setPreview] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [previewFailed, setPreviewFailed] = useState(false)
@@ -57,9 +64,9 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
   const [previewVariantId, setPreviewVariantId] = useState('')
   const [materialNames, setMaterialNames] = useState<string[]>([])
   const textureUrls = useRef(new Set<string>())
-  const canUpload = atLeast(role, 'admin')
+  const canManage = atLeast(role, 'admin'), canUpload = canManage && !product?.deleted
   useEffect(() => {
-    void send<CatalogItem>(`/api/admin/catalog/${encodeURIComponent(productId)}`).then((item) => { setProduct(item); setPreviewVariantId(item.variants?.[0]?.id || '') }).catch((error) => onError(errorText(error)))
+    void send<CatalogItem>(`/api/admin/catalog/${encodeURIComponent(productId)}`).then((item) => { setProduct(item); setEditDraft(catalogDraft(item)); setPreviewVariantId(item.variants?.[0]?.id || '') }).catch((error) => onError(errorText(error)))
   }, [productId, onError])
   useEffect(() => () => { if (preview.startsWith('blob:')) URL.revokeObjectURL(preview) }, [preview])
   useEffect(() => () => textureUrls.current.forEach((url) => URL.revokeObjectURL(url)), [])
@@ -99,6 +106,41 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
       await reload(); setProduct(await send<CatalogItem>(`/api/admin/catalog/${encodeURIComponent(productId)}`))
     } catch (error) { onError(errorText(error)) } finally { setTextureBusy(null) }
   }
+  const refreshProduct = async () => {
+    const updated = await send<CatalogItem>(`/api/admin/catalog/${encodeURIComponent(productId)}`)
+    setProduct(updated); setEditDraft(catalogDraft(updated))
+  }
+  const saveMetadata = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!editDraft) return
+    setEditBusy(true); onError('')
+    try {
+      await send(`/api/admin/catalog/${encodeURIComponent(productId)}`, 'PATCH', { overrides: {
+        name: editDraft.name, brand: editDraft.brand, retailer: editDraft.retailer, sku: editDraft.sku.trim() || null,
+        group: editDraft.group, category: editDraft.category, width: Number(editDraft.width), depth: Number(editDraft.depth), height: Number(editDraft.height),
+        price: editDraft.price.trim() ? Number(editDraft.price) : null,
+      } })
+      await refreshProduct(); await reload()
+    } catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
+  }
+  const resetMetadata = async () => {
+    if (!product?.hasOverrides || !window.confirm('Reset all editable fields to the catalogue source values?')) return
+    setEditBusy(true); onError('')
+    try { await send(`/api/admin/catalog/${encodeURIComponent(productId)}`, 'PATCH', { overrides: null }); await refreshProduct(); await reload() }
+    catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
+  }
+  const deleteProduct = async () => {
+    if (!product || !window.confirm(`Delete ${product.name} from the catalogue? It will be archived; product data, files, and saved designs will be kept.`)) return
+    setEditBusy(true); onError('')
+    try { await send(`/api/admin/catalog/${encodeURIComponent(productId)}`, 'DELETE'); await refreshProduct(); await reload() }
+    catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
+  }
+  const restoreProduct = async () => {
+    if (!product || !window.confirm(`Restore ${product.name} to the catalogue?`)) return
+    setEditBusy(true); onError('')
+    try { await send(`/api/admin/catalog/${encodeURIComponent(productId)}/restore`, 'POST'); await refreshProduct(); await reload() }
+    catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
+  }
   if (!product) return <section className="admin-card"><p className="admin-empty">Loading product details…</p></section>
   const info = [
     ['Brand', product.brand], ['Retailer', product.retailer], ['Retailer ID', product.retailerId], ['SKU', product.sku],
@@ -122,11 +164,31 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
   }
   return <div className="admin-product-detail">
     <a className="admin-back-link" href="/admin?tab=catalogue">← Catalogue</a>
-    <section className="admin-card"><header className="admin-card-head"><div><span className="admin-eyebrow">Product record · {product.id}</span><h2>{product.name}</h2><p>{product.status}</p></div><span className={`admin-pill admin-pill-${product.review}`}>{product.review}</span></header>
+    <section className="admin-card"><header className="admin-card-head"><div><span className="admin-eyebrow">Product record · {product.id}</span><h2>{product.name}</h2><p>{product.status}</p></div><span className={`admin-pill ${product.deleted ? 'admin-pill-deleted' : `admin-pill-${product.review}`}`}>{product.deleted ? 'Archived' : product.review}</span></header>
+      {canManage && <div className="admin-actions">{product.deleted ? <button className="admin-primary-inline" type="button" disabled={editBusy} onClick={() => void restoreProduct()}>Restore product</button> : <button className="admin-row-action admin-row-danger" type="button" disabled={editBusy} onClick={() => void deleteProduct()}>Delete product</button>}</div>}
       {product.missingFields?.length ? <div className="admin-missing"><strong>Missing information</strong><span>{product.missingFields.join(' · ')}</span></div> : null}
       <dl className="admin-product-facts">{info.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{key === 'Source page' && value ? <a href={String(value)} target="_blank" rel="noreferrer">Open source ↗</a> : String(value || 'Not provided')}</dd></div>)}</dl>
+      {canManage && editDraft && !product.deleted && <form className="admin-catalog-edit-form" onSubmit={(event) => void saveMetadata(event)}>
+        <div className="admin-card-head"><div><span className="admin-eyebrow">Admin overrides</span><h3>Edit catalogue metadata</h3></div></div>
+        <p className="admin-help">These values override the bundled or imported source for the planner. Dimension changes affect product placement. Reset restores all original values.</p>
+        <div className="admin-form-grid">
+          <label>Product name<input value={editDraft.name} maxLength={160} required onChange={(event) => setEditDraft({ ...editDraft, name: event.target.value })} /></label>
+          <label>Brand<input value={editDraft.brand} maxLength={120} required onChange={(event) => setEditDraft({ ...editDraft, brand: event.target.value })} /></label>
+          <label>Retailer<input value={editDraft.retailer} maxLength={120} required onChange={(event) => setEditDraft({ ...editDraft, retailer: event.target.value })} /></label>
+          <label>SKU<input value={editDraft.sku} maxLength={100} onChange={(event) => setEditDraft({ ...editDraft, sku: event.target.value })} /></label>
+          <label>Product group<select value={editDraft.group} onChange={(event) => setEditDraft({ ...editDraft, group: event.target.value as CatalogGroup })}>{catalogGroups.map((group) => <option key={group} value={group}>{group}</option>)}</select></label>
+          <label>Category<input value={editDraft.category} maxLength={80} required onChange={(event) => setEditDraft({ ...editDraft, category: event.target.value })} /></label>
+          <label>Width (cm)<input type="number" min="0" max="2000" step="0.1" value={editDraft.width} required onChange={(event) => setEditDraft({ ...editDraft, width: event.target.value })} /></label>
+          <label>Depth (cm)<input type="number" min="0" max="2000" step="0.1" value={editDraft.depth} required onChange={(event) => setEditDraft({ ...editDraft, depth: event.target.value })} /></label>
+          <label>Height (cm)<input type="number" min="0" max="2000" step="0.1" value={editDraft.height} required onChange={(event) => setEditDraft({ ...editDraft, height: event.target.value })} /></label>
+          <label>Price<input type="number" min="0" max="100000000" step="0.01" value={editDraft.price} onChange={(event) => setEditDraft({ ...editDraft, price: event.target.value })} /></label>
+        </div>
+        <div className="admin-actions"><button className="admin-primary-inline" type="submit" disabled={editBusy}>{editBusy ? 'Saving…' : 'Save metadata'}</button>{product.hasOverrides && <button className="admin-row-action" type="button" disabled={editBusy} onClick={() => void resetMetadata()}>Reset to source</button>}</div>
+      </form>}
       <h3>3D model</h3>{modelUrl ? <ModelPreview url={modelUrl} tone={previewTone} texturePath={previewTexture} textureMaterial={previewMaterial} onFail={() => setPreviewFailed(true)} onMaterials={setMaterialNames} /> : <div className="admin-model-empty">No GLB uploaded yet.</div>}
-      {canUpload ? <><label className="admin-model-upload">Replace 3D model (.glb, max 18 MB)<input type="file" accept=".glb,model/gltf-binary" disabled={busy} onChange={(event) => prepare(event.target.files?.[0])} /></label>{selectedFile && <button className="admin-primary" disabled={busy || previewFailed} onClick={() => void upload()}>{previewFailed ? 'Preview failed; choose another GLB' : 'Upload this model'}</button>}</> : <p className="admin-help">Admin role is required to upload a model.</p>}
+      {canUpload && <><label className="admin-model-upload">Replace 3D model (.glb, max 18 MB)<input type="file" accept=".glb,model/gltf-binary" disabled={busy} onChange={(event) => prepare(event.target.files?.[0])} /></label>{selectedFile && <button className="admin-primary" disabled={busy || previewFailed} onClick={() => void upload()}>{previewFailed ? 'Preview failed; choose another GLB' : 'Upload this model'}</button>}</>}
+      {!canManage && <p className="admin-help">Admin role is required to upload a model.</p>}
+      {canManage && product.deleted && <p className="admin-help">Restore this product before uploading a model or texture.</p>}
       {busy && <p role="status" className="admin-help">Uploading and checking the model…</p>}
     </section>
     {product.variants?.length ? <section className="admin-card"><h3>Colour variant textures</h3><p className="admin-help">Upload one texture per colour. The texture must match this model’s UV layout. Choose a material name from the preview, or use the automatic upholstery/cushion/fabric match.</p>
