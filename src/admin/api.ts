@@ -6,7 +6,7 @@ import type { Partner } from '../partners'
 export type ItemStatus = 'queued' | 'scraping' | 'skipped-existing' | 'needs-model-recipe' | 'generated' | 'failed'
 export type CrawlItem = { url: string; status: ItemStatus; sku: string | null; productId: string | null; artifactRoot: string | null; error: string | null; updatedAt: string }
 export type Job = { id: string; siteUrl: string; retailerId: string; maxProducts: number; delayMs: number; status: string; discoveredUrls: string[]; items: CrawlItem[]; currentUrl: string | null; error: string | null; createdAt: string; updatedAt: string }
-export type CatalogItem = Product & { hidden: boolean; deleted: boolean; hasOverrides: boolean; overrides?: CatalogMetadataOverridePatch; review: CatalogReview; updatedAt: string | null; missingFields?: string[] }
+export type CatalogItem = Product & { hidden: boolean; deleted: boolean; hasOverrides: boolean; permanentlyDeletable?: boolean; overrides?: CatalogMetadataOverridePatch; review: CatalogReview; updatedAt: string | null; missingFields?: string[] }
 export type MetadataCrawlJob = { id: string; brandName: string; retailerId: string; website: string; maxProducts: number; delayMs: number; status: string; discoveredUrls: string[]; items: { url: string; productId: string | null; status: string; error: string | null; updatedAt: string }[]; currentUrl: string | null; error: string | null; createdAt: string; updatedAt: string }
 export type AdminUser = { uid: string; email: string; role: string; status: string }
 export type AuditEntry = { id: string; actorEmail: string; action: string; target: string; createdAt?: { _seconds?: number } }

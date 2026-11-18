@@ -130,10 +130,18 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
     catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
   }
   const deleteProduct = async () => {
-    if (!product || !window.confirm(`Delete ${product.name} from the catalogue? It will be archived; product data, files, and saved designs will be kept.`)) return
+    if (!product || !window.confirm(`Archive ${product.name}? Product data, files, and saved designs will be kept.`)) return
     setEditBusy(true); onError('')
     try { await send(`/api/admin/catalog/${encodeURIComponent(productId)}`, 'DELETE'); await refreshProduct(); await reload() }
     catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
+  }
+  const permanentlyDeleteProduct = async () => {
+    if (!product?.permanentlyDeletable || window.prompt(`This permanently removes "${product?.name}", its stored assets, and admin metadata. Saved designs using it may no longer render. Type the product name exactly to continue.`) !== product.name) return
+    setEditBusy(true); onError('')
+    try {
+      await send('/api/admin/catalog/permanent-delete', 'POST', { ids: [product.id], confirmation: 'DELETE' })
+      window.location.href = '/admin?tab=catalogue'
+    } catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
   }
   const restoreProduct = async () => {
     if (!product || !window.confirm(`Restore ${product.name} to the catalogue?`)) return
@@ -165,7 +173,8 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
   return <div className="admin-product-detail">
     <a className="admin-back-link" href="/admin?tab=catalogue">← Catalogue</a>
     <section className="admin-card"><header className="admin-card-head"><div><span className="admin-eyebrow">Product record · {product.id}</span><h2>{product.name}</h2><p>{product.status}</p></div><span className={`admin-pill ${product.deleted ? 'admin-pill-deleted' : `admin-pill-${product.review}`}`}>{product.deleted ? 'Archived' : product.review}</span></header>
-      {canManage && <div className="admin-actions">{product.deleted ? <button className="admin-primary-inline" type="button" disabled={editBusy} onClick={() => void restoreProduct()}>Restore product</button> : <button className="admin-row-action admin-row-danger" type="button" disabled={editBusy} onClick={() => void deleteProduct()}>Delete product</button>}</div>}
+      {canManage && <div className="admin-actions">{product.deleted ? <button className="admin-primary-inline" type="button" disabled={editBusy} onClick={() => void restoreProduct()}>Restore product</button> : <button className="admin-row-action admin-row-danger" type="button" disabled={editBusy} onClick={() => void deleteProduct()}>Archive product</button>}{product.permanentlyDeletable && <button className="admin-row-danger" type="button" disabled={editBusy} onClick={() => void permanentlyDeleteProduct()}>Permanently delete product</button>}</div>}
+      {canManage && !product.permanentlyDeletable && <p className="admin-help">This bundled product is source-controlled. The dashboard can archive it; permanent removal requires a source update.</p>}
       {product.missingFields?.length ? <div className="admin-missing"><strong>Missing information</strong><span>{product.missingFields.join(' · ')}</span></div> : null}
       <dl className="admin-product-facts">{info.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{key === 'Source page' && value ? <a href={String(value)} target="_blank" rel="noreferrer">Open source ↗</a> : String(value || 'Not provided')}</dd></div>)}</dl>
       {canManage && editDraft && !product.deleted && <form className="admin-catalog-edit-form" onSubmit={(event) => void saveMetadata(event)}>

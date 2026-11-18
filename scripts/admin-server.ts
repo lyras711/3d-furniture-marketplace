@@ -14,10 +14,10 @@ import { activePurchaseStatuses, adminTransitionAllowed, decidePurchaseItems, es
 import { getFloorRegions, isProject, migrateProject, productById, type ProjectState } from '../src/editor'
 import { catalogReviews, products, type CatalogReview } from '../src/catalog'
 import { partnerFields, type Partner, type PartnerNote } from '../src/partners'
-import { applyCatalogMetadataOverrides, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseManualCatalogProduct, readCatalogMetadataOverrides } from './catalog-admin'
+import { applyCatalogMetadataOverrides, catalogAssetPrefixFromUrl, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseCatalogPermanentDeleteIds, parseManualCatalogProduct, readCatalogMetadataOverrides } from './catalog-admin'
 import { VertexPlanVisionProvider } from './plan-vision'
 import { clearFinishedMetadataCrawls, createMetadataCrawl, deleteMetadataCrawl, getMetadataCrawl, listMetadataCrawls, runMetadataCrawl } from './catalog-metadata-crawl'
-import { uploadBuffer } from './firebase-store'
+import { firebaseStore, uploadBuffer } from './firebase-store'
 import { validateGlb, validateTexture } from './catalog-asset'
 
 type Role = 'viewer' | 'editor' | 'admin' | 'owner'
@@ -107,12 +107,42 @@ async function catalogEdits() {
 }
 
 async function allCatalogProducts() {
-  const productsById = new Map(products.map((product) => [product.id, product as unknown as Record<string, unknown>]))
+  const productsById = new Map(products.map((product) => [product.id, { ...product, _catalogSource: 'bundled' } as unknown as Record<string, unknown>]))
   try {
     const snapshot = await firebase().db.collection('catalogProducts').get()
-    for (const doc of snapshot.docs) productsById.set(doc.id, { ...productsById.get(doc.id), ...doc.data() })
+    for (const doc of snapshot.docs) productsById.set(doc.id, { ...productsById.get(doc.id), ...doc.data(), id: doc.id, _catalogSource: 'firestore' })
   } catch {}
   return [...productsById.values()]
+}
+
+function catalogStorageBrand(product: Record<string, unknown>) {
+  return String(product.brand || product.retailer || 'brand').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'brand'
+}
+
+async function deleteCatalogAssets(id: string, product: Record<string, unknown>, edit: Record<string, unknown>) {
+  const bucket = firebaseStore().storage.bucket(), prefixes = new Set([`catalog/${catalogStorageBrand(product)}/${id}/`])
+  const paths: unknown[] = [product.modelPath, product.thumbnailPath, edit.modelPath, ...(Array.isArray(product.sourceImages) ? product.sourceImages : [])]
+  const variants = Array.isArray(product.variants) ? product.variants as Record<string, unknown>[] : []
+  for (const variant of variants) paths.push(variant.modelPath, variant.texturePath, variant.thumbnailPath)
+  const textureOverrides = edit.variantTextures && typeof edit.variantTextures === 'object' ? Object.values(edit.variantTextures as Record<string, unknown>) : []
+  for (const texture of textureOverrides) if (texture && typeof texture === 'object') paths.push((texture as Record<string, unknown>).texturePath)
+  const metadata = product.metadata && typeof product.metadata === 'object' ? product.metadata as Record<string, unknown> : {}
+  const images = Array.isArray(metadata.images) ? metadata.images as Record<string, unknown>[] : []
+  for (const image of images) paths.push(image.url)
+  for (const value of paths) {
+    const prefix = catalogAssetPrefixFromUrl(value, id, bucket.name)
+    if (prefix) prefixes.add(prefix)
+  }
+  const files = new Map<string, ReturnType<typeof bucket.file>>()
+  for (const prefix of prefixes) {
+    const [found] = await bucket.getFiles({ prefix })
+    for (const file of found) files.set(file.name, file)
+  }
+  const ownedFiles = [...files.values()]
+  for (let index = 0; index < ownedFiles.length; index += 25) {
+    await Promise.all(ownedFiles.slice(index, index + 25).map((file) => file.delete({ ignoreNotFound: true })))
+  }
+  return ownedFiles.length
 }
 
 function catalogVariants(product: Record<string, unknown>, edit: Record<string, unknown>, modelPath: unknown) {
@@ -131,7 +161,8 @@ function catalogVariants(product: Record<string, unknown>, edit: Record<string, 
 }
 
 function catalogProductView(source: Record<string, unknown>, edit: Record<string, unknown>) {
-  const overrides = readCatalogMetadataOverrides(edit.overrides), product = applyCatalogMetadataOverrides(source, overrides)
+  const { _catalogSource, ...sourceProduct } = source
+  const overrides = readCatalogMetadataOverrides(edit.overrides), product = applyCatalogMetadataOverrides(sourceProduct, overrides)
   const modelPath = typeof edit.modelPath === 'string' ? edit.modelPath : product.modelPath
   const metadata = product.metadata as { missingFields?: string[] } | undefined
   const resolved: Record<string, boolean> = {
@@ -156,6 +187,7 @@ function catalogProductView(source: Record<string, unknown>, edit: Record<string
   return {
     ...product,
     id: source.id,
+    permanentlyDeletable: _catalogSource === 'firestore' && !products.some((item) => item.id === source.id),
     modelPath,
     variants: catalogVariants(product, edit, modelPath),
     missingFields: [...new Set(missingFields)],
@@ -416,7 +448,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/catalog/products') {
       const { products: catalog } = await catalogView()
-      json(response, 200, { products: catalog.map(({ hidden: _hidden, review: _review, updatedAt: _updatedAt, deleted: _deleted, hasOverrides: _hasOverrides, overrides: _overrides, ...product }) => product), hidden: catalog.filter((product) => product.hidden).map((product) => product.id) }); return
+      json(response, 200, { products: catalog.map(({ hidden: _hidden, review: _review, updatedAt: _updatedAt, deleted: _deleted, hasOverrides: _hasOverrides, overrides: _overrides, permanentlyDeletable: _permanentlyDeletable, ...product }) => product), hidden: catalog.filter((product) => product.hidden).map((product) => product.id) }); return
     }
     if (!url.pathname.startsWith('/api/admin/')) { json(response, 404, { error: 'Not found.' }); return }
     const me = await context(request, url.pathname === '/api/admin/me' ? 'viewer' : 'viewer')
@@ -460,6 +492,33 @@ const server = createServer(async (request, response) => {
         await audit(actor, 'catalog.bulk-archived', 'selected', { ids: activeIds, assetsPreserved: true })
       }
       json(response, 200, { archived: activeIds.length, alreadyArchived: ids.length - activeIds.length }); return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/admin/catalog/permanent-delete') {
+      const actor = await context(request, 'admin')
+      let ids: string[]
+      try { ids = parseCatalogPermanentDeleteIds(await body(request)) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'Catalog delete request is invalid.') }
+      const db = firebase().db
+      const [catalogSnapshot, editsSnapshot] = await Promise.all([db.collection('catalogProducts').get(), db.collection('catalogEdits').get()])
+      const sourceById = new Map(catalogSnapshot.docs.map((doc) => [doc.id, { ...doc.data(), id: doc.id }]))
+      const editsById = new Map(editsSnapshot.docs.map((doc) => [doc.id, doc.data()]))
+      for (const id of ids) {
+        if (products.some((product) => product.id === id)) throw new ApiError(409, 'Bundled products are source-controlled and cannot be permanently deleted from the dashboard. Archive them instead.')
+        if (!sourceById.has(id)) throw new ApiError(404, 'One or more imported catalog products were not found.')
+      }
+      let assetsDeleted = 0
+      try {
+        for (const id of ids) assetsDeleted += await deleteCatalogAssets(id, sourceById.get(id)!, editsById.get(id) || {})
+      } catch {
+        throw new ApiError(502, 'Product records were kept, but some stored assets may already have been deleted. Retry the permanent delete to finish cleanup.')
+      }
+      const batch = db.batch()
+      for (const id of ids) {
+        batch.delete(db.collection('catalogProducts').doc(id))
+        batch.delete(db.collection('catalogEdits').doc(id))
+      }
+      try { await batch.commit() } catch { throw new ApiError(502, 'Product files were removed, but catalogue records remain. Retry the permanent delete to finish cleanup.') }
+      await audit(actor, 'catalog.permanently-deleted', 'selected', { ids, assetsDeleted, savedDesignsMayNoLongerRender: true })
+      json(response, 200, { deleted: ids.length, assetsDeleted }); return
     }
     if (request.method === 'GET' && url.pathname === '/api/admin/catalog-crawls') { json(response, 200, await listMetadataCrawls()); return }
     if (request.method === 'DELETE' && url.pathname === '/api/admin/catalog-crawls') {
@@ -671,7 +730,7 @@ const server = createServer(async (request, response) => {
       if (input.mimeType !== 'model/gltf-binary' || typeof input.data !== 'string') throw new ApiError(400, 'Upload a valid binary GLB file.')
       let bytes: Buffer
       try { bytes = validateGlb(input.data) } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : 'GLB file is invalid.') }
-      const hash = createHash('sha256').update(bytes).digest('hex'), brand = String(product.brand || product.retailer || 'brand').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'brand'
+      const hash = createHash('sha256').update(bytes).digest('hex'), brand = catalogStorageBrand(product)
       const modelPath = await uploadBuffer(bytes, `catalog/${brand}/${id}/models/${hash}.glb`, 'model/gltf-binary', { public: true })
       await firebase().db.collection('catalogEdits').doc(id).set({ modelPath, modelHash: hash, modelSize: bytes.length, modelUpdatedAt: new Date().toISOString(), modelUpdatedBy: actor.uid }, { merge: true })
       await audit(actor, 'catalog.model-uploaded', id, { hash, size: bytes.length })
@@ -691,7 +750,7 @@ const server = createServer(async (request, response) => {
       const materialName = typeof input.materialName === 'string' ? input.materialName.trim() : ''
       if (materialName.length > 120) throw new ApiError(400, 'Material name must be 120 characters or less.')
       const hash = createHash('sha256').update(asset.bytes).digest('hex')
-      const brand = String(product.brand || product.retailer || 'brand').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 72) || 'brand'
+      const brand = catalogStorageBrand(product)
       const modelVariant = variantId.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').slice(0, 72) || 'variant'
       const texturePath = await uploadBuffer(asset.bytes, `catalog/${brand}/${id}/variants/${modelVariant}/textures/${hash}.${asset.ext}`, input.mimeType, { public: true })
       const ref = firebase().db.collection('catalogEdits').doc(id), current = (await ref.get()).data() || {}

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { applyCatalogMetadataOverrides, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseManualCatalogProduct } from './scripts/catalog-admin'
+import { applyCatalogMetadataOverrides, catalogAssetPrefixFromUrl, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseCatalogPermanentDeleteIds, parseManualCatalogProduct } from './scripts/catalog-admin'
 
 test('catalog metadata overrides validate and replace only editable fields', () => {
   const source = { id: 'sofa-haven', name: 'Original sofa', width: 220, modelPath: '/model.glb' }
@@ -40,6 +40,21 @@ test('bulk archive accepts unique safe product ids and rejects invalid selection
   expect(() => parseCatalogArchiveIds({ ids: [] })).toThrow('Provide between 1 and 500 catalog product ids.')
   expect(() => parseCatalogArchiveIds({ ids: ['sofa/haven'] })).toThrow('Catalog product ids are invalid.')
   expect(() => parseCatalogArchiveIds({ ids: ['sofa-haven'], deleteAssets: true })).toThrow('Provide between 1 and 500 catalog product ids.')
+})
+
+test('permanent deletion requires an exact confirmation and unique safe ids', () => {
+  expect(parseCatalogPermanentDeleteIds({ ids: ['manual-1'], confirmation: 'DELETE' })).toEqual(['manual-1'])
+  expect(() => parseCatalogPermanentDeleteIds({ ids: ['manual-1'], confirmation: 'delete' })).toThrow('Type DELETE')
+  expect(() => parseCatalogPermanentDeleteIds({ ids: ['manual-1', 'manual-1'], confirmation: 'DELETE' })).toThrow('unique')
+  expect(() => parseCatalogPermanentDeleteIds({ ids: ['manual/1'], confirmation: 'DELETE' })).toThrow('Catalog product ids are invalid.')
+  expect(() => parseCatalogPermanentDeleteIds({ ids: Array.from({ length: 251 }, (_, index) => `item-${index}`), confirmation: 'DELETE' })).toThrow('no more than 250')
+})
+
+test('catalog asset deletion only accepts owned paths for the selected product and bucket', () => {
+  expect(catalogAssetPrefixFromUrl('https://storage.googleapis.com/test-bucket/catalog/polihome/item-1/models/a.glb', 'item-1', 'test-bucket')).toBe('catalog/polihome/item-1/')
+  expect(catalogAssetPrefixFromUrl('https://firebasestorage.googleapis.com/v0/b/test-bucket/o/catalog%2Fpolihome%2Fitem-1%2Fcrawls%2Fcrawl%2Fimages%2Fa.jpg?alt=media', 'item-1', 'test-bucket')).toBe('catalog/polihome/item-1/')
+  expect(catalogAssetPrefixFromUrl('https://storage.googleapis.com/test-bucket/catalog/polihome/item-2/a.glb', 'item-1', 'test-bucket')).toBeNull()
+  expect(catalogAssetPrefixFromUrl('https://images.example/item-1.jpg', 'item-1', 'test-bucket')).toBeNull()
 })
 
 test('deleted catalog products stay hidden until their deletion marker is cleared', () => {

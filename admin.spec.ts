@@ -34,16 +34,16 @@ function minimalGlb() {
 }
 
 /** Stateful stand-in for scripts/admin-server.ts so the dashboard can be driven without Firebase Admin credentials. */
-async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJob[]; catalogCrawls?: MockMetadataCrawl[]; bulkArchiveUnavailable?: boolean } = {}) {
+async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJob[]; catalogCrawls?: MockMetadataCrawl[]; catalogProducts?: Product[]; bulkArchiveUnavailable?: boolean } = {}) {
   const calls: { method: string; path: string; body: unknown }[] = []
   const requests = [order('order-1', 'pending', '2026-11-01T10:00:00.000Z', 'Maria'), order('order-2', 'ready-to-place', '2026-11-02T10:00:00.000Z', 'Nikos'), order('order-3', 'delivered', '2026-10-20T10:00:00.000Z', 'Eleni')]
   let jobs = [...(seed.jobs || [])]
   let catalogCrawls = [...(seed.catalogCrawls || [])]
   const partners: Partner[] = []
-  const createdCatalogProducts: Product[] = []
+  const createdCatalogProducts: Product[] = [...(seed.catalogProducts || [])]
   const edits = new Map<string, { hidden?: boolean; review?: string; deletedAt?: string; overrides?: Record<string, unknown> }>([['sofa-haven', { review: 'needs-work' }]])
   const texturePaths = new Map<string, string>()
-  const catalog = () => ({ products: [...products.slice(0, 8), ...createdCatalogProducts].map((product) => { const edit = edits.get(product.id); return { ...product, ...edit?.overrides, hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null } }) })
+  const catalog = () => ({ products: [...products.slice(0, 8), ...createdCatalogProducts].map((product) => { const edit = edits.get(product.id); return { ...product, ...edit?.overrides, permanentlyDeletable: createdCatalogProducts.some((created) => created.id === product.id), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null } }) })
   await page.route('https://identitytoolkit.googleapis.com/**', (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('accounts:signInWithPassword')) return route.fulfill({ json: { kind: 'identitytoolkit#VerifyPasswordResponse', localId: 'admin-uid', email: 'ops@formivo3d.com', idToken, refreshToken: 'refresh', expiresIn: '3600', registered: true } })
@@ -97,6 +97,16 @@ async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJ
       for (const id of ids) edits.set(id, { ...edits.get(id), deletedAt: at })
       return route.fulfill({ json: { archived: ids.length, alreadyArchived: 0 } })
     }
+    if (path === '/api/admin/catalog/permanent-delete' && method === 'POST') {
+      const ids = (body as { ids: string[] }).ids
+      if (ids.some((id) => !createdCatalogProducts.some((product) => product.id === id))) return route.fulfill({ status: 409, json: { error: 'Bundled products cannot be permanently deleted.' } })
+      for (const id of ids) {
+        const index = createdCatalogProducts.findIndex((product) => product.id === id)
+        if (index >= 0) createdCatalogProducts.splice(index, 1)
+        edits.delete(id)
+      }
+      return route.fulfill({ json: { deleted: ids.length, assetsDeleted: 0 } })
+    }
     if (path === '/api/admin/users') return route.fulfill({ json: [{ uid: 'admin-uid', email: 'ops@formivo3d.com', role: 'owner', status: 'active' }] })
     if (path === '/api/admin/audit') return route.fulfill({ json: [] })
     if (path === '/api/admin/metrics') return route.fulfill({ json: { savedProjects: 12, requestsByStatus: {} } })
@@ -144,7 +154,7 @@ async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJ
       const product = [...products, ...createdCatalogProducts].find((item) => item.id === catalogMatch[1])
       if (!product) return route.fulfill({ status: 404, json: { error: 'Not found' } })
       const edit = edits.get(product.id)
-      return route.fulfill({ json: { ...product, ...edit?.overrides, variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null, missingFields: [] } })
+      return route.fulfill({ json: { ...product, ...edit?.overrides, permanentlyDeletable: createdCatalogProducts.some((created) => created.id === product.id), variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null, missingFields: [] } })
     }
     return route.fulfill({ status: 404, json: { error: `Unmocked ${method} ${path}` } })
   })
@@ -256,7 +266,8 @@ test('viewer accounts only see read-only sections', async ({ page }) => {
   await expect(page.getByLabel('Select all visible products')).toHaveCount(0)
   await openCatalogBrand(page, 'Noma Home')
   await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
-  await expect(page.getByRole('button', { name: 'Delete product' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Archive product' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Permanently delete product' })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Edit catalogue metadata' })).toHaveCount(0)
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: 'Ingestion' }).click()
   await expect(page.getByRole('button', { name: /Delete .* crawl/ })).toHaveCount(0)
@@ -287,6 +298,7 @@ test('catalogue opens a separate product details page with metadata and model pr
   await expect(page.getByRole('heading', { name: 'Haven three-seat sofa' })).toBeVisible()
   await expect(page.getByText('No GLB uploaded yet.')).toBeVisible()
   await expect(page.getByLabel(/Replace 3D model/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Permanently delete product' })).toHaveCount(0)
   const glb = minimalGlb()
   await page.getByLabel(/Replace 3D model/).setInputFiles({ name: 'preview.glb', mimeType: 'model/gltf-binary', buffer: glb })
   await expect(page.getByRole('button', { name: 'Upload this model' })).toBeVisible()
@@ -309,11 +321,11 @@ test('admins can edit, archive and restore a bundled catalogue product', async (
   await expect(page.getByRole('heading', { name: 'Haven sofa edited' })).toBeVisible()
   expect(calls.find((call) => call.method === 'PATCH' && call.path === '/api/admin/catalog/sofa-haven')?.body).toMatchObject({ overrides: { name: 'Haven sofa edited', width: 225 } })
 
-  await page.getByRole('button', { name: 'Delete product' }).click()
+  await page.getByRole('button', { name: 'Archive product' }).click()
   await expect(page.getByText('Archived', { exact: true })).toBeVisible()
   expect(calls.some((call) => call.method === 'DELETE' && call.path === '/api/admin/catalog/sofa-haven')).toBe(true)
   await page.getByRole('button', { name: 'Restore product' }).click()
-  await expect(page.getByRole('button', { name: 'Delete product' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Archive product' })).toBeVisible()
   expect(calls.some((call) => call.method === 'POST' && call.path === '/api/admin/catalog/sofa-haven/restore')).toBe(true)
   await page.screenshot({ path: '/tmp/formivo-admin-catalog-edit-desktop.png', fullPage: true })
   await page.setViewportSize({ width: 375, height: 812 })
@@ -364,6 +376,24 @@ test('admins can open a brand folder and archive its products', async ({ page })
   expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog/bulk-archive')?.body).toEqual({ ids: brandItems.map((product) => product.id) })
 })
 
+test('admins can permanently delete imported products from a brand folder', async ({ page }) => {
+  const imported: Product = { ...products[0], id: 'imported-brand-item', name: 'Imported chair', brand: 'Test Brand' }
+  const calls = await mockBackend(page, 'owner', { catalogProducts: [imported] })
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  const folder = await openCatalogBrand(page, 'Test Brand')
+  await expect(folder.getByRole('button', { name: 'Delete brand permanently (1)' })).toBeVisible()
+  await page.screenshot({ path: '/tmp/forma-admin-permanent-delete-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/forma-admin-permanent-delete-mobile.png', fullPage: true })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  page.once('dialog', (dialog) => void dialog.accept('DELETE'))
+  await folder.getByRole('button', { name: 'Delete brand permanently (1)' }).click()
+  await expect(page.getByRole('status')).toContainText('1 product permanently deleted')
+  expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog/permanent-delete')?.body).toEqual({ ids: ['imported-brand-item'], confirmation: 'DELETE' })
+  await expect(page.getByText('Imported chair')).toHaveCount(0)
+})
+
 test('bulk archive reports when the deployed API does not support the route', async ({ page }) => {
   await mockBackend(page, 'owner', { bulkArchiveUnavailable: true })
   await signIn(page)
@@ -401,11 +431,16 @@ test('admins can manually create a hidden catalogue product draft', async ({ pag
   await expect(page).toHaveURL(/\/admin\/catalog\/manual-coffee-table$/)
   await expect(page.getByRole('heading', { name: 'Studio coffee table' })).toBeVisible()
   await expect(page.getByText('No GLB uploaded yet.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Permanently delete product' })).toBeVisible()
   expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog')?.body).toEqual({
     name: 'Studio coffee table', brand: 'Formivo', retailer: 'Formivo', sku: 'TABLE-01', group: 'Tables',
     category: 'Coffee tables', width: 120, depth: 65, height: 42, price: 399,
     sourceUrl: 'https://formivo3d.com/studio-table', thumbnailUrl: 'https://images.example/studio-table.jpg',
   })
+  page.once('dialog', (dialog) => void dialog.accept('Studio coffee table'))
+  await page.getByRole('button', { name: 'Permanently delete product' }).click()
+  await expect(page).toHaveURL(/\/admin\?tab=catalogue/)
+  expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog/permanent-delete')?.body).toEqual({ ids: ['manual-coffee-table'], confirmation: 'DELETE' })
 })
 
 test('admins can preview and save a texture independently for a product variant', async ({ page }) => {

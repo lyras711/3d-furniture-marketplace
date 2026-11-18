@@ -6,6 +6,7 @@ import { atLeast, errorText, euro, send, type CatalogItem } from './api'
 
 const reviewLabels: Record<CatalogReview, string> = { pending: 'Pending review', approved: 'Approved', 'needs-work': 'Needs work' }
 const maxBulkArchive = 500
+const maxPermanentDelete = 250
 
 export default function CatalogTab({ data, role, reload, onError, focus }: TabProps) {
   const [query, setQuery] = useState('')
@@ -15,6 +16,7 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
   const [busyId, setBusyId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [archiving, setArchiving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [creating, setCreating] = useState(false)
   const [creatingBusy, setCreatingBusy] = useState(false)
   const [notice, setNotice] = useState('')
@@ -106,6 +108,27 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
     } finally { setArchiving(false) }
   }
   const archiveSelected = () => void archiveItems(filtered.filter((item) => selectedIds.has(item.id)), 'selected products')
+  const permanentlyDeleteItems = async (items: CatalogItem[], scope: string) => {
+    if (!items.length) return
+    if (items.some((item) => !item.permanentlyDeletable)) { onError('Bundled products are source-controlled and cannot be permanently deleted from the dashboard.'); return }
+    const ids = [...new Set(items.map((item) => item.id))]
+    if (ids.length > maxPermanentDelete) { onError(`Permanently delete up to ${maxPermanentDelete} products at a time.`); return }
+    const names = items.slice(0, 5).map((item) => item.name).join(', ')
+    const suffix = items.length > 5 ? `, and ${items.length - 5} more` : ''
+    if (window.prompt(`Permanently delete ${ids.length} ${scope} (${names}${suffix})? Their Firestore records and stored product assets will be removed. Saved designs using them may no longer render. Type DELETE to continue.`) !== 'DELETE') return
+    setDeleting(true); onError(''); setNotice('')
+    try {
+      const result = await send<{ deleted: number; assetsDeleted: number }>('/api/admin/catalog/permanent-delete', 'POST', { ids, confirmation: 'DELETE' })
+      setSelectedIds((current) => {
+        const next = new Set(current)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      setNotice(`${result.deleted} product${result.deleted === 1 ? '' : 's'} permanently deleted; ${result.assetsDeleted} stored file${result.assetsDeleted === 1 ? '' : 's'} removed.`)
+      await reload()
+    } catch (reason) { onError(errorText(reason)) } finally { setDeleting(false) }
+  }
+  const selectedItems = filtered.filter((item) => selectedIds.has(item.id))
   const createProduct = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const values = new FormData(event.currentTarget), price = String(values.get('price') || '').trim()
@@ -149,21 +172,22 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
         <div className="admin-form-submit admin-actions"><button className="admin-primary-inline" type="submit" disabled={creatingBusy}>{creatingBusy ? 'Creating…' : 'Create product'}</button><button className="admin-row-action" type="button" disabled={creatingBusy} onClick={() => setCreating(false)}>Cancel</button></div>
       </form>
     </section>}
-    <p className="admin-help">{filtered.length} of {data.catalog.length} products. Admin edits are overrides; archiving hides a product but keeps its record, files, and saved-design references.</p>
+    <p className="admin-help">{filtered.length} of {data.catalog.length} products. Archive keeps records and files; permanent delete removes imported records and stored assets. Bundled products are source-controlled and archive-only here.</p>
     {notice && <p className="admin-help" role="status">{notice}</p>}
     {canHide && <div className="admin-catalog-selection-tools" role="group" aria-label="Catalogue selection">
-      <label className="admin-catalog-select-all"><input className="admin-catalog-select" type="checkbox" aria-label="Select all visible products" checked={allVisibleSelected} disabled={!selectable.length || archiving} onChange={toggleVisible} /><span>Select all {selectable.length} visible</span></label>
-      {selectedIds.size > 0 && <><span>{selectedIds.size} selected</span><button className="admin-row-danger" type="button" disabled={archiving || creatingBusy} onClick={archiveSelected}>{archiving ? 'Archiving…' : 'Archive selected'}</button><button className="admin-row-action" type="button" disabled={archiving || creatingBusy} onClick={clearSelection}>Clear selection</button></>}
-      <small>Brand folders match the current filters. Archive can be reversed; product files are kept. Bulk actions allow up to {maxBulkArchive} products.</small>
+      <label className="admin-catalog-select-all"><input className="admin-catalog-select" type="checkbox" aria-label="Select all visible products" checked={allVisibleSelected} disabled={!selectable.length || archiving || deleting} onChange={toggleVisible} /><span>Select all {selectable.length} visible</span></label>
+      {selectedIds.size > 0 && <><span>{selectedIds.size} selected</span><button className="admin-row-danger" type="button" disabled={archiving || deleting || creatingBusy} onClick={archiveSelected}>{archiving ? 'Archiving…' : 'Archive selected'}</button>{selectedItems.length === selectedIds.size && selectedItems.length <= maxPermanentDelete && selectedItems.every((item) => item.permanentlyDeletable) && <button className="admin-row-danger" type="button" disabled={deleting || archiving || creatingBusy} onClick={() => void permanentlyDeleteItems(selectedItems, 'selected products')}>Delete permanently</button>}<button className="admin-row-action" type="button" disabled={archiving || deleting || creatingBusy} onClick={clearSelection}>Clear selection</button></>}
+      <small>Brand folders match the current filters. Archive is reversible; permanent delete removes stored files. Archive allows {maxBulkArchive}; permanent delete allows {maxPermanentDelete} products at a time.</small>
     </div>}
     {brandGroups.length ? <div className="admin-catalog-brand-folders">{brandGroups.map((group) => {
       const activeItems = group.items.filter((item) => !item.deleted)
+      const deletableItems = group.items.filter((item) => item.permanentlyDeletable)
       const allBrandSelected = activeItems.length > 0 && activeItems.every((item) => selectedIds.has(item.id))
       return <details className="admin-catalog-brand-folder" data-brand={group.brand} key={group.brand.toLowerCase()}>
         <summary><span className="admin-catalog-folder-title"><strong>{group.brand}</strong><small>{group.items.length} matching product{group.items.length === 1 ? '' : 's'} · {activeItems.length} active</small></span></summary>
-        {canHide && activeItems.length > 0 && <div className="admin-catalog-folder-actions">
-          <button className="admin-row-action" type="button" disabled={archiving || activeItems.length > maxBulkArchive} title={activeItems.length > maxBulkArchive ? `Archive up to ${maxBulkArchive} products at a time.` : undefined} onClick={() => toggleBrandSelection(group.items)}>{allBrandSelected ? 'Clear brand selection' : 'Select brand products'}</button>
-          <button className="admin-row-danger" type="button" disabled={archiving || activeItems.length > maxBulkArchive} title={activeItems.length > maxBulkArchive ? `Archive up to ${maxBulkArchive} products at a time.` : undefined} onClick={() => void archiveItems(group.items, `active ${group.brand} products shown in this folder`)}>Archive brand ({activeItems.length})</button>
+        {canHide && (activeItems.length > 0 || deletableItems.length > 0) && <div className="admin-catalog-folder-actions">
+          {activeItems.length > 0 && <><button className="admin-row-action" type="button" disabled={archiving || deleting || activeItems.length > maxBulkArchive} title={activeItems.length > maxBulkArchive ? `Archive up to ${maxBulkArchive} products at a time.` : undefined} onClick={() => toggleBrandSelection(group.items)}>{allBrandSelected ? 'Clear brand selection' : 'Select brand products'}</button><button className="admin-row-danger" type="button" disabled={archiving || deleting || activeItems.length > maxBulkArchive} title={activeItems.length > maxBulkArchive ? `Archive up to ${maxBulkArchive} products at a time.` : undefined} onClick={() => void archiveItems(group.items, `active ${group.brand} products shown in this folder`)}>Archive brand ({activeItems.length})</button></>}
+          {deletableItems.length > 0 && <button className="admin-row-danger" type="button" disabled={deleting || archiving || deletableItems.length > maxPermanentDelete} title={deletableItems.length > maxPermanentDelete ? `Permanently delete up to ${maxPermanentDelete} products at a time.` : undefined} onClick={() => void permanentlyDeleteItems(deletableItems, `${group.brand} imports shown in this folder`)}>{deletableItems.length === group.items.length ? `Delete brand permanently (${deletableItems.length})` : `Delete imports permanently (${deletableItems.length})`}</button>}
           {activeItems.length > maxBulkArchive && <small>Use selection batches to archive this brand.</small>}
         </div>}
         <div className="admin-table-wrap"><table className={`admin-table admin-catalog-table ${canHide ? 'admin-catalog-table-selectable' : ''}`}><thead><tr>
@@ -174,7 +198,7 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
             if (!(event.target instanceof Element) || event.target.closest('a,button,select,input')) return
             window.location.href = `/admin/catalog/${encodeURIComponent(item.id)}`
           }}>
-            {canHide && <td className="admin-catalog-selection-cell"><input className="admin-catalog-select" type="checkbox" aria-label={`Select ${item.name}`} checked={selectedIds.has(item.id)} disabled={item.deleted || archiving} onChange={() => toggleProduct(item.id)} /></td>}
+            {canHide && <td className="admin-catalog-selection-cell"><input className="admin-catalog-select" type="checkbox" aria-label={`Select ${item.name}`} checked={selectedIds.has(item.id)} disabled={item.deleted || archiving || deleting} onChange={() => toggleProduct(item.id)} /></td>}
             <td><a className="admin-product-cell admin-product-slot" href={`/admin/catalog/${encodeURIComponent(item.id)}`}>{product && <ProductThumb product={product} compact />}<span><strong>{item.name}</strong><small>{item.brand} · {item.category}{item.variants?.length ? ` · ${item.variants.length} variants` : ''}</small>{item.deleted && <small className="admin-row-error">Archived</small>}<small className="admin-request-catalog-status">{item.status}</small>{item.missingFields?.length ? <small className="admin-row-error">{item.missingFields.length} fields missing</small> : null}</span></a></td>
             <td>{item.retailer}<small className="admin-request-catalog-status">{item.sku || 'SKU missing'}</small></td>
             <td>{item.width || 'Missing'} × {item.depth || 'Missing'} × {item.height || 'Missing'}</td>

@@ -83,6 +83,42 @@ export function parseCatalogArchiveIds(input: unknown): string[] {
   return [...new Set(value.ids as string[])]
 }
 
+export function parseCatalogPermanentDeleteIds(input: unknown): string[] {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('A permanent-delete request is required.')
+  const value = input as Record<string, unknown>
+  if (Object.keys(value).some((key) => key !== 'ids' && key !== 'confirmation') || value.confirmation !== 'DELETE') throw new Error('Type DELETE to confirm permanent removal.')
+  if (!Array.isArray(value.ids)) throw new Error('Provide between 1 and 500 catalog product ids.')
+  const ids = parseCatalogArchiveIds({ ids: value.ids })
+  if (ids.length !== value.ids.length) throw new Error('Product ids must be unique.')
+  if (ids.length > 250) throw new Error('Permanently delete no more than 250 products at a time.')
+  return ids
+}
+
+export function catalogAssetPrefixFromUrl(value: unknown, productId: string, bucketName: string) {
+  if (typeof value !== 'string') return null
+  let objectPath: string
+  try {
+    if (value.startsWith('gs://')) {
+      const url = new URL(value)
+      if (url.hostname !== bucketName) return null
+      objectPath = decodeURIComponent(url.pathname.slice(1))
+    } else {
+      const url = new URL(value)
+      if (url.hostname === 'storage.googleapis.com') {
+        const parts = url.pathname.split('/').filter(Boolean)
+        if (parts.shift() !== bucketName) return null
+        objectPath = decodeURIComponent(parts.join('/'))
+      } else if (url.hostname === 'firebasestorage.googleapis.com') {
+        const match = url.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/)
+        if (!match || decodeURIComponent(match[1]) !== bucketName) return null
+        objectPath = decodeURIComponent(match[2])
+      } else return null
+    }
+  } catch { return null }
+  const [root, brand, id] = objectPath.split('/')
+  return root === 'catalog' && brand && id === productId ? `${root}/${brand}/${id}/` : null
+}
+
 export function readCatalogMetadataOverrides(value: unknown): CatalogMetadataOverridePatch {
   try { return parseCatalogMetadataOverrides(value) } catch { return {} }
 }
