@@ -1051,6 +1051,7 @@ function App() {
   const projectRef = useRef(project)
   const lastStored = useRef<string | null>(null)
   const history = useRef<{ past: ProjectState[]; future: ProjectState[] }>({ past: [], future: [] })
+  const sketchRedo = useRef<Point[][][]>([])
   const dragSnapshot = useRef<ProjectState | null>(null)
   const [, refreshHistory] = useState(0)
   const [accountUser, setAccountUser] = useState<User | null>(null)
@@ -1064,6 +1065,7 @@ function App() {
     const current = projectRef.current
     const next = typeof update === 'function' ? update(current) : update
     if (JSON.stringify(current) === JSON.stringify(next)) return
+    sketchRedo.current = []
     if (!dragSnapshot.current) {
       history.current.past = [...history.current.past.slice(-49), current]
       history.current.future = []
@@ -1080,19 +1082,30 @@ function App() {
     try { if (accountUser) localStorage.removeItem(cloudProjectKey(accountUser.uid)) } catch {}
   }
   const undo = () => {
+    if (activeTool === 'sketch' && sketchStrokes.length) {
+      sketchRedo.current.push(sketchStrokes)
+      setSketchStrokes(sketchStrokes.slice(0, -1))
+      return
+    }
     const previous = history.current.past.pop()
     if (!previous) return
     history.current.future.push(projectRef.current)
     projectRef.current = previous
     renderProject(previous)
+    if (activeTool === 'sketch') { setActiveTool('select'); setSketchStrokes([]); sketchRedo.current = [] }
     clearSelection()
   }
   const redo = () => {
+    if (activeTool === 'sketch' && sketchRedo.current.length) {
+      setSketchStrokes(sketchRedo.current.pop()!)
+      return
+    }
     const next = history.current.future.pop()
     if (!next) return
     history.current.past.push(projectRef.current)
     projectRef.current = next
     renderProject(next)
+    if (activeTool === 'sketch') { setActiveTool('select'); setSketchStrokes([]); sketchRedo.current = [] }
     clearSelection()
   }
   const endDrag = () => {
@@ -1153,6 +1166,8 @@ function App() {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [viewMenuOpen, setViewMenuOpen] = useState(false)
   const [projectName, setProjectName] = useState(project.name)
+  const canUndo = history.current.past.length > 0 || (activeTool === 'sketch' && sketchStrokes.length > 0)
+  const canRedo = history.current.future.length > 0 || (activeTool === 'sketch' && sketchRedo.current.length > 0)
   useEffect(() => setProjectName(project.name), [project.name])
   useEffect(() => { setPanelOpen(!compact); setDetailsOpen(false) }, [compact])
   useEffect(() => { if (compact ? !addOpen : !panelOpen || step !== 'furnish') setAddPoint(null) }, [compact, addOpen, panelOpen, step])
@@ -1166,7 +1181,7 @@ function App() {
   }
   const chooseTool = (tool: Tool) => {
     clearSelection(); setActiveTool(tool); setViewMenuOpen(false); setHangItem(null)
-    if (tool !== 'sketch') setSketchStrokes([])
+    if (tool !== 'sketch') { setSketchStrokes([]); sketchRedo.current = [] }
     if (tool === 'sketch') setViewMode('2d')
     if (BUILD_TOOLS.includes(tool)) setWelcomeDismissed(true)
     if (compact) { setPanelOpen(false); setMenuOpen(false); setAddOpen(false) }
@@ -1670,7 +1685,7 @@ function App() {
 
   const buildAction = (action: BuildAction) => {
     const current = projectRef.current
-    if (action.tool === 'sketch') { setSketchStrokes((strokes) => [...strokes, action.points]); return }
+    if (action.tool === 'sketch') { history.current.future = []; sketchRedo.current = []; setSketchStrokes((strokes) => [...strokes, action.points]); return }
     if (action.tool === 'erase') {
       const next = eraseWallSegment(current, action.a, action.b, () => makeId('wall'))
       if (next === current) setNotice(`Drag along a wall to remove part of it, or ${compact ? 'tap' : 'click'} a wall to remove all of it.`)
@@ -1692,6 +1707,7 @@ function App() {
   const finishSketch = () => {
     const segments = wallsFromSketch(sketchStrokes)
     setSketchStrokes([])
+    sketchRedo.current = []
     if (!segments.length) { setNotice('Draw the outline of your room first.'); return }
     setProject(segments.reduce((project, [a, b]) => addWallSegment(project, a, b, makeId('wall')), projectRef.current))
     clearSelection(); setActiveTool('select'); setWelcomeDismissed(true); setCameraVersion((value) => value + 1)
@@ -1701,7 +1717,7 @@ function App() {
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (renderOpen || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]') || shoppingOpen || requestOpen || newProjectOpen || importOpen || customItemOpen || measureOpen || lengthWallId) return
-      if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); setHangItem(null); setSketchStrokes([]); endDrag(); return }
+      if (event.key === 'Escape') { clearSelection(); setActiveTool('select'); setHangItem(null); setSketchStrokes([]); sketchRedo.current = []; endDrag(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); return }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveProject(); return }
       if (event.key === '/') { event.preventDefault(); setStep('furnish'); setPanelOpen(true); requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.search-field input')?.focus()); return }
@@ -1930,8 +1946,11 @@ function App() {
     : activeTool === 'erase' ? 'Drag along a wall to remove part of it, or tap a wall to remove it.'
     : `Tap a wall to place the ${activeTool}.`
   const sketchBar = <div className="m-drawbar m-drawbar-stack" role="toolbar" aria-label="Sketch">
-    <span>{sketchStrokes.length ? 'Keep drawing, or make the walls when the outline is done.' : 'Draw the outline of your room with your finger. Lift and keep going any time.'}</span>
-    <div className="m-drawbar-actions"><button type="button" className="secondary-button" onClick={() => sketchStrokes.length ? setSketchStrokes([]) : chooseTool('select')}>{sketchStrokes.length ? 'Clear' : 'Cancel'}</button><button type="button" className="primary-button" disabled={!sketchStrokes.length} onClick={finishSketch}>Make walls</button></div>
+    <span>{sketchStrokes.length ? 'Keep drawing, or make the walls.' : 'Draw your room outline.'}</span>
+    <div className="m-drawbar-actions"><button type="button" className="secondary-button" onClick={() => {
+      if (sketchStrokes.length) { setSketchStrokes([]); sketchRedo.current = [] }
+      else chooseTool('select')
+    }}>{sketchStrokes.length ? 'Clear' : 'Cancel'}</button><button type="button" className="primary-button" disabled={!sketchStrokes.length} onClick={finishSketch}>Make walls</button></div>
   </div>
 
   return (
@@ -1943,7 +1962,7 @@ function App() {
         </div>
         {stepNav('step-nav')}
         <div className="top-actions">
-          <div className="history-buttons"><button className="top-icon-button" title="Undo" aria-label="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" size={18} /></button><button className="top-icon-button" title="Redo" aria-label="Redo" disabled={!history.current.future.length} onClick={redo}><Icon name="redo" size={18} /></button></div>
+          <div className="history-buttons"><button className="top-icon-button" title="Undo" aria-label="Undo" disabled={!canUndo} onClick={undo}><Icon name="undo" size={18} /></button><button className="top-icon-button" title="Redo" aria-label="Redo" disabled={!canRedo} onClick={redo}><Icon name="redo" size={18} /></button></div>
           <button className="top-action-button share-button" aria-label="Share project" title="Copy a share link" onClick={shareProject}><Icon name="share" /><span>Share</span></button>
           <button className="top-action-button basket-button" aria-label="Shopping list" title="Shopping list" onClick={() => setShoppingOpen(true)}><Icon name="shopping" /><span>Basket</span>{itemCount > 0 && <span className="action-count">{itemCount}</span>}</button>
           <button className="top-action-button primary-top-action" aria-label="Save project" title="Save (⌘S)" onClick={saveProject} disabled={cloudSaving}><Icon name="save" /><span>{cloudSaving ? 'Saving…' : 'Save'}</span></button>
@@ -1976,13 +1995,13 @@ function App() {
               </div>
               <button className="canvas-icon-button" aria-label="Reset camera" title="Recentre the view" onClick={() => setCameraVersion((value) => value + 1)}><Icon name="focus" /></button>
             </div>
-            {!project.features.length && !dragProduct && <div className="empty-build-hint">
+            {!project.features.length && !dragProduct && activeTool !== 'sketch' && <div className="empty-build-hint">
               <span className="empty-icon"><Icon name="wall" size={22} /></span>
               <strong>Your space starts here</strong>
               <span>Click to place your first corner, then each next corner. Close the outline to create the floor — or enter a size in the panel.</span>
               <div className="quick-start-actions"><button type="button" className="secondary-button" onClick={() => setMeasureOpen(true)}><Icon name="wall" /> Measure my room</button><button type="button" className="secondary-button" onClick={() => chooseTool('sketch')}><Icon name="pointer" /> Sketch the outline</button><button type="button" className="secondary-button empty-import-button" onClick={() => setImportOpen(true)}><Icon name="upload" /> Import floor plan</button><button type="button" className="secondary-button empty-import-button" onClick={() => setNewProjectOpen('living-room')}><Icon name="home" /> Use a room template</button></div>
             </div>}
-            <div className="canvas-tip">{canvasTip}</div>
+            {activeTool !== 'sketch' && <div className="canvas-tip">{canvasTip}</div>}
             {hasSelection && <aside className="inspector-card" aria-label="Selection details">{inspectorContent}{selectedObject && selectionWarnings.length > 0 && <section className="inspector-section"><div className="section-label-row"><span>Placement checks</span></div>{selectionWarnings.map((warning, index) => <div className="health-row warning" key={index}><span className="health-dot" />{warning.message}</div>)}</section>}</aside>}
           </>}
           {!compact && activeTool === 'sketch' && sketchBar}
@@ -1996,8 +2015,8 @@ function App() {
             <button type="button" className="m-round m-menu-button" aria-label="Menu" aria-expanded={menuOpen} onClick={() => { setMenuOpen(!menuOpen); setAddOpen(false); setPanelOpen(false); setDetailsOpen(false) }}><Icon name="menu" size={22} />{itemCount > 0 && <span className="action-count">{itemCount}</span>}</button>
             <div className="m-top-actions">
               <button type="button" className="m-round" aria-label="Reset camera" title="Recentre the view" onClick={() => setCameraVersion((value) => value + 1)}><Icon name="focus" size={20} /></button>
-              {history.current.future.length > 0 && <button type="button" className="m-round" title="Redo" aria-label="Redo" onClick={redo}><Icon name="redo" size={20} /></button>}
-              <button type="button" className="m-round" title="Undo" aria-label="Undo" disabled={!history.current.past.length} onClick={undo}><Icon name="undo" size={20} /></button>
+              {canRedo && <button type="button" className="m-round" title="Redo" aria-label="Redo" onClick={redo}><Icon name="redo" size={20} /></button>}
+              <button type="button" className="m-round" title="Undo" aria-label="Undo" disabled={!canUndo} onClick={undo}><Icon name="undo" size={20} /></button>
             </div>
           </div>
           {hangItem ? <div className="m-drawbar" role="toolbar" aria-label="Hang on a wall"><span>Tap the wall where the {roomItemShape(hangItem)?.name || 'item'} should go.</span><button type="button" className="primary-button" onClick={() => setHangItem(null)}>Cancel</button></div>

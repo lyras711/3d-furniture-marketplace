@@ -34,7 +34,7 @@ function minimalGlb() {
 }
 
 /** Stateful stand-in for scripts/admin-server.ts so the dashboard can be driven without Firebase Admin credentials. */
-async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJob[]; catalogCrawls?: MockMetadataCrawl[] } = {}) {
+async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJob[]; catalogCrawls?: MockMetadataCrawl[]; bulkArchiveUnavailable?: boolean } = {}) {
   const calls: { method: string; path: string; body: unknown }[] = []
   const requests = [order('order-1', 'pending', '2026-11-01T10:00:00.000Z', 'Maria'), order('order-2', 'ready-to-place', '2026-11-02T10:00:00.000Z', 'Nikos'), order('order-3', 'delivered', '2026-10-20T10:00:00.000Z', 'Eleni')]
   let jobs = [...(seed.jobs || [])]
@@ -92,6 +92,7 @@ async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJ
       return route.fulfill({ status: 201, json: { id, hidden: true, review: 'pending' } })
     }
     if (path === '/api/admin/catalog/bulk-archive' && method === 'POST') {
+      if (seed.bulkArchiveUnavailable) return route.fulfill({ status: 404, json: { error: 'Not found.' } })
       const ids = (body as { ids: string[] }).ids
       for (const id of ids) edits.set(id, { ...edits.get(id), deletedAt: at })
       return route.fulfill({ json: { archived: ids.length, alreadyArchived: 0 } })
@@ -160,6 +161,12 @@ async function signIn(page: Page) {
   await expect(page.getByRole('heading', { level: 1, name: 'Overview' })).toBeVisible()
 }
 
+async function openCatalogBrand(page: Page, brand: string) {
+  const folder = page.locator(`.admin-catalog-brand-folder[data-brand=${JSON.stringify(brand)}]`)
+  if (await folder.getAttribute('open') === null) await folder.locator('summary').click()
+  return folder
+}
+
 test('admin dashboard: overview routes to orders, and orders move through review, placement, notes and cancellation', async ({ page }) => {
   const calls = await mockBackend(page)
   await signIn(page)
@@ -223,6 +230,7 @@ test('admin dashboard: partners pipeline and catalogue visibility/review', async
   await page.screenshot({ path: '/tmp/forma-admin-partners-desktop.png', fullPage: true })
 
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await openCatalogBrand(page, 'Noma Home')
   await expect(page.locator('.admin-catalog-table tbody tr')).toHaveCount(8)
   await page.getByLabel('Filter by review').selectOption('needs-work')
   await expect(page.locator('.admin-catalog-table tbody tr')).toHaveCount(1)
@@ -233,7 +241,7 @@ test('admin dashboard: partners pipeline and catalogue visibility/review', async
   await page.getByLabel('Review state for Haven three-seat sofa').selectOption('approved')
   await expect(page.getByLabel('Review state for Haven three-seat sofa')).toHaveValue('approved')
   expect(calls.filter((call) => call.path.startsWith('/api/admin/catalog/')).map((call) => call.body)).toEqual([{ hidden: true }, { review: 'approved' }])
-  await expect(page.locator('.admin-catalog-table')).not.toContainText('Edit')
+  await expect(page.locator('.admin-catalog-brand-folders')).not.toContainText('Edit')
   await page.screenshot({ path: '/tmp/forma-admin-catalogue-desktop.png', fullPage: true })
 })
 
@@ -246,6 +254,7 @@ test('viewer accounts only see read-only sections', async ({ page }) => {
   await expect(page.getByRole('button', { name: /^Hide / })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Add product' })).toHaveCount(0)
   await expect(page.getByLabel('Select all visible products')).toHaveCount(0)
+  await openCatalogBrand(page, 'Noma Home')
   await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
   await expect(page.getByRole('button', { name: 'Delete product' })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Edit catalogue metadata' })).toHaveCount(0)
@@ -258,9 +267,11 @@ test('the whole catalogue product slot opens its detail page', async ({ page }) 
   await mockBackend(page)
   await signIn(page)
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await openCatalogBrand(page, 'Noma Home')
   await page.locator('#catalog-sofa-haven .product-thumb').click()
   await expect(page).toHaveURL(/\/admin\/catalog\/sofa-haven/)
   await page.goBack()
+  await openCatalogBrand(page, 'Noma Home')
   await expect(page.locator('#catalog-sofa-haven')).toBeVisible()
   await page.locator('#catalog-sofa-haven td:nth-child(4)').click()
   await expect(page).toHaveURL(/\/admin\/catalog\/sofa-haven/)
@@ -270,6 +281,7 @@ test('catalogue opens a separate product details page with metadata and model pr
   await mockBackend(page)
   await signIn(page)
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await openCatalogBrand(page, 'Noma Home')
   await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
   await expect(page).toHaveURL(/\/admin\/catalog\/sofa-haven/)
   await expect(page.getByRole('heading', { name: 'Haven three-seat sofa' })).toBeVisible()
@@ -289,6 +301,7 @@ test('admins can edit, archive and restore a bundled catalogue product', async (
   await signIn(page)
   page.on('dialog', (dialog) => void dialog.accept())
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await openCatalogBrand(page, 'Noma Home')
   await page.getByRole('link', { name: /Haven three-seat sofa/ }).click()
   await page.getByLabel('Product name').fill('Haven sofa edited')
   await page.getByLabel('Width (cm)').fill('225')
@@ -316,6 +329,7 @@ test('admins can multi-select products and archive them together', async ({ page
   await page.getByLabel('Select all visible products').uncheck()
 
   const selected = products.slice(0, 2)
+  for (const brand of new Set(selected.map((product) => product.brand))) await openCatalogBrand(page, brand)
   for (const product of selected) await page.getByLabel(`Select ${product.name}`).check()
   page.once('dialog', (dialog) => void dialog.accept())
   await page.getByRole('button', { name: 'Archive selected' }).click()
@@ -326,6 +340,38 @@ test('admins can multi-select products and archive them together', async ({ page
   await page.setViewportSize({ width: 375, height: 812 })
   await page.screenshot({ path: '/tmp/formivo-admin-catalog-bulk-mobile.png', fullPage: true })
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+})
+
+test('admins can open a brand folder and archive its products', async ({ page }) => {
+  const calls = await mockBackend(page)
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+
+  const brand = 'Noma Home', brandItems = products.slice(0, 8).filter((product) => product.brand === brand)
+  const folder = page.locator(`.admin-catalog-brand-folder[data-brand="${brand}"]`)
+  await expect(folder).toBeVisible()
+  await folder.locator('summary').click()
+  for (const product of brandItems) await expect(folder.locator(`#catalog-${product.id}`)).toBeVisible()
+  await page.screenshot({ path: '/tmp/formivo-admin-brand-folder-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.screenshot({ path: '/tmp/formivo-admin-brand-folder-mobile.png', fullPage: true })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+
+  page.once('dialog', (dialog) => void dialog.accept())
+  await folder.getByRole('button', { name: /Archive brand/ }).click()
+  await expect(page.getByRole('status')).toContainText(`${brandItems.length} products archived`)
+  expect(calls.find((call) => call.method === 'POST' && call.path === '/api/admin/catalog/bulk-archive')?.body).toEqual({ ids: brandItems.map((product) => product.id) })
+})
+
+test('bulk archive reports when the deployed API does not support the route', async ({ page }) => {
+  await mockBackend(page, 'owner', { bulkArchiveUnavailable: true })
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await page.getByLabel('Select all visible products').check()
+  page.once('dialog', (dialog) => void dialog.accept())
+  await page.getByRole('button', { name: 'Archive selected' }).click()
+  await expect(page.getByRole('alert')).toContainText('bulk-archive route is missing')
 })
 
 test('admins can manually create a hidden catalogue product draft', async ({ page }) => {
@@ -458,7 +504,7 @@ test('admins can delete and clear finished crawl history without deleting produc
   await expect(legacyList).not.toContainText('https://finished.example')
   await expect(legacyList).toContainText('https://active.example')
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
-  await expect(page.locator('.admin-catalog-table')).toContainText('Haven three-seat sofa')
+  await expect(page.locator('.admin-catalog-brand-folders')).toContainText('Haven three-seat sofa')
 })
 
 test.describe('compact admin', () => {

@@ -227,6 +227,57 @@ test('new workspaces open in floor-plan build mode with empty, import, and templ
   await expect(page.locator('.canvas-label')).toContainText('Floor plan')
 })
 
+test('sketch mode hides extra prompts, keeps a compact bar, and supports undo/redo', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 559 })
+  await page.getByRole('button', { name: 'Sketch the outline', exact: true }).click()
+  expect({
+    emptyHints: await page.locator('.empty-build-hint').count(),
+    canvasTips: await page.locator('.canvas-tip').count(),
+  }).toEqual({ emptyHints: 0, canvasTips: 0 })
+  const bar = page.getByRole('toolbar', { name: 'Sketch' })
+  await expect(bar).toBeVisible()
+  await expect(bar.getByRole('button', { name: 'Cancel' })).toBeVisible()
+  const makeWalls = bar.getByRole('button', { name: 'Make walls' })
+  await expect(makeWalls).toBeDisabled()
+  const bounds = (await bar.boundingBox())!
+  expect(bounds.width).toBeLessThanOrEqual(400)
+  expect(bounds.height).toBeLessThanOrEqual(60)
+  await page.screenshot({ path: '/tmp/forma-sketch-drawbar-1024.png', fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await frame(page)
+  await page.screenshot({ path: '/tmp/forma-sketch-drawbar-desktop.png', fullPage: true })
+  await segment(page, [-2, -2], [2, -2])
+  await expect(makeWalls).toBeEnabled()
+  await expect(page.getByTitle('Undo')).toBeEnabled()
+  await page.getByTitle('Undo').click()
+  await expect(makeWalls).toBeDisabled()
+  await page.getByTitle('Redo').click()
+  await expect(makeWalls).toBeEnabled()
+})
+
+test('undo removes an in-progress sketch before restoring the previous project', async ({ page }) => {
+  await page.getByLabel('Room width in metres').fill('4')
+  await page.getByLabel('Room length in metres').fill('3')
+  await page.getByRole('button', { name: 'Build this room' }).click()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '4')
+  await page.getByRole('button', { name: 'New project', exact: true }).click()
+  await page.getByLabel('Project name').fill('Fresh plan')
+  await page.getByRole('button', { name: 'Create space' }).click()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '0')
+  await page.getByRole('button', { name: 'Sketch the outline', exact: true }).click()
+  await segment(page, [-2, -2], [2, -2])
+  const makeWalls = page.getByRole('button', { name: 'Make walls' })
+  await expect(makeWalls).toBeEnabled()
+  await page.getByTitle('Undo').click()
+  expect({
+    wallCount: await page.locator('.canvas-frame').getAttribute('data-wall-count'),
+    makeWallsEnabled: await makeWalls.isEnabled(),
+  }).toEqual({ wallCount: '0', makeWallsEnabled: false })
+  await page.getByTitle('Redo').click()
+  await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '0')
+  await expect(makeWalls).toBeEnabled()
+})
+
 test('room templates create editable starter layouts without adding anything to the basket', async ({ page }) => {
   await page.getByRole('button', { name: 'New project', exact: true }).click()
   await page.getByRole('button', { name: /^Living room/ }).click()
@@ -928,7 +979,7 @@ test.describe('touch room workflow', () => {
     }
     points.push(await gridPoint(page, -1.9, -1.45))
     await touchStroke(page, points)
-    await page.screenshot({ path: '/tmp/forma-mobile-sketch.png' })
+    await page.screenshot({ path: '/tmp/forma-mobile-sketch.png', fullPage: true })
     await page.getByRole('button', { name: 'Make walls' }).tap()
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-wall-count', '4')
     await expect(page.locator('.canvas-frame')).toHaveAttribute('data-room-count', '1')

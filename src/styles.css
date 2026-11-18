@@ -612,7 +612,10 @@ button svg { flex-shrink: 0; }
 .m-build-tools { display: flex; flex: 2; padding: 3px; border-radius: 14px; background: #ffffff1a; }
 .m-build-tools button { flex: 1; min-height: 44px; border-radius: 11px; color: #fff; font-size: 15px; font-weight: 600; }
 .m-build-tools button[aria-pressed=true] { background: #fff; color: var(--ink); }
-.workspace > .m-drawbar { position: absolute; z-index: 6; left: 50%; right: auto; bottom: 64px; width: min(560px, calc(100% - 32px)); transform: translateX(-50%); }
+.workspace > .m-drawbar { position: absolute; z-index: 6; left: 50%; right: auto; bottom: 64px; width: min(400px, calc(100% - 32px)); transform: translateX(-50%); }
+.workspace > .m-drawbar.m-drawbar-stack { flex-direction: row; align-items: center; gap: 8px; padding: 6px 8px; font-size: 13px; line-height: 1.25; }
+.workspace > .m-drawbar.m-drawbar-stack .m-drawbar-actions { flex: 0 0 auto; gap: 6px; }
+.workspace > .m-drawbar.m-drawbar-stack .m-drawbar-actions > button { flex: 0 0 auto; min-height: 48px; padding: 0 12px; font-size: 13px; }
 .wall-length-edit { cursor: pointer; border: 0; font: inherit; }
 .wall-length-edit:hover { background: var(--green); color: #fff; }
 .basket-badge { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--green); color: #fff; border: 2px solid #fff; box-shadow: var(--shadow); }

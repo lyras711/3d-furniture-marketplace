@@ -134,8 +134,18 @@ body:has(.admin-shell), body:has(.admin-auth-shell) { overflow: auto; background
 .admin-card input.admin-catalog-select { width: 18px; min-height: 18px; padding: 0; accent-color: #52745f; cursor: pointer; }
 .admin-catalog-selection-cell { width: 36px; padding-right: 6px !important; padding-left: 6px !important; text-align: center; }
 .admin-catalog-selection-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.admin-card .admin-catalog-select-all { display: flex; flex-direction: row; align-items: center; gap: 7px; width: auto; margin: 0; color: #506053; font-size: 12px; font-weight: 650; }
 .admin-catalog-selection-tools > span { color: #506053; font-size: 12px; font-weight: 650; }
 .admin-catalog-selection-tools small { flex-basis: 100%; color: #8a9489; font-size: 10px; }
+.admin-catalog-brand-folders { display: grid; gap: 10px; }
+.admin-catalog-brand-folder { overflow: hidden; border: 1px solid #e4e8e1; border-radius: 10px; background: #fff; }
+.admin-catalog-brand-folder > summary { display: flex; align-items: center; gap: 10px; padding: 13px 14px; color: #344a38; cursor: pointer; }
+.admin-catalog-folder-title { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.admin-catalog-folder-title strong { font-size: 13px; }
+.admin-catalog-folder-title small { color: #8a9489; font-size: 10px; font-weight: 500; }
+.admin-catalog-folder-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 14px 12px; }
+.admin-catalog-folder-actions small { color: #8a9489; font-size: 10px; }
+.admin-catalog-brand-folder .admin-table-wrap { padding: 0 12px 12px; }
 .admin-link-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; color: #6a756b; font-size: 12px; }
 .admin-product-cell { display: flex; align-items: center; gap: 12px; min-width: 240px; }
 .admin-product-cell .product-thumb { flex: 0 0 56px; width: 56px; height: 48px; }
@@ -183,6 +193,9 @@ body:has(.admin-shell), body:has(.admin-auth-shell) { overflow: auto; background
   .admin-catalog-table .admin-product-cell .product-thumb { flex-basis: 42px; width: 42px; height: 40px; }
   .admin-catalog-table .admin-product-cell > span { min-width: 0; overflow-wrap: anywhere; }
   .admin-catalog-table .admin-catalog-selection-cell { width: 30px; }
+  .admin-catalog-brand-folder > summary { padding: 11px 10px; }
+  .admin-catalog-folder-title { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .admin-catalog-brand-folder .admin-table-wrap { padding: 0 8px 8px; }
 }
 
 .admin-product-detail { display: grid; gap: 14px; }

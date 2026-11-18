@@ -54,3 +54,7 @@ Related: [[2026-11-08-mobile-simplicity-plan]]
 - Admins can select up to 500 non-archived products in the filtered catalogue and archive them in one action. The server validates every ID before writing, preserves product records and assets, and records an audit entry. Restore remains available per product.
 - Admins can create a product with name, brand, retailer, group, category, and positive dimensions. SKU, price, HTTPS source URL, and HTTPS thumbnail URL are optional. The server creates a Firestore-backed product with a generated ID and atomically sets it hidden with pending review.
 - Manual products cannot be listed until they have positive dimensions and an uploaded GLB. They use the existing metadata edit, model upload, visibility, review, archive, and restore controls.
+
+## Brand folders
+- The catalogue groups matching products into collapsible brand folders. A brand folder can select or reversibly archive its currently matching, active products; search and filters define the folder contents.
+- Brand and selected-product archive share the 500-item limit, audit trail, and preservation semantics. Server changes require a Cloud Run deployment before the dashboard can use them.
