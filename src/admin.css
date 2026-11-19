@@ -45,9 +45,9 @@ body:has(.admin-shell), body:has(.admin-auth-shell) { overflow: auto; background
 .admin-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .admin-pill { display: inline-flex; align-items: center; width: max-content; padding: 5px 8px; border-radius: 20px; color: #61725f; background: #edf3eb; font-size: 10px; font-style: normal; font-weight: 700; text-transform: capitalize; white-space: nowrap; }
 .admin-pill-running, .admin-pill-scraping, .admin-pill-discovering, .admin-pill-pending, .admin-pill-awaiting-user-decision, .admin-pill-stage-negotiating, .admin-pill-stage-contacted { color: #896d3e; background: #fbf3df; }
-.admin-pill-ready-to-place, .admin-pill-stage-onboarding { color: #3d5f86; background: #e9f0f8; }
-.admin-pill-failed, .admin-pill-cancelled, .admin-pill-unavailable, .admin-pill-needs-work, .admin-pill-stage-lost { color: #a35f55; background: #fff0ed; }
-.admin-pill-skipped-existing, .admin-pill-needs-model-recipe, .admin-pill-returned-for-revision, .admin-pill-stage-paused, .admin-pill-stage-lead { color: #7b738e; background: #f1eef7; }
+.admin-pill-ready-to-place, .admin-pill-approved, .admin-pill-stage-onboarding { color: #3d5f86; background: #e9f0f8; }
+.admin-pill-failed, .admin-pill-cancelled, .admin-pill-unavailable, .admin-pill-needs-work, .admin-pill-needs-info, .admin-pill-stage-lost { color: #a35f55; background: #fff0ed; }
+.admin-pill-skipped-existing, .admin-pill-duplicate, .admin-pill-needs-model-recipe, .admin-pill-returned-for-revision, .admin-pill-stage-paused, .admin-pill-stage-lead { color: #7b738e; background: #f1eef7; }
 .admin-jobs, .admin-items { margin-top: 18px; }
 .admin-job-list { display: flex; flex-direction: column; }
 .admin-job { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 0; border: 0; border-top: 1px solid #edf0eb; background: transparent; color: inherit; text-align: left; cursor: pointer; }
@@ -230,3 +230,13 @@ body:has(.admin-shell), body:has(.admin-auth-shell) { overflow: auto; background
   .admin-product-facts { grid-template-columns: 1fr; }
   .admin-model-preview { height: 250px; }
 }
+.admin-status-select { width: auto; max-width: 200px; flex: 0 0 auto; font-weight: 700; }
+.admin-status-needs-info { color: #a35f55; background: #fff0ed; }
+.admin-status-pending { color: #896d3e; background: #fbf3df; }
+.admin-status-approved { color: #3d5f86; background: #e9f0f8; }
+.admin-status-visible { color: #61725f; background: #edf3eb; }
+.admin-product-hero { display: grid; grid-template-columns: minmax(0, 320px) 1fr; gap: 20px; align-items: start; margin: 16px 0; }
+.admin-product-hero img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 12px; background: #f4f3ef; }
+.admin-product-hero-empty { display: grid; place-items: center; aspect-ratio: 4 / 3; border-radius: 12px; background: #f4f3ef; color: #7d776c; font-size: 13px; }
+.admin-image-gallery figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+@media (max-width: 720px) { .admin-product-hero { grid-template-columns: 1fr; } }

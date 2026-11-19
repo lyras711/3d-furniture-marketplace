@@ -1,4 +1,4 @@
-import { catalogGroups, type CatalogMetadataOverridePatch, type CatalogMetadataOverrides, type CatalogGroup } from '../src/catalog'
+import { catalogGroups, type CatalogReview, type CatalogMetadataOverridePatch, type CatalogMetadataOverrides, type CatalogGroup } from '../src/catalog'
 
 const groupSet = new Set<string>(catalogGroups)
 const keys = new Set(['name', 'brand', 'retailer', 'sku', 'group', 'category', 'width', 'depth', 'height', 'price'])
@@ -140,4 +140,24 @@ export function catalogHasDimensions(product: Record<string, unknown>) {
     const value = product[field]
     return typeof value === 'number' && Number.isFinite(value) && value > 0
   })
+}
+
+const keyPart = (value: unknown) => typeof value === 'string' ? value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '') : ''
+
+export const normalizedSku = (value: unknown) => keyPart(value) || null
+
+/** Finds another catalogue product from the same retailer whose effective SKU matches. */
+export function duplicateSkuProduct<T extends Record<string, unknown>>(catalog: T[], candidate: { sku?: unknown; retailerId?: unknown; retailer?: unknown; brand?: unknown }, excludeId?: string): T | null {
+  const sku = normalizedSku(candidate.sku)
+  if (!sku) return null
+  const retailers = new Set([candidate.retailerId, candidate.retailer, candidate.brand].map(keyPart).filter(Boolean))
+  return catalog.find((product) => product.id !== excludeId && normalizedSku(product.sku) === sku
+    && (!retailers.size || [product.retailerId, product.retailer, product.brand].map(keyPart).some((key) => key && retailers.has(key)))) || null
+}
+
+/** Status derived from stored edits: listed products are `visible`; legacy `needs-work` reads as `needs-info`. */
+export function catalogReviewState(edit: Record<string, unknown>): CatalogReview {
+  if (edit.hidden !== true) return 'visible'
+  if (edit.review === 'needs-work' || edit.review === 'needs-info') return 'needs-info'
+  return edit.review === 'approved' ? 'approved' : 'pending'
 }

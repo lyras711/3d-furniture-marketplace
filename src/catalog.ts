@@ -4,9 +4,10 @@ export type CategoryFilter = 'All' | 'Seating' | 'Tables' | 'Lighting' | 'Decor'
 export type CatalogGroup = Exclude<CategoryFilter, 'All'>
 export const catalogGroups: CatalogGroup[] = ['Seating', 'Tables', 'Lighting', 'Decor', 'Storage', 'Bedroom', 'Kitchen', 'Bathroom']
 
-/** Admin human-review state, stored outside the bundle in Firestore `catalogEdits`. */
-export type CatalogReview = 'pending' | 'approved' | 'needs-work'
-export const catalogReviews: CatalogReview[] = ['pending', 'approved', 'needs-work']
+/** Admin review status, stored outside the bundle in Firestore `catalogEdits`. Only `visible` products are listed in the planner. */
+export type CatalogReview = 'needs-info' | 'pending' | 'approved' | 'visible'
+export const catalogReviews: CatalogReview[] = ['needs-info', 'pending', 'approved', 'visible']
+export const catalogReviewLabels: Record<CatalogReview, string> = { 'needs-info': 'Need info', pending: 'Pending review', approved: 'Approved', visible: 'Visible' }
 
 export type ProductSourceImage = { url: string; sourceUrl: string; role: string; altText: string | null; width: number | null; height: number | null }
 export type ProductMetadata = {

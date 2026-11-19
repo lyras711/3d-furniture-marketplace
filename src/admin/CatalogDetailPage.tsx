@@ -2,9 +2,9 @@ import { Component, Suspense, useEffect, useMemo, useRef, useState, type FormEve
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, useGLTF, useTexture } from '@react-three/drei'
 import type { Group, Texture } from 'three'
-import { catalogGroups, type CatalogGroup, type ProductVariant } from '../catalog'
+import { catalogGroups, catalogReviewLabels, catalogReviews, type CatalogGroup, type CatalogReview, type ProductVariant } from '../catalog'
 import { cloneProductScene, productMaterialNames } from '../productScene'
-import { atLeast, errorText, euro, send, type CatalogItem } from './api'
+import { atLeast, downloadUrl, errorText, euro, fileExtension, send, type CatalogItem } from './api'
 
 type TextureDraft = { file: File; url: string; materialName: string }
 type CatalogDraft = { name: string; brand: string; retailer: string; sku: string; group: CatalogGroup; category: string; width: string; depth: string; height: string; price: string }
@@ -64,7 +64,9 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
   const [previewVariantId, setPreviewVariantId] = useState('')
   const [materialNames, setMaterialNames] = useState<string[]>([])
   const textureUrls = useRef(new Set<string>())
-  const canManage = atLeast(role, 'admin'), canUpload = canManage && !product?.deleted
+  const [refetching, setRefetching] = useState(false)
+  const [notice, setNotice] = useState('')
+  const canManage = atLeast(role, 'admin'), canReview = atLeast(role, 'editor'), canUpload = canManage && !product?.deleted
   useEffect(() => {
     void send<CatalogItem>(`/api/admin/catalog/${encodeURIComponent(productId)}`).then((item) => { setProduct(item); setEditDraft(catalogDraft(item)); setPreviewVariantId(item.variants?.[0]?.id || '') }).catch((error) => onError(errorText(error)))
   }, [productId, onError])
@@ -143,6 +145,22 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
       window.location.href = '/admin?tab=catalogue'
     } catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
   }
+  const setStatus = async (next: CatalogReview) => {
+    if (!product) return
+    if (product.review === 'visible' && next !== 'visible' && !window.confirm(`Set ${product.name} to "${catalogReviewLabels[next]}"? It will be hidden from the planner.`)) return
+    setEditBusy(true); onError(''); setNotice('')
+    try { await send(`/api/admin/catalog/${encodeURIComponent(productId)}`, 'PUT', { review: next }); await refreshProduct(); await reload() }
+    catch (error) { onError(errorText(error)) } finally { setEditBusy(false) }
+  }
+  const refetchMetadata = async () => {
+    if (!product || !window.confirm(`Refetch ${product.name} from its source page? Imported fields and images are replaced; admin overrides, uploaded GLBs and textures are kept.`)) return
+    setRefetching(true); onError(''); setNotice('')
+    try {
+      const updated = await send<CatalogItem>(`/api/admin/catalog/${encodeURIComponent(productId)}/refetch`, 'POST')
+      setProduct(updated); setEditDraft(catalogDraft(updated)); await reload()
+      setNotice(`Metadata refetched${updated.missingFields?.length ? `; still missing: ${updated.missingFields.join(', ')}` : ''}.`)
+    } catch (error) { onError(errorText(error)) } finally { setRefetching(false) }
+  }
   const restoreProduct = async () => {
     if (!product || !window.confirm(`Restore ${product.name} to the catalogue?`)) return
     setEditBusy(true); onError('')
@@ -156,6 +174,8 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
     ['Price', euro(product.price)], ['Availability', product.metadata?.availabilityStatus || 'Not provided'], ['Source page', product.sourceUrl],
   ]
   const imageUrls = (product.sourceImages || []).filter((url) => /^https?:\/\//i.test(url))
+  const heroImage = product.thumbnailPath && /^(?:https?:\/\/|\/)/i.test(product.thumbnailPath) ? product.thumbnailPath : imageUrls[0]
+  const canRefetch = Boolean(product.permanentlyDeletable && product.sourceUrl && /^https:\/\//i.test(product.sourceUrl) && !product.deleted)
   const previewVariant = product.variants?.find((variant) => variant.id === previewVariantId) || product.variants?.[0]
   const textureDraft = previewVariant ? textureDrafts[previewVariant.id] : undefined
   const modelUrl = preview || previewVariant?.modelPath || product.modelPath
@@ -172,8 +192,24 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
   }
   return <div className="admin-product-detail">
     <a className="admin-back-link" href="/admin?tab=catalogue">← Catalogue</a>
-    <section className="admin-card"><header className="admin-card-head"><div><span className="admin-eyebrow">Product record · {product.id}</span><h2>{product.name}</h2><p>{product.status}</p></div><span className={`admin-pill ${product.deleted ? 'admin-pill-deleted' : `admin-pill-${product.review}`}`}>{product.deleted ? 'Archived' : product.review}</span></header>
-      {canManage && <div className="admin-actions">{product.deleted ? <button className="admin-primary-inline" type="button" disabled={editBusy} onClick={() => void restoreProduct()}>Restore product</button> : <button className="admin-row-action admin-row-danger" type="button" disabled={editBusy} onClick={() => void deleteProduct()}>Archive product</button>}{product.permanentlyDeletable && <button className="admin-row-danger" type="button" disabled={editBusy} onClick={() => void permanentlyDeleteProduct()}>Permanently delete product</button>}</div>}
+    <section className="admin-card"><header className="admin-card-head"><div><span className="admin-eyebrow">Product record · {product.id}</span><h2>{product.name}</h2><p>{product.status}</p></div>{product.deleted
+        ? <span className="admin-pill admin-pill-deleted">Archived</span>
+        : canReview ? <select className={`admin-status-select admin-status-${product.review}`} aria-label="Product status" value={product.review} disabled={editBusy || (product.review === 'visible' && !canManage)} onChange={(event) => void setStatus(event.target.value as CatalogReview)}>{catalogReviews.map((value) => <option key={value} value={value} disabled={value === 'visible' && !canManage}>{catalogReviewLabels[value]}</option>)}</select>
+        : <span className={`admin-pill admin-pill-${product.review}`}>{catalogReviewLabels[product.review]}</span>}</header>
+      <p className="admin-help">Only products with the Visible status appear in the planner. Visible requires an admin, a GLB and positive dimensions for imported drafts.</p>
+      <div className="admin-product-hero">
+        {heroImage ? <figure><img src={heroImage} alt={`${product.name} product`} /><button type="button" className="admin-row-action" onClick={() => void downloadUrl(heroImage, `${product.id}.${fileExtension(heroImage, 'jpg')}`)}>Download image</button></figure> : <div className="admin-product-hero-empty">No product image stored</div>}
+        <div>
+          <div className="admin-actions">
+            {canReview && canRefetch && <button type="button" className="admin-primary-inline" disabled={refetching || editBusy} onClick={() => void refetchMetadata()}>{refetching ? 'Refetching…' : 'Refetch metadata'}</button>}
+            {product.modelPath && <button type="button" className="admin-row-action" onClick={() => void downloadUrl(product.modelPath!, `${product.id}.glb`)}>Download GLB</button>}
+            {canManage && (product.deleted ? <button className="admin-primary-inline" type="button" disabled={editBusy} onClick={() => void restoreProduct()}>Restore product</button> : <button className="admin-row-action admin-row-danger" type="button" disabled={editBusy} onClick={() => void deleteProduct()}>Archive product</button>)}
+            {canManage && product.permanentlyDeletable && <button className="admin-row-danger" type="button" disabled={editBusy} onClick={() => void permanentlyDeleteProduct()}>Permanently delete product</button>}
+          </div>
+          {refetching && <p role="status" className="admin-help">Loading the source page and storing images…</p>}
+          {notice && <p role="status" className="admin-help">{notice}</p>}
+        </div>
+      </div>
       {canManage && !product.permanentlyDeletable && <p className="admin-help">This bundled product is source-controlled. The dashboard can archive it; permanent removal requires a source update.</p>}
       {product.missingFields?.length ? <div className="admin-missing"><strong>Missing information</strong><span>{product.missingFields.join(' · ')}</span></div> : null}
       <dl className="admin-product-facts">{info.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{key === 'Source page' && value ? <a href={String(value)} target="_blank" rel="noreferrer">Open source ↗</a> : String(value || 'Not provided')}</dd></div>)}</dl>
@@ -216,7 +252,7 @@ export default function CatalogDetailPage({ productId, role, onError, reload }: 
         </article>
       })}</div>
     </section> : null}
-    {imageUrls.length ? <section className="admin-card"><h3>Source images</h3><div className="admin-image-gallery">{imageUrls.map((image, index) => <a key={image} href={image} target="_blank" rel="noreferrer"><img src={image} loading="lazy" alt={`${product.name} source ${index + 1}`} /></a>)}</div></section> : null}
+    {imageUrls.length ? <section className="admin-card"><h3>Source images</h3><div className="admin-image-gallery">{imageUrls.map((image, index) => <figure key={image}><a href={image} target="_blank" rel="noreferrer"><img src={image} loading="lazy" alt={`${product.name} source ${index + 1}`} /></a><button type="button" className="admin-row-action" aria-label={`Download image ${index + 1}`} onClick={() => void downloadUrl(image, `${product.id}-${index + 1}.${fileExtension(image, 'jpg')}`)}>Download</button></figure>)}</div></section> : null}
     {product.metadata && <section className="admin-card"><h3>Extracted metadata</h3>{product.metadata.description && <p>{product.metadata.description}</p>}<dl className="admin-product-facts">{Object.entries(product.metadata.materials || {}).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value || 'Not provided'}</dd></div>)}{product.metadata.attributes.map((item, index) => <div key={`${item.label}-${index}`}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>
       {product.metadata.warnings.length > 0 && <ul className="admin-warnings">{product.metadata.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
       <p className="admin-help">Collected {product.metadata.extractedAt} · {product.metadata.extractor}</p>

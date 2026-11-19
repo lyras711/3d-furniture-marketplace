@@ -59,3 +59,7 @@ Related: [[2026-11-08-mobile-simplicity-plan]]
 - The catalogue groups matching products into collapsible brand folders. A brand folder can select or reversibly archive its currently matching, active products; search and filters define the folder contents.
 - Brand and selected-product archive share the 500-item limit, audit trail, and preservation semantics. Server changes require a Cloud Run deployment before the dashboard can use them.
 - Admins can permanently delete up to 250 Firestore-backed products per action, including their catalogue edits and stored files under product-specific storage paths. The action requires typing `DELETE`, is audited, and warns that saved designs may stop rendering. Bundled source products are archive-only from the dashboard; remove them from source and redeploy to delete them completely.
+
+## 2026-11-19 update
+- Review status replaces the visibility toggle: Need info / Pending review / Approved / Visible. Only Visible is listed in the planner. See [[AGENTS]] "Catalogue status and crawler v2".
+- Per-product metadata refetch, duplicate-SKU skip on import, image and GLB downloads on the product page.

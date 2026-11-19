@@ -1,17 +1,15 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import type { TabProps } from '../Admin'
-import { catalogGroups, catalogReviews, type CatalogGroup, type CatalogReview } from '../catalog'
+import { catalogGroups, catalogReviewLabels as reviewLabels, catalogReviews, type CatalogGroup, type CatalogReview } from '../catalog'
 import { ProductThumb } from '../ui'
 import { atLeast, errorText, euro, send, type CatalogItem } from './api'
 
-const reviewLabels: Record<CatalogReview, string> = { pending: 'Pending review', approved: 'Approved', 'needs-work': 'Needs work' }
 const maxBulkArchive = 500
 const maxPermanentDelete = 250
 
 export default function CatalogTab({ data, role, reload, onError, focus }: TabProps) {
   const [query, setQuery] = useState('')
-  const [visibility, setVisibility] = useState<'all' | 'listed' | 'hidden' | 'deleted'>('all')
-  const [review, setReview] = useState<CatalogReview | 'all'>('all')
+  const [review, setReview] = useState<CatalogReview | 'all' | 'archived'>('all')
   const [retailer, setRetailer] = useState('all')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
@@ -30,8 +28,8 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
   }, [focus])
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase()
-    return data.catalog.filter((item) => (visibility === 'all' || (visibility === 'deleted' ? item.deleted : !item.deleted && item.hidden === (visibility === 'hidden'))) && (review === 'all' || item.review === review) && (retailer === 'all' || item.retailer === retailer) && (!term || `${item.name} ${item.brand} ${item.category} ${item.retailer} ${item.sku || ''} ${item.id}`.toLowerCase().includes(term)))
-  }, [data.catalog, query, visibility, review, retailer])
+    return data.catalog.filter((item) => (review === 'all' || (review === 'archived' ? item.deleted : !item.deleted && item.review === review)) && (retailer === 'all' || item.retailer === retailer) && (!term || `${item.name} ${item.brand} ${item.category} ${item.retailer} ${item.sku || ''} ${item.id}`.toLowerCase().includes(term)))
+  }, [data.catalog, query, review, retailer])
   const brandGroups = useMemo(() => {
     const groups = new Map<string, { brand: string; items: CatalogItem[] }>()
     for (const item of filtered) {
@@ -46,10 +44,10 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
   const allVisibleSelected = selectable.length > 0 && selectable.every((item) => selectedIds.has(item.id))
   const clearSelection = () => setSelectedIds(new Set())
 
-  const patch = async (item: CatalogItem, change: { review?: CatalogReview; hidden?: boolean }) => {
-    if (change.hidden && !window.confirm(`Hide ${item.name}? Shoppers will no longer find it in the planner. Saved designs that already use it keep showing it.`)) return
+  const setStatus = async (item: CatalogItem, next: CatalogReview) => {
+    if (item.review === 'visible' && next !== 'visible' && !window.confirm(`Set ${item.name} to "${reviewLabels[next]}"? It will be hidden from the planner. Saved designs that already use it keep showing it.`)) return
     setBusyId(item.id); onError(''); setNotice('')
-    try { await send(`/api/admin/catalog/${encodeURIComponent(item.id)}`, 'PUT', change); await reload() } catch (reason) { onError(errorText(reason)) } finally { setBusyId(null) }
+    try { await send(`/api/admin/catalog/${encodeURIComponent(item.id)}`, 'PUT', { review: next }); await reload() } catch (reason) { onError(errorText(reason)) } finally { setBusyId(null) }
   }
   const restore = async (item: CatalogItem) => {
     if (!window.confirm(`Restore ${item.name} to the catalogue?`)) return
@@ -148,14 +146,13 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
   return <section className="admin-card">
     <div className="admin-toolbar">
       <input type="search" aria-label="Search catalogue" placeholder="Search name, SKU, retailer…" value={query} onChange={(event) => { setQuery(event.target.value); clearSelection() }} />
-      <select aria-label="Filter by visibility" value={visibility} onChange={(event) => { setVisibility(event.target.value as typeof visibility); clearSelection() }}><option value="all">All products</option><option value="listed">Listed</option><option value="hidden">Hidden</option><option value="deleted">Archived</option></select>
-      <select aria-label="Filter by review" value={review} onChange={(event) => { setReview(event.target.value as typeof review); clearSelection() }}><option value="all">Any review state</option>{catalogReviews.map((value) => <option key={value} value={value}>{reviewLabels[value]}</option>)}</select>
+      <select aria-label="Filter by status" value={review} onChange={(event) => { setReview(event.target.value as typeof review); clearSelection() }}><option value="all">Any status</option>{catalogReviews.map((value) => <option key={value} value={value}>{reviewLabels[value]}</option>)}<option value="archived">Archived</option></select>
       <select aria-label="Filter by retailer" value={retailer} onChange={(event) => { setRetailer(event.target.value); clearSelection() }}><option value="all">All retailers</option>{retailers.map((value) => <option key={value}>{value}</option>)}</select>
       {canHide && <button className="admin-primary-inline" type="button" aria-expanded={creating} onClick={() => setCreating((value) => !value)}>{creating ? 'Close form' : 'Add product'}</button>}
     </div>
     {creating && <section className="admin-card admin-create-product" aria-label="New catalogue product">
       <div className="admin-card-head"><div><span className="admin-eyebrow">Manual entry</span><h2>Add a catalogue product</h2></div></div>
-      <p className="admin-help">Enter the product details available to you. New products stay hidden until a GLB is uploaded; positive dimensions are required before listing.</p>
+      <p className="admin-help">Enter the product details available to you. New products start as Pending review and stay out of the planner until their status is Visible, which requires a GLB and positive dimensions.</p>
       <form className="admin-form-grid" onSubmit={(event) => void createProduct(event)}>
         <label>Product name<input name="name" maxLength={160} required /></label>
         <label>Brand<input name="brand" maxLength={120} required /></label>
@@ -192,7 +189,7 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
         </div>}
         <div className="admin-table-wrap"><table className={`admin-table admin-catalog-table ${canHide ? 'admin-catalog-table-selectable' : ''}`}><thead><tr>
           {canHide && <th className="admin-catalog-selection-cell" aria-label="Select" />}
-          <th>Product</th><th>Retailer · SKU</th><th>Size (cm)</th><th>Price</th><th>Review</th><th>Visibility</th></tr></thead><tbody>{group.items.map((item) => {
+          <th>Product</th><th>Retailer · SKU</th><th>Size (cm)</th><th>Price</th><th>Status</th></tr></thead><tbody>{group.items.map((item) => {
           const product = item
           return <tr key={item.id} id={`catalog-${item.id}`} className={`${item.hidden ? 'admin-row-muted' : ''} ${focus === item.id ? 'admin-row-focus' : ''}`} onClick={(event) => {
             if (!(event.target instanceof Element) || event.target.closest('a,button,select,input')) return
@@ -203,8 +200,10 @@ export default function CatalogTab({ data, role, reload, onError, focus }: TabPr
             <td>{item.retailer}<small className="admin-request-catalog-status">{item.sku || 'SKU missing'}</small></td>
             <td>{item.width || 'Missing'} × {item.depth || 'Missing'} × {item.height || 'Missing'}</td>
             <td>{euro(item.price)}</td>
-            <td>{canReview ? <select aria-label={`Review state for ${item.name}`} value={item.review} disabled={busyId === item.id} onChange={(event) => void patch(item, { review: event.target.value as CatalogReview })}>{catalogReviews.map((value) => <option key={value} value={value}>{reviewLabels[value]}</option>)}</select> : <span className={`admin-pill admin-pill-${item.review}`}>{reviewLabels[item.review]}</span>}</td>
-            <td>{canHide ? item.deleted ? <button className="admin-row-action" disabled={busyId === item.id} onClick={() => void restore(item)} aria-label={`Restore ${item.name}`}>Restore</button> : <button className={item.hidden ? 'admin-row-action' : 'admin-row-action admin-row-danger'} disabled={busyId === item.id} onClick={() => void patch(item, { hidden: !item.hidden })} aria-label={`${item.hidden ? 'Show' : 'Hide'} ${item.name}`}>{item.hidden ? 'Show' : 'Hide'}</button> : <span className="admin-pill">{item.deleted ? 'archived' : item.hidden ? 'hidden' : 'listed'}</span>}</td>
+            <td>{item.deleted
+              ? canHide ? <button className="admin-row-action" disabled={busyId === item.id} onClick={() => void restore(item)} aria-label={`Restore ${item.name}`}>Restore</button> : <span className="admin-pill admin-pill-deleted">Archived</span>
+              : canReview ? <select className={`admin-status-select admin-status-${item.review}`} aria-label={`Status for ${item.name}`} value={item.review} disabled={busyId === item.id || (item.review === 'visible' && !canHide)} onChange={(event) => void setStatus(item, event.target.value as CatalogReview)}>{catalogReviews.map((value) => <option key={value} value={value} disabled={value === 'visible' && !canHide}>{reviewLabels[value]}</option>)}</select>
+              : <span className={`admin-pill admin-pill-${item.review}`}>{reviewLabels[item.review]}</span>}</td>
           </tr>
         })}</tbody></table></div>
       </details>

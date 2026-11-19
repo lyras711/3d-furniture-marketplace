@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { applyCatalogMetadataOverrides, catalogAssetPrefixFromUrl, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseCatalogPermanentDeleteIds, parseManualCatalogProduct } from './scripts/catalog-admin'
+import { applyCatalogMetadataOverrides, catalogAssetPrefixFromUrl, catalogHasDimensions, catalogIsDeleted, catalogIsHidden, parseCatalogArchiveIds, parseCatalogMetadataOverrides, parseCatalogPermanentDeleteIds, parseManualCatalogProduct, catalogReviewState, duplicateSkuProduct } from './scripts/catalog-admin'
 
 test('catalog metadata overrides validate and replace only editable fields', () => {
   const source = { id: 'sofa-haven', name: 'Original sofa', width: 220, modelPath: '/model.glb' }
@@ -69,4 +69,21 @@ test('catalog visibility requires finite positive dimensions before listing impo
   expect(catalogHasDimensions({ width: 100, depth: 0, height: 50 })).toBe(false)
   expect(catalogHasDimensions({ width: 100, depth: undefined, height: 50 })).toBe(false)
   expect(catalogHasDimensions({ width: '100', depth: 80, height: 50 })).toBe(false)
+})
+
+test('catalog review status controls visibility and maps legacy edits', () => {
+  expect(catalogReviewState({})).toBe('visible')
+  expect(catalogReviewState({ hidden: false, review: 'needs-work' })).toBe('visible')
+  expect(catalogReviewState({ hidden: true })).toBe('pending')
+  expect(catalogReviewState({ hidden: true, review: 'needs-work' })).toBe('needs-info')
+  expect(catalogReviewState({ hidden: true, review: 'approved' })).toBe('approved')
+})
+
+test('duplicate SKU checks are scoped to the retailer and ignore formatting', () => {
+  const catalog = [{ id: 'galanis-330', sku: '330', retailerId: 'galanis-in-house', retailer: 'Galanis In House', name: 'Vertigo' }, { id: 'other-330', sku: '330', retailer: 'Other', name: 'Other' }]
+  expect(duplicateSkuProduct(catalog, { sku: ' 330 ', retailer: 'Galanis In House' })?.id).toBe('galanis-330')
+  expect(duplicateSkuProduct(catalog, { sku: '330', retailerId: 'galanis-in-house' }, 'galanis-330')).toBeNull()
+  expect(duplicateSkuProduct(catalog, { sku: 'OR-240', retailer: 'Galanis In House' })).toBeNull()
+  expect(duplicateSkuProduct(catalog, { sku: null, retailer: 'Galanis In House' })).toBeNull()
+  expect(duplicateSkuProduct(catalog, { sku: '330', retailer: 'Third' })).toBeNull()
 })

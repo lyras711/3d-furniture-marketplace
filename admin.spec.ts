@@ -41,9 +41,10 @@ async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJ
   let catalogCrawls = [...(seed.catalogCrawls || [])]
   const partners: Partner[] = []
   const createdCatalogProducts: Product[] = [...(seed.catalogProducts || [])]
-  const edits = new Map<string, { hidden?: boolean; review?: string; deletedAt?: string; overrides?: Record<string, unknown> }>([['sofa-haven', { review: 'needs-work' }]])
+  const edits = new Map<string, { hidden?: boolean; review?: string; deletedAt?: string; overrides?: Record<string, unknown> }>([['sofa-haven', { hidden: true, review: 'needs-info' }]])
+  const reviewOf = (edit?: { hidden?: boolean; review?: string }) => edit?.hidden !== true ? 'visible' : edit.review === 'needs-info' || edit.review === 'approved' ? edit.review : 'pending'
   const texturePaths = new Map<string, string>()
-  const catalog = () => ({ products: [...products.slice(0, 8), ...createdCatalogProducts].map((product) => { const edit = edits.get(product.id); return { ...product, ...edit?.overrides, permanentlyDeletable: createdCatalogProducts.some((created) => created.id === product.id), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null } }) })
+  const catalog = () => ({ products: [...products.slice(0, 8), ...createdCatalogProducts].map((product) => { const edit = edits.get(product.id); return { ...product, ...edit?.overrides, permanentlyDeletable: createdCatalogProducts.some((created) => created.id === product.id), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: reviewOf(edit), updatedAt: null } }) })
   await page.route('https://identitytoolkit.googleapis.com/**', (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('accounts:signInWithPassword')) return route.fulfill({ json: { kind: 'identitytoolkit#VerifyPasswordResponse', localId: 'admin-uid', email: 'ops@formivo3d.com', idToken, refreshToken: 'refresh', expiresIn: '3600', registered: true } })
@@ -149,12 +150,19 @@ async function mockBackend(page: Page, role = 'owner', seed: { jobs?: MockCrawlJ
       texturePaths.set(`${textureMatch[1]}:${textureMatch[2]}`, texturePath)
       return route.fulfill({ json: { id: textureMatch[1], variantId: textureMatch[2], texturePath } })
     }
-    if (catalogMatch && method === 'PUT') { edits.set(catalogMatch[1], { ...edits.get(catalogMatch[1]), ...body }); return route.fulfill({ json: { id: catalogMatch[1], ...body } }) }
+    if (catalogMatch && method === 'PUT') { const patch = { review: body.review, hidden: body.review !== 'visible' }; edits.set(catalogMatch[1], { ...edits.get(catalogMatch[1]), ...patch }); return route.fulfill({ json: { id: catalogMatch[1], ...patch } }) }
+    const refetchMatch = path.match(/^\/api\/admin\/catalog\/([^/]+)\/refetch$/)
+    if (refetchMatch && method === 'POST') {
+      const product = createdCatalogProducts.find((item) => item.id === refetchMatch[1])
+      if (!product) return route.fulfill({ status: 422, json: { error: 'Refetch failed: not imported.' } })
+      Object.assign(product, { name: `${product.name} refreshed`, price: 1690 })
+      return route.fulfill({ json: { ...product, permanentlyDeletable: true, hidden: true, deleted: false, hasOverrides: false, overrides: {}, review: reviewOf(edits.get(product.id)), updatedAt: null, missingFields: ['3D model'] } })
+    }
     if (catalogMatch && method === 'GET') {
       const product = [...products, ...createdCatalogProducts].find((item) => item.id === catalogMatch[1])
       if (!product) return route.fulfill({ status: 404, json: { error: 'Not found' } })
       const edit = edits.get(product.id)
-      return route.fulfill({ json: { ...product, ...edit?.overrides, permanentlyDeletable: createdCatalogProducts.some((created) => created.id === product.id), variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: edit?.review || 'pending', updatedAt: null, missingFields: [] } })
+      return route.fulfill({ json: { ...product, ...edit?.overrides, permanentlyDeletable: createdCatalogProducts.some((created) => created.id === product.id), variants: product.variants?.map((variant) => ({ ...variant, ...(texturePaths.has(`${product.id}:${variant.id}`) ? { texturePath: texturePaths.get(`${product.id}:${variant.id}`) } : {}) })), hidden: Boolean(edit?.hidden || edit?.deletedAt), deleted: Boolean(edit?.deletedAt), hasOverrides: Boolean(edit?.overrides && Object.keys(edit.overrides).length), overrides: edit?.overrides || {}, review: reviewOf(edit), updatedAt: null, missingFields: [] } })
     }
     return route.fulfill({ status: 404, json: { error: `Unmocked ${method} ${path}` } })
   })
@@ -242,15 +250,21 @@ test('admin dashboard: partners pipeline and catalogue visibility/review', async
   await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
   await openCatalogBrand(page, 'Noma Home')
   await expect(page.locator('.admin-catalog-table tbody tr')).toHaveCount(8)
-  await page.getByLabel('Filter by review').selectOption('needs-work')
+  await page.getByLabel('Filter by status').selectOption('needs-info')
   await expect(page.locator('.admin-catalog-table tbody tr')).toHaveCount(1)
-  await page.getByLabel('Filter by review').selectOption('all')
+  await page.getByLabel('Filter by status').selectOption('all')
+  await expect(page.locator('.admin-catalog-table th')).not.toContainText(['Visibility'])
+  await expect(page.getByRole('button', { name: /^(?:Hide|Show) / })).toHaveCount(0)
+  const status = page.getByLabel('Status for Haven three-seat sofa')
+  await expect(status.locator('option')).toHaveText(['Need info', 'Pending review', 'Approved', 'Visible'])
+  await status.selectOption('visible')
+  await expect(status).toHaveValue('visible')
+  await expect(page.locator('#catalog-sofa-haven')).not.toHaveClass(/admin-row-muted/)
   page.once('dialog', (dialog) => void dialog.accept())
-  await page.getByRole('button', { name: 'Hide Haven three-seat sofa' }).click()
-  await expect(page.getByRole('button', { name: 'Show Haven three-seat sofa' })).toBeVisible()
-  await page.getByLabel('Review state for Haven three-seat sofa').selectOption('approved')
-  await expect(page.getByLabel('Review state for Haven three-seat sofa')).toHaveValue('approved')
-  expect(calls.filter((call) => call.path.startsWith('/api/admin/catalog/')).map((call) => call.body)).toEqual([{ hidden: true }, { review: 'approved' }])
+  await status.selectOption('approved')
+  await expect(status).toHaveValue('approved')
+  await expect(page.locator('#catalog-sofa-haven')).toHaveClass(/admin-row-muted/)
+  expect(calls.filter((call) => call.path.startsWith('/api/admin/catalog/')).map((call) => call.body)).toEqual([{ review: 'visible' }, { review: 'approved' }])
   await expect(page.locator('.admin-catalog-brand-folders')).not.toContainText('Edit')
   await page.screenshot({ path: '/tmp/forma-admin-catalogue-desktop.png', fullPage: true })
 })
@@ -596,4 +610,34 @@ test('products hidden by an admin leave the planner catalogue', async ({ page })
   await expect(page.locator('.product-card')).toHaveCount(products.length - 1)
   await page.getByPlaceholder('Search products').fill('Haven')
   await expect(page.getByText('No products found')).toBeVisible()
+})
+
+test('catalogue detail shows the product image, downloads assets, and refetches metadata', async ({ page }) => {
+  const imported = { ...products[0], id: 'galanis-330', name: 'Vertigo corner sofa', brand: 'Galanis', retailer: 'Galanis', sku: '330', sourceUrl: 'https://galanis-inhouse.gr/products/330-vertigo/', thumbnailPath: 'https://storage.googleapis.com/test/hero.png', sourceImages: ['https://storage.googleapis.com/test/hero.png', 'https://storage.googleapis.com/test/side.png'], modelPath: 'https://storage.googleapis.com/test/model.glb', variants: [] } as Product
+  const calls = await mockBackend(page, 'owner', { catalogProducts: [imported] })
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+  await page.route('https://storage.googleapis.com/test/**', (route) => route.request().url().endsWith('.glb')
+    ? route.fulfill({ body: minimalGlb(), headers: { 'content-type': 'model/gltf-binary', 'access-control-allow-origin': '*' } })
+    : route.fulfill({ body: png, headers: { 'content-type': 'image/png', 'access-control-allow-origin': '*' } }))
+  await signIn(page)
+  await page.getByRole('navigation', { name: 'Admin sections' }).getByRole('button', { name: /Catalogue/ }).click()
+  await openCatalogBrand(page, 'Galanis')
+  await page.getByRole('link', { name: /Vertigo corner sofa/ }).click()
+  await expect(page.getByRole('img', { name: 'Vertigo corner sofa product' })).toBeVisible()
+  await expect(page.getByLabel('Product status')).toHaveValue('visible')
+  let download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download image', exact: true }).click()
+  expect((await download).suggestedFilename()).toBe('galanis-330.png')
+  download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download GLB' }).click()
+  expect((await download).suggestedFilename()).toBe('galanis-330.glb')
+  download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download image 2' }).click()
+  expect((await download).suggestedFilename()).toBe('galanis-330-2.png')
+  page.once('dialog', (dialog) => void dialog.accept())
+  await page.getByRole('button', { name: 'Refetch metadata' }).click()
+  await expect(page.getByRole('heading', { name: 'Vertigo corner sofa refreshed' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Metadata refetched' })).toContainText('3D model')
+  expect(calls.some((call) => call.method === 'POST' && call.path === '/api/admin/catalog/galanis-330/refetch')).toBe(true)
+  await page.screenshot({ path: '/tmp/forma-admin-product-detail-desktop.png', fullPage: true })
 })

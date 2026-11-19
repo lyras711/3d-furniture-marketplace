@@ -9,7 +9,7 @@ export default function OverviewTab({ data, role, go }: TabProps) {
   const { requests, partners, catalog, metrics, jobs } = data
   const count = (status: string) => requests.filter((request) => request.status === status).length
   const attention = requests.filter((request) => request.status === 'pending' || request.status === 'ready-to-place').sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(0, 6)
-  const needsWork = catalog.filter((item) => item.review === 'needs-work').slice(0, 6)
+  const needsWork = catalog.filter((item) => item.review === 'needs-info').slice(0, 6)
   const stats = [
     ...(admin ? [
       { value: count('pending'), text: 'orders to check', tab: 'orders' as const },
@@ -35,8 +35,8 @@ export default function OverviewTab({ data, role, go }: TabProps) {
       {admin && <section className="admin-card"><div className="admin-card-head"><div><span className="admin-eyebrow">B2B</span><h2>Partner pipeline</h2></div><button className="admin-row-action" onClick={() => go('partners')}>All partners</button></div>
         <div className="admin-stage-bars">{Object.entries(stageLabels).map(([stage, text]) => { const value = partners.filter((partner) => partner.stage === stage).length; return <div key={stage}><span>{text}</span><i><b style={{ width: `${partners.length ? value / partners.length * 100 : 0}%` }} /></i><strong>{value}</strong></div> })}</div>
       </section>}
-      <section className="admin-card"><div className="admin-card-head"><div><span className="admin-eyebrow">Catalogue</span><h2>Flagged for work</h2></div><button className="admin-row-action" onClick={() => go('catalogue')}>Catalogue</button></div>
-        {needsWork.length ? <div className="admin-catalog-list">{needsWork.map((item) => <button className="admin-list-row" key={item.id} onClick={() => go('catalogue', item.id)}><span><strong>{item.name}</strong><small>{item.retailer} · {label(item.category)}</small></span><em className="admin-pill admin-pill-needs-work">needs work</em></button>)}</div> : <p className="admin-empty">No products are flagged as needing work.</p>}
+      <section className="admin-card"><div className="admin-card-head"><div><span className="admin-eyebrow">Catalogue</span><h2>Needs info</h2></div><button className="admin-row-action" onClick={() => go('catalogue')}>Catalogue</button></div>
+        {needsWork.length ? <div className="admin-catalog-list">{needsWork.map((item) => <button className="admin-list-row" key={item.id} onClick={() => go('catalogue', item.id)}><span><strong>{item.name}</strong><small>{item.retailer} · {label(item.category)}</small></span><em className="admin-pill admin-pill-needs-info">need info</em></button>)}</div> : <p className="admin-empty">No products are waiting for more information.</p>}
       </section>
     </div>
     {admin && <p className="admin-help">Counts come from saved designs, purchase requests and partner records. No third-party click tracking is enabled.</p>}

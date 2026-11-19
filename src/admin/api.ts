@@ -37,3 +37,17 @@ export const time = (value: string) => new Date(value).toLocaleString()
 export const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 export const label = (value: string) => value.replaceAll('-', ' ')
 export const errorText = (reason: unknown) => reason instanceof Error ? reason.message : String(reason)
+
+/** Saves a remote asset under a readable file name; falls back to opening it when CORS blocks the blob read. */
+export async function downloadUrl(url: string, filename: string) {
+  try {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const href = URL.createObjectURL(await response.blob())
+    const link = Object.assign(document.createElement('a'), { href, download: filename })
+    document.body.append(link); link.click(); link.remove()
+    setTimeout(() => URL.revokeObjectURL(href), 1000)
+  } catch { window.open(url, '_blank', 'noopener') }
+}
+
+export const fileExtension = (url: string, fallback: string) => url.split(/[?#]/)[0].match(/\.([a-z0-9]{3,4})$/i)?.[1]?.toLowerCase() || fallback

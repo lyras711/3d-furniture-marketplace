@@ -110,7 +110,7 @@ export default function Admin() {
   const current = visible.find((item) => item.id === tab) || visible[0]
   const badges: Partial<Record<TabId, number>> = {
     orders: data.requests.filter((request) => request.status === 'pending' || request.status === 'ready-to-place').length,
-    catalogue: data.catalog.filter((item) => item.review === 'needs-work').length,
+    catalogue: data.catalog.filter((item) => item.review === 'needs-info').length,
   }
   const props: TabProps = { data, role, reload: load, onError: setError, go, focus }
 
