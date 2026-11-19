@@ -54,6 +54,16 @@ export function cornersFromMeasuredWalls(walls: MeasuredWall[], straighten = tru
   return { corners, gap: 0, adjusted: straighten }
 }
 
+/** Closed chain of walls through corners marked one after another in AR. */
+export const wallsFromCorners = (corners: Point[]): MeasuredWall[] => corners.map((a, i) => ({ a, b: corners[(i + 1) % corners.length] }))
+
+/** Where a view ray meets the horizontal floor plane at `floorY`, ignoring anything in between. Null when aiming level/up or beyond `maxDistance` metres. */
+export function floorPointFromRay(origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }, floorY: number, maxDistance = 12): Point | null {
+  if (direction.y > -0.02 || origin.y <= floorY) return null
+  const t = (floorY - origin.y) / direction.y, point = { x: origin.x + direction.x * t, z: origin.z + direction.z * t }
+  return dist(point, origin) <= maxDistance ? point : null
+}
+
 function segmentsCross(a: Point, b: Point, c: Point, d: Point) {
   const d1 = cross(sub(b, a), sub(c, a)), d2 = cross(sub(b, a), sub(d, a)), d3 = cross(sub(d, c), sub(a, c)), d4 = cross(sub(d, c), sub(b, c))
   return d1 * d2 < 0 && d3 * d4 < 0

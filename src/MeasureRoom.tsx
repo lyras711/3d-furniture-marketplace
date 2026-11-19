@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { BoxGeometry, Group, Mesh, MeshBasicMaterial, PerspectiveCamera, RingGeometry, Scene, SphereGeometry, WebGLRenderer } from 'three'
 import { getFloorRegions, type Point, type ProjectState } from './editor'
-import { closeTolerance, cornersFromEntries, cornersFromMeasuredWalls, entryPath, formatMetres, MAX_CAPTURED_WALLS, projectFromCorners, type CaptureResult, type MeasuredWall, type WallEntry } from './roomCapture'
+import { closeTolerance, cornersFromEntries, cornersFromMeasuredWalls, entryPath, floorPointFromRay, formatMetres, MAX_CAPTURED_WALLS, projectFromCorners, wallsFromCorners, type CaptureResult, type WallEntry } from './roomCapture'
 
 type Mode = 'choose' | 'manual' | 'ar' | 'review'
-type Point3 = Point & { y: number }
-type Live = { status: 'searching' | 'floor' | 'off-floor'; distance: number | null }
+type Live = { status: 'searching' | 'floor' | 'aim-lower'; distance: number | null; closing: boolean }
 
 const turns = [{ value: 90, label: 'Right 90°' }, { value: -90, label: 'Left 90°' }, { value: 45, label: 'Right 45°' }, { value: -45, label: 'Left 45°' }]
 const dist = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.z - b.z)
-const FLOOR_TOLERANCE = 0.12
+const CLOSE_SNAP = 0.25
 
 export const arMeasureSupported = (): Promise<boolean> => navigator.xr?.isSessionSupported('immersive-ar').catch(() => false) ?? Promise.resolve(false)
 
@@ -43,9 +42,8 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
   const [length, setLength] = useState('')
   const [turn, setTurn] = useState(90)
   const [closeGap, setCloseGap] = useState(false)
-  const [arWalls, setArWalls] = useState<MeasuredWall[]>([])
-  const [arStart, setArStart] = useState<Point | null>(null)
-  const [live, setLive] = useState<Live>({ status: 'searching', distance: null })
+  const [arCorners, setArCorners] = useState<Point[]>([])
+  const [live, setLive] = useState<Live>({ status: 'searching', distance: null, closing: false })
   const [straighten, setStraighten] = useState(true)
   const [height, setHeight] = useState(String(ceilingHeight))
   const [message, setMessage] = useState('')
@@ -93,62 +91,61 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
     const wallMaterial = new MeshBasicMaterial({ color: '#4fd18b' }), pendingMaterial = new MeshBasicMaterial({ color: '#ffffff' })
     const reticle = new Mesh(new RingGeometry(0.05, 0.07, 32).rotateX(-Math.PI / 2), new MeshBasicMaterial({ color: '#ffffff' }))
     const pending = new Mesh(lineGeometry, pendingMaterial)
-    reticle.matrixAutoUpdate = false; reticle.visible = false; pending.visible = false
+    reticle.visible = false; pending.visible = false
     scene.add(reticle, pending, marks)
-    const walls: { wall: MeasuredWall; group: Group }[] = []
-    let start: { point: Point3; dot: Mesh } | null = null, current: Point3 | null = null, floorY: number | null = null, liveKey = '', lastLiveUpdate = -Infinity, hitSource: XRHitTestSource | undefined
-    const onFloor = (point: Point3) => floorY === null || Math.abs(point.y - floorY) <= FLOOR_TOLERANCE
-    const placeLine = (mesh: Mesh, a: Point3, b: Point3) => {
-      mesh.position.set((a.x + b.x) / 2, (a.y + b.y) / 2 + 0.003, (a.z + b.z) / 2)
+    const corners: { point: Point; group: Group }[] = []
+    let current: Point | null = null, closing = false, floorY: number | null = null, liveKey = '', lastLiveUpdate = -Infinity, hitSource: XRHitTestSource | undefined
+    const placeLine = (mesh: Mesh, a: Point, b: Point) => {
+      mesh.position.set((a.x + b.x) / 2, floorY! + 0.003, (a.z + b.z) / 2)
       mesh.scale.set(Math.max(dist(a, b), 0.001), 1, 1)
       mesh.rotation.set(0, -Math.atan2(b.z - a.z, b.x - a.x), 0)
     }
-    const dot = (point: Point3) => { const mesh = new Mesh(dotGeometry, wallMaterial); mesh.position.set(point.x, point.y, point.z); return mesh }
-    const publish = () => setArWalls(walls.map((item) => item.wall))
+    const dot = (point: Point) => { const mesh = new Mesh(dotGeometry, wallMaterial); mesh.position.set(point.x, floorY!, point.z); return mesh }
+    const publish = () => setArCorners(corners.map((item) => item.point))
+    const finish = () => { if (!xr.current || corners.length < 3) return; xr.current.finish = true; session.end().catch(() => undefined) }
     const mark = () => {
-      if (!current || !onFloor(current)) return
-      if (!start) {
-        floorY ??= current.y
-        start = { point: current, dot: dot(current) }; marks.add(start.dot); setArStart({ x: current.x, z: current.z })
-        return
-      }
-      if (dist(start.point, current) < 0.2) { setMessage('Move at least 20 cm along the wall before marking the end.'); return }
-      const group = new Group(), line = new Mesh(lineGeometry, wallMaterial)
-      placeLine(line, start.point, current)
-      marks.remove(start.dot); group.add(start.dot, dot(current), line); marks.add(group)
-      walls.push({ wall: { a: { x: start.point.x, z: start.point.z }, b: { x: current.x, z: current.z } }, group })
-      start = null; setArStart(null); setMessage(''); publish()
+      if (!current || floorY === null) return
+      if (closing) { finish(); return }
+      const last = corners.at(-1)?.point
+      if (last && dist(last, current) < 0.2) { setMessage('Move at least 20 cm to the next corner before marking it.'); return }
+      if (corners.length >= MAX_CAPTURED_WALLS) { setMessage(`Measure up to ${MAX_CAPTURED_WALLS} walls per room.`); return }
+      const group = new Group()
+      group.add(dot(current))
+      if (last) { const line = new Mesh(lineGeometry, wallMaterial); placeLine(line, last, current); group.add(line) }
+      marks.add(group); corners.push({ point: current, group }); setMessage(''); publish()
     }
-    const undo = () => {
-      if (start) { marks.remove(start.dot); start = null; setArStart(null); return }
-      const last = walls.pop()
-      if (last) { marks.remove(last.group); publish() }
-    }
+    const undo = () => { const last = corners.pop(); if (last) { marks.remove(last.group); setMessage(''); publish() } }
     session.addEventListener('select', mark)
     session.addEventListener('end', () => {
       renderer.setAnimationLoop(null); hitSource?.cancel(); renderer.dispose()
       lineGeometry.dispose(); dotGeometry.dispose(); reticle.geometry.dispose(); wallMaterial.dispose(); pendingMaterial.dispose()
-      const finished = xr.current?.finish && walls.length >= 3
-      xr.current = null; setArStart(null)
+      const finished = xr.current?.finish && corners.length >= 3
+      xr.current = null
       if (finished) { setSource('ar'); setMode('review') }
-      else { setArWalls([]); setMode('choose'); if (walls.length) setMessage('AR measuring ended before the room was finished. Measure at least 3 walls.') }
+      else { setArCorners([]); setMode('choose'); if (corners.length) setMessage('AR measuring ended before the room was finished. Mark at least 3 corners.') }
     })
     xr.current = { session, mark, undo, finish: false }
-    setArWalls([]); setLive({ status: 'searching', distance: null }); setMode('ar')
+    setArCorners([]); setLive({ status: 'searching', distance: null, closing: false }); setMode('ar')
     try {
       hitSource = await session.requestHitTestSource?.({ space: await session.requestReferenceSpace('viewer') })
       if (!hitSource) throw new Error('Hit testing is unavailable.')
       renderer.setAnimationLoop((time, frame) => {
         const space = renderer.xr.getReferenceSpace()
-        const pose = frame && space ? frame.getHitTestResults(hitSource!)[0]?.getPose(space) : undefined
-        const m = pose?.transform.matrix
-        current = m && m[5] > 0.8 ? { x: m[12], y: m[13], z: m[14] } : null
+        if (frame && space && !corners.length) for (const hit of frame.getHitTestResults(hitSource!)) {
+          const m = hit.getPose(space)?.transform.matrix
+          if (m && m[5] > 0.8) floorY = floorY === null ? m[13] : Math.min(floorY, m[13])
+        }
+        const view = frame && space ? frame.getViewerPose(space)?.transform.matrix : undefined
+        current = view && floorY !== null ? floorPointFromRay({ x: view[12], y: view[13], z: view[14] }, { x: -view[8], y: -view[9], z: -view[10] }, floorY) : null
+        closing = Boolean(current && corners.length >= 3 && dist(current, corners[0].point) < CLOSE_SNAP)
+        if (closing) current = corners[0].point
         reticle.visible = Boolean(current)
-        if (m && current) reticle.matrix.fromArray(m)
-        pending.visible = Boolean(start && current)
-        if (start && current) placeLine(pending, start.point, current)
-        const next: Live = { status: !current ? 'searching' : onFloor(current) ? 'floor' : 'off-floor', distance: start && current ? dist(start.point, current) : null }
-        const key = `${next.status}:${next.distance === null ? '' : Math.round(next.distance * 100)}`
+        if (current) reticle.position.set(current.x, floorY!, current.z)
+        const last = corners.at(-1)?.point
+        pending.visible = Boolean(last && current)
+        if (last && current) placeLine(pending, last, current)
+        const next: Live = { status: floorY === null ? 'searching' : current ? 'floor' : 'aim-lower', distance: last && current ? dist(last, current) : null, closing }
+        const key = `${next.status}:${next.closing}:${next.distance === null ? '' : Math.round(next.distance * 100)}`
         if (key !== liveKey && time - lastLiveUpdate >= 100) { liveKey = key; lastLiveUpdate = time; setLive(next) }
         renderer.render(scene, camera)
       })
@@ -161,9 +158,9 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
 
   const capture = useMemo((): { result: CaptureResult | null; error: string } => {
     if (mode !== 'review') return { result: null, error: '' }
-    try { return { result: source === 'ar' ? cornersFromMeasuredWalls(arWalls, straighten) : cornersFromEntries(entries, closeGap), error: '' } }
+    try { return { result: source === 'ar' ? cornersFromMeasuredWalls(wallsFromCorners(arCorners), straighten) : cornersFromEntries(entries, closeGap), error: '' } }
     catch (error) { return { result: null, error: error instanceof Error ? error.message : 'These measurements could not be joined into a room.' } }
-  }, [mode, source, arWalls, straighten, entries, closeGap])
+  }, [mode, source, arCorners, straighten, entries, closeGap])
   const built = useMemo((): { project: ProjectState | null; error: string } => {
     if (!capture.result) return { project: null, error: capture.error }
     try { return { project: projectFromCorners(capture.result.corners, { name, ceilingHeight: Number(height.replace(',', '.')) }), error: '' } }
@@ -190,7 +187,7 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
         <div className="measure-options">
           <button type="button" className="measure-option" disabled={!arAvailable} onClick={startAr}>
             <strong>Measure with your camera (AR)</strong>
-            <span>{arAvailable === null ? 'Checking this device…' : arAvailable ? 'Aim at the floor along each wall and tap two points on it. Corners are found for you.' : 'Not available in this browser. Camera measuring needs Chrome on an ARCore-supported Android phone.'}</span>
+            <span>{arAvailable === null ? 'Checking this device…' : arAvailable ? 'Aim at each corner where the wall meets the floor and tap, one after another. Marks stay on the floor, so furniture in the way does not matter.' : 'Not available in this browser. Camera measuring needs Chrome on an ARCore-supported Android phone.'}</span>
           </button>
           <button type="button" className="measure-option" onClick={() => { setMode('manual'); setMessage('') }}>
             <strong>Enter wall lengths</strong>
@@ -222,7 +219,7 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
       {mode === 'ar' && <p className="catalog-intro" role="status">Camera measuring in progress…</p>}
 
       {mode === 'review' && <>
-        <PlanPreview segments={capture.result ? loop(capture.result.corners) : source === 'ar' ? arWalls.map((wall) => [wall.a, wall.b]) : path.slice(1).map((p, i) => [path[i], p])} polygon={built.project ? capture.result!.corners : undefined} label="Measured room plan" />
+        <PlanPreview segments={capture.result ? loop(capture.result.corners) : source === 'ar' ? loop(arCorners) : path.slice(1).map((p, i) => [path[i], p])} polygon={built.project ? capture.result!.corners : undefined} label="Measured room plan" />
         {built.project && <p className="measure-summary"><strong>{capture.result!.corners.length} walls · {area.toFixed(1)} m²</strong>
           <span>{source === 'ar' ? straighten ? 'Corners within 7° of square were straightened.' : 'Corners are kept exactly as measured.' : capture.result!.adjusted ? `A ${formatMetres(capture.result!.gap)} closing gap was spread across the walls.` : closeGap ? 'A closing wall joins your last wall to the start.' : 'Your walls close exactly.'} Every wall stays editable.</span></p>}
         {source === 'ar' && <label className="measure-check"><input type="checkbox" checked={straighten} onChange={(event) => setStraighten(event.target.checked)} /> Straighten nearly square corners</label>}
@@ -238,17 +235,17 @@ export default function MeasureRoom({ name, ceilingHeight, replacing, onClose, o
 
     <div ref={overlayRef} className="ar-overlay" hidden={mode !== 'ar'}>
       <div className="ar-top">
-        <strong>{arStart ? `Wall ${arWalls.length + 1}: mark a second point on this wall` : `Wall ${arWalls.length + 1}: aim at the floor where it meets the wall`}</strong>
-        <span>{live.status === 'searching' ? 'Move your phone slowly to find the floor.' : live.status === 'off-floor' ? 'That surface is higher than the floor.' : live.distance !== null ? formatMetres(live.distance) : 'Tap to mark a point. Any two points on the wall work.'}</span>
+        <strong>{!arCorners.length ? 'Aim at the first corner where the wall meets the floor' : live.closing ? 'Back at the first corner: tap to close the room' : `Wall ${arCorners.length}: aim at the next corner`}</strong>
+        <span>{live.status === 'searching' ? 'Move your phone slowly over open floor to find it.' : live.status === 'aim-lower' ? 'Aim lower, at the floor.' : live.distance !== null ? formatMetres(live.distance) : 'Tap to start. Hidden corners work too: aim where the corner meets the floor.'}</span>
         {message && <span className="ar-message">{message}</span>}
       </div>
       <div className="ar-crosshair" aria-hidden="true" />
       <div className="ar-bottom" ref={controlsRef}>
-        <PlanPreview segments={arWalls.map((wall) => [wall.a, wall.b])} label="Walls measured in AR" />
+        <PlanPreview segments={arCorners.slice(1).map((p, i): [Point, Point] => [arCorners[i], p])} label="Walls measured in AR" />
         <div className="ar-actions">
-          <button type="button" className="secondary-button" onClick={() => xr.current?.undo()} disabled={!arStart && !arWalls.length}>Undo</button>
-          <button type="button" className="primary-button" onClick={() => xr.current?.mark()} disabled={live.status !== 'floor'}>Mark point</button>
-          <button type="button" className="secondary-button" onClick={() => endAr(arWalls.length >= 3)}>{arWalls.length >= 3 ? 'Finish room' : 'Exit'}</button>
+          <button type="button" className="secondary-button" onClick={() => xr.current?.undo()} disabled={!arCorners.length}>Undo</button>
+          <button type="button" className="primary-button" onClick={() => xr.current?.mark()} disabled={live.status !== 'floor'}>{!arCorners.length ? 'Start here' : live.closing ? 'Close room' : 'Mark corner'}</button>
+          <button type="button" className="secondary-button" onClick={() => endAr(arCorners.length >= 3)}>{arCorners.length >= 3 ? 'Finish room' : 'Exit'}</button>
         </div>
       </div>
     </div>

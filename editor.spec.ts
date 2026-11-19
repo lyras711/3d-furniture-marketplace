@@ -483,7 +483,7 @@ test('catalog category, retailer, search, sorting and clear filters still work',
   await page.getByPlaceholder('Search products').fill('no such product')
   await expect(page.getByText('No products found')).toBeVisible()
   await page.getByRole('button', { name: 'Clear filters' }).click()
-  await expect(page.locator('.product-card')).toHaveCount(27)
+  await expect(page.locator('.product-card')).toHaveCount(29)
   await page.getByRole('button', { name: 'Bathroom', exact: true }).click()
   await expect(page.locator('.product-card')).toHaveCount(4)
   await page.getByRole('button', { name: 'Kitchen', exact: true }).click()
@@ -723,6 +723,43 @@ test('desktop wall items wait for a wall click, then slide along that wall', asy
   await page.getByRole('button', { name: '3D', exact: true }).click(); await frame(page)
   await page.waitForTimeout(400)
   await page.screenshot({ path: '/tmp/forma-wall-items-desktop.png' })
+})
+
+test('wall items dropped on a wall hang on its room side in plan and 3D', async ({ page }) => {
+  await build(page)
+  const canvas = page.locator('canvas'), card = page.locator('.product-card').filter({ hasText: 'Horizon framed print' })
+  const drop = async (x: number, y: number) => { await page.keyboard.press('Escape'); await expect(card).toBeVisible(); const box = (await canvas.boundingBox())!; await card.dragTo(canvas, { targetPosition: { x: x - box.x, y: y - box.y } }); await frame(page) }
+  // 10 cm outside the north wall's centre line: previously this hung the print on the outside face.
+  const outside = await gridPoint(page, 0.5, -2.6)
+  await drop(outside.x, outside.y)
+  const planned = (await save(page)).objects
+  expect(planned).toHaveLength(1)
+  expect(planned[0].z).toBeGreaterThan(-2.5)
+  await page.getByRole('button', { name: '3D', exact: true }).click(); await frame(page)
+  await page.waitForTimeout(400)
+  // In 3D a ray through a wall reaches the floor behind it. Every drop that hangs must land inside the room.
+  const box = (await canvas.boundingBox())!
+  for (let i = 0; i < 9; i++) await drop(box.x + box.width * (0.3 + (i % 3) * 0.2), box.y + box.height * (0.15 + Math.floor(i / 3) * 0.12))
+  const hung = (await save(page)).objects
+  expect(hung.length).toBeGreaterThan(1)
+  for (const item of hung) expect(Math.max(Math.abs(item.x), Math.abs(item.z))).toBeLessThan(2.5)
+  await page.screenshot({ path: '/tmp/forma-wall-drop-3d.png' })
+})
+
+test('ceiling items hang from the ceiling and follow its height', async ({ page }) => {
+  await build(page)
+  await page.getByTitle('Add Dome pendant light, 40 cm to room').click()
+  await expect(page.getByRole('status')).toContainText('hung from the ceiling')
+  await expect(page.getByText('Hangs from the ceiling · bottom edge 210 cm above the floor.')).toBeVisible()
+  const pendant = (await save(page)).objects[0]
+  expect(pendant).toMatchObject({ productId: 'pendant-dome' })
+  expect(pendant.elevation).toBeCloseTo(2.1)
+  await page.getByRole('button', { name: 'Rotate selected object 15 degrees' }).click()
+  expect((await save(page)).objects[0].rotation).toBeCloseTo(Math.PI / 12)
+  await page.getByTitle('Add Five-blade ceiling fan, 132 cm to room').click()
+  await page.getByRole('button', { name: '3D', exact: true }).click(); await frame(page)
+  await page.waitForTimeout(400)
+  await page.screenshot({ path: '/tmp/forma-ceiling-items-3d.png' })
 })
 
 test('floor-plan import is reachable from the blank-room quick start', async ({ page }) => {
@@ -1197,10 +1234,10 @@ test.describe('touch room workflow', () => {
             this.x += 0.02
             const matrix = new Float32Array(16)
             matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1
-            matrix[12] = this.x
-            const view = { transform: { matrix }, projectionMatrix: matrix }
+            const viewer = new Float32Array([1, 0, 0, 0, 0, 0.707, -0.707, 0, 0, 0.707, 0.707, 0, this.x, 1.4, 0, 1])
+            const view = { transform: { matrix: viewer }, projectionMatrix: matrix }
             callback(time, {
-              getViewerPose: () => ({ views: [view] }),
+              getViewerPose: () => ({ transform: { matrix: viewer }, views: [view] }),
               getHitTestResults: () => [{ getPose: () => ({ transform: { matrix } }) }],
             })
           })
@@ -1231,9 +1268,10 @@ test.describe('touch room workflow', () => {
     await dialog.getByRole('button', { name: /Measure with your camera/ }).tap()
     const overlay = page.locator('.ar-overlay')
     await expect(overlay).toBeVisible()
-    const mark = overlay.getByRole('button', { name: 'Mark point' })
-    await expect(mark).toBeEnabled()
-    await mark.tap()
+    const start = overlay.getByRole('button', { name: 'Start here' })
+    await expect(start).toBeEnabled()
+    await start.tap()
+    const mark = overlay.getByRole('button', { name: 'Mark corner' })
     const updates = await page.evaluate(() => new Promise<number>((resolve) => {
       const status = document.querySelector('.ar-top > span')!
       let updates = 0
@@ -1243,8 +1281,10 @@ test.describe('touch room workflow', () => {
     }))
     expect(updates).toBeGreaterThan(0)
     expect(updates).toBeLessThan(16)
+    await expect(overlay.locator('.ar-top strong')).toContainText('Wall 1:')
     await mark.tap()
     await expect(overlay.locator('.ar-top strong')).toContainText('Wall 2:')
+    await expect(mark).toBeEnabled()
     await overlay.getByRole('button', { name: 'Exit' }).tap()
   })
 

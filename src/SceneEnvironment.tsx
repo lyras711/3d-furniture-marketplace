@@ -4,9 +4,15 @@ import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import { Edges, Environment, Grid, Html, Line } from '@react-three/drei'
 import { DoubleSide, Path, Plane, Raycaster, Shape, Vector2, Vector3 } from 'three'
 import { activeTouchCount, beyondSlop, cancelOnMultiTouch, isDoubleTap, TAP_MAX_TRAVEL_PX, type Tap } from './gestures'
-import { doorSwingSign, fitsFloor, floorColors, openingStyle, snapWallDrag, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature } from './editor'
+import { doorSwingSign, fitsFloor, hangOnWall, floorColors, openingStyle, snapWallDrag, getFloorRegions, placeObject, pointInPolygon, productById, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type FloorRegion, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 const floor = new Plane(new Vector3(0, 1, 0), 0)
+/** The wall face (+1/−1, see `wallInsideSign`) a 3D hit point lies on, or undefined for a hit on the wall's top. */
+export function wallFaceAt(wall: RoomFeature, point: Point) {
+  const across = (point.x - wall.x) * Math.sin(wall.rotation) + (point.z - wall.z) * Math.cos(wall.rotation)
+  return Math.abs(across) > wallThickness(wall) / 2 - 0.005 ? (across > 0 ? 1 : -1) as 1 | -1 : undefined
+}
+export type WallHit = { wallId: string; face?: 1 | -1 }
 const dragType = 'application/x-forma-product'
 export type EditorLightingMode = 'default' | 'day' | 'night'
 export function FloorSurface({ region, color, finish, elevation = -0.01, ceiling = false }: { region: FloorRegion; color: string; finish?: string; elevation?: number; ceiling?: boolean }) {
@@ -52,7 +58,7 @@ function OpeningBody({ feature: f, low, y, openingHeight, thickness, selected, s
 export function Architecture({ project, viewMode, cutaway, selectedId, tool, onSelect, onPlace, onMoveEndpoint, onMoveOpening, onDragStart, onDragEnd, onDragCancel = onDragEnd, onErase, onEditLength, lightingMode = 'default' }: {
   project: ProjectState; viewMode: '2d' | '3d'; cutaway: boolean; selectedId: string | null; tool: string
   onErase?: (id: string) => void; onEditLength?: (id: string) => void
-  onSelect: (id: string, point?: Point) => void; onPlace: (type: 'door' | 'window', x: number, z: number) => void
+  onSelect: (id: string, point?: Point, face?: 1 | -1) => void; onPlace: (type: 'door' | 'window', x: number, z: number) => void
   onMoveEndpoint: (id: string, previous: Point, next: Point) => void
   onMoveOpening: (id: string, wallOffset: number) => void
   onDragStart: (id: string) => void; onDragEnd: () => void; onDragCancel?: () => void
@@ -108,7 +114,7 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
     if (event.delta > TAP_MAX_TRAVEL_PX) return
     if (tool === 'erase') { onErase?.(id); return }
     if (tool === 'door' || tool === 'window') onPlace(tool, event.point.x, event.point.z)
-    else onSelect(id, { x: event.point.x, z: event.point.z })
+    else onSelect(id, { x: event.point.x, z: event.point.z }, wallFaceAt(wall, event.point))
   }
   const openingOffset = (event: ThreeEvent<PointerEvent>) => {
     const point = event.ray.intersectPlane(floor, new Vector3())
@@ -130,7 +136,7 @@ function WallObject({ project, viewMode, cutaway, selectedId, tool, onSelect, on
     {xs.slice(0, -1).flatMap((left, i) => ys.slice(0, -1).map((bottom, j) => {
       const right = xs[i + 1], top = ys[j + 1], x = (left + right) / 2, y = (bottom + top) / 2
       if (openings.some((f) => Math.abs(x - (f.wallOffset || 0)) < f.width / 2 && (low || (y >= (f.sillHeight || 0) && y < (f.sillHeight || 0) + f.height)))) return null
-      return <mesh key={`${i}-${j}`} position={[x, y, 0]} castShadow={!plan} receiveShadow onClick={(event) => click(event, wall.id)}>
+      return <mesh key={`${i}-${j}`} position={[x, y, 0]} userData={{ wallId: wall.id }} castShadow={!plan} receiveShadow onClick={(event) => click(event, wall.id)}>
         <boxGeometry args={[right - left, top - bottom, thickness]} /><meshStandardMaterial color={selected ? '#93af97' : plan ? '#7e8878' : wallColors[project.wallMaterial]} roughness={0.9} />{selected && <Edges color="#58765d" />}
       </mesh>
     }))}
@@ -205,13 +211,13 @@ export const GRID_TOOLS = ['wall', 'room', 'sketch']
 export default function SceneEnvironment({ project, viewMode, gridVisible, tool, snap, wallSnap, lightingMode, onClear, onPlace, onDrop, onBuild, sketch = [], onAddAt }: {
   project: ProjectState; viewMode: '2d' | '3d'; gridVisible: boolean; tool: string; snap: boolean; wallSnap: boolean; lightingMode: EditorLightingMode
   onClear: () => void; onPlace: (type: 'wall' | 'door' | 'window', x: number, z: number) => void
-  onDrop: (id: string, x: number, z: number) => void
+  onDrop: (id: string, x: number, z: number, wall?: WallHit) => void
   onBuild: (action: BuildAction) => void
   sketch?: Point[][]
   onAddAt?: (x: number, z: number) => void
 }) {
   const lastTap = useRef<Tap | null>(null)
-  const { camera, gl, invalidate } = useThree()
+  const { camera, gl, invalidate, scene } = useThree()
   const readyFrames = useRef(0)
   useFrame(() => {
     if (readyFrames.current >= 2) return
@@ -221,7 +227,7 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
   })
   const regions = useMemo(() => getFloorRegions(project.features), [project.features])
   const editor3d = viewMode === '3d', day3d = editor3d && lightingMode === 'day', exterior3d = editor3d && lightingMode === 'default'
-  const [ghost, setGhost] = useState<{ id: string; x: number; z: number; valid: boolean } | null>(null)
+  const [ghost, setGhost] = useState<{ id: string; x: number; z: number; y: number; rotation: number; valid: boolean } | null>(null)
   // One press–drag–release gesture per wall, room box, erase stroke or sketch stroke (Sims-style), in plan or 3D view.
   const building = BUILD_TOOLS.includes(tool)
   const gesture = useRef<{ id: number; element: Element; start: Point; end: Point; points: Point[]; screen: { x: number; y: number }; moved: boolean; release: () => void } | null>(null)
@@ -235,15 +241,25 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
       ray.setFromCamera(new Vector2((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1), camera)
       return ray.ray.intersectPlane(floor, new Vector3())
     }
+    // The first wall under the pointer, if it is nearer than the floor. Without this, a drop on a wall in 3D lands on the floor behind it.
+    const locateWall = (event: DragEvent) => {
+      const floorPoint = locate(event), hit = ray.intersectObjects(scene.children, true).find((candidate) => typeof candidate.object.userData.wallId === 'string')
+      const wall = hit && current.current.project.features.find((feature) => feature.id === hit.object.userData.wallId)
+      if (!hit || !wall || (floorPoint && floorPoint.distanceTo(ray.ray.origin) < hit.distance)) return { point: floorPoint }
+      return { point: hit.point, wall: { wallId: wall.id, face: wallFaceAt(wall, hit.point) } }
+    }
     const over = (event: DragEvent) => {
       if (!event.dataTransfer?.types.includes(dragType)) return
       event.preventDefault()
-      const id = canvas.closest('.canvas-frame')?.getAttribute('data-drag-product'), point = locate(event)
+      const id = canvas.closest('.canvas-frame')?.getAttribute('data-drag-product'), { point, wall } = locateWall(event)
       if (id && point) {
-        const p = placeObject({ id: '', productId: id, x: point.x, z: point.z, rotation: 0 }, current.current.project, current.current.snap, current.current.wallSnap)
-        const valid = fitsFloor(p, current.current.project, current.current.regions)
+        const { project, snap, wallSnap, regions } = current.current, object: RoomObject = { id: '', productId: id, x: point.x, z: point.z, rotation: 0 }
+        // Wall items preview where they will hang, so the user sees which wall and face they get.
+        const hung = productById.get(id)?.mount === 'wall' ? hangOnWall({ ...object, wallId: wall?.wallId }, project, point, wall?.face ?? 'floor') : undefined
+        const p = hung === undefined ? placeObject(object, project, snap, wallSnap) : hung ?? object
+        const valid = hung === undefined ? fitsFloor(p, project, regions) : Boolean(hung && (wall || Math.hypot(hung.x - point.x, hung.z - point.z) <= 1.6))
         event.dataTransfer.dropEffect = 'copy'
-        setGhost({ id, x: p.x, z: p.z, valid })
+        setGhost({ id, x: p.x, z: p.z, y: p.elevation ?? 0, rotation: p.rotation, valid })
       }
       invalidate()
     }
@@ -252,13 +268,13 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
       const id = event.dataTransfer?.getData(dragType)
       if (!id || !productById.has(id)) return
       event.preventDefault()
-      const point = locate(event)
-      if (point) current.current.onDrop(id, point.x, point.z)
+      const { point, wall } = locateWall(event)
+      if (point) current.current.onDrop(id, point.x, point.z, wall)
       leave()
     }
     canvas.addEventListener('dragover', over); canvas.addEventListener('dragleave', leave); canvas.addEventListener('drop', drop); window.addEventListener('dragend', leave)
     return () => { canvas.removeEventListener('dragover', over); canvas.removeEventListener('dragleave', leave); canvas.removeEventListener('drop', drop); window.removeEventListener('dragend', leave) }
-  }, [camera, gl, invalidate])
+  }, [camera, gl, invalidate, scene])
   const stopGesture = () => {
     const g = gesture.current
     if (!g) return
@@ -354,6 +370,6 @@ export default function SceneEnvironment({ project, viewMode, gridVisible, tool,
     {(gridVisible || building || !regions.length) && <Grid position={[0, 0.005, 0]} args={[project.width, project.length]} cellSize={0.25} sectionSize={1} cellThickness={0.5} sectionThickness={0.9} cellColor="#d0d4c8" sectionColor="#adb8a5" fadeDistance={70} fadeStrength={1} raycast={() => null} />}
     {previewNode}
     {sketch.map((stroke, i) => <group key={i}>{plan(stroke, '#557e61', 4)}</group>)}
-    {ghost && (() => { const p = productById.get(ghost.id)!; return <group position={[ghost.x, 0.035, ghost.z]}><mesh raycast={() => null}><boxGeometry args={[p.width / 100, 0.025, p.depth / 100]} /><meshBasicMaterial color={ghost.valid ? '#729982' : '#bd7868'} transparent opacity={0.5} /></mesh><Html center position={[0, 0.4, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{ghost.valid ? `Release to place · ${p.width} × ${p.depth} cm` : 'Place inside a closed room'}</span></Html></group> })()}
+    {ghost && (() => { const p = productById.get(ghost.id)!, onWall = p.mount === 'wall'; return <group position={[ghost.x, onWall ? ghost.y + p.height / 200 : ghost.y + 0.035, ghost.z]} rotation={[0, ghost.rotation, 0]}><mesh raycast={() => null}><boxGeometry args={[p.width / 100, onWall ? p.height / 100 : 0.025, Math.max(p.depth / 100, 0.03)]} /><meshBasicMaterial color={ghost.valid ? '#729982' : '#bd7868'} transparent opacity={0.5} /></mesh><Html center position={[0, 0.4, 0]} style={{ pointerEvents: 'none' }}><span className="dimension-tag">{ghost.valid ? `Release to ${onWall ? 'hang' : 'place'} · ${p.width} × ${onWall ? p.height : p.depth} cm` : onWall ? 'Drop on a wall' : 'Place inside a closed room'}</span></Html></group> })()}
   </>
 }

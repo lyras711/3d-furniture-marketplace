@@ -4,7 +4,7 @@ import SurfaceMaterial from './SurfaceMaterial'
 const RenderStudio = lazy(() => import('./RenderStudio'))
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Edges, Html, Line, OrbitControls, PerspectiveCamera, RoundedBox, useGLTF, useTexture } from '@react-three/drei'
-import SceneEnvironment, { Architecture, BUILD_TOOLS, GRID_TOOLS, type BuildAction, type EditorLightingMode } from './SceneEnvironment'
+import SceneEnvironment, { Architecture, BUILD_TOOLS, GRID_TOOLS, type BuildAction, type EditorLightingMode, type WallHit } from './SceneEnvironment'
 import { wallsFromSketch } from './sketch'
 import MeasureRoom from './MeasureRoom'
 import AddItemSheet from './AddItemSheet'
@@ -23,7 +23,7 @@ import { auth, getAppCheck } from './firebase'
 import type { CategoryFilter, Product } from './catalog'
 import { cloneProductScene } from './productScene'
 import { useListedProducts } from './catalogVisibility'
-import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, addWallSegment, eraseWallSegment, hangOnWall, isWallMounted, placeObject, setWallLength, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
+import { attachOpening, clamp, emptyProject, fitsFloor, floorColors, getFloorRegions, isProject, migrateProject, moveWallEndpoint, overlaps, addWallSegment, eraseWallSegment, hangOnWall, isCeilingHung, isWallMounted, placeObject, setWallLength, placementWarnings, pointInPolygon, productById, refreshOpenings, rotateObjects, roomItemShape, snapBuildPoint, wallColors, wallEndpoints, wallFromPoints, wallThickness, type CustomRoomItem, type Point, type ProjectState, type RoomFeature, type RoomObject } from './editor'
 
 type ViewMode = '3d' | '2d'
 type LightingMode = EditorLightingMode
@@ -362,6 +362,20 @@ export function ProductModel({ product, variantId }: { product: Product; variant
     )
   }
 
+  // Ceiling items: top at Y = height (the ceiling), centred on X/Z.
+  if (product.category === 'Pendant light') return <group>
+    <mesh position={[0, height - 0.01, 0]} castShadow><cylinderGeometry args={[0.06, 0.06, 0.02, 32]} />{steelMaterial}</mesh>
+    <mesh position={[0, height * 0.6, 0]}><cylinderGeometry args={[0.004, 0.004, height * 0.8, 8]} /><meshStandardMaterial color="#2b2b2b" roughness={0.6} /></mesh>
+    <mesh castShadow receiveShadow><sphereGeometry args={[width / 2, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2]} /><meshStandardMaterial color={product.tone} roughness={0.45} metalness={0.2} side={DoubleSide} /></mesh>
+    <mesh position={[0, 0.05, 0]}><sphereGeometry args={[0.04, 16, 12]} /><meshStandardMaterial color="#fff1d5" emissive="#ffd397" emissiveIntensity={8} /></mesh>
+    <pointLight position={[0, 0.02, 0]} color="#ffdeaa" intensity={3} distance={4} decay={2} />
+  </group>
+  if (product.category === 'Ceiling fan') return <group>
+    <mesh position={[0, height - 0.15, 0]}><cylinderGeometry args={[0.012, 0.012, 0.3, 8]} />{steelMaterial}</mesh>
+    <mesh position={[0, 0.12, 0]} castShadow><cylinderGeometry args={[0.1, 0.12, 0.16, 32]} /><meshStandardMaterial color={product.accent} roughness={0.35} metalness={0.6} /></mesh>
+    {[0, 1, 2, 3, 4].map((i) => <group key={i} rotation={[0, i * Math.PI * 2 / 5, 0]}><RoundedBox args={[width / 2 - 0.1, 0.012, 0.13]} radius={0.005} smoothness={2} position={[width / 4 + 0.05, 0.1, 0]} castShadow receiveShadow>{material}</RoundedBox></group>)}
+  </group>
+
   // Wall items: back face on the wall (−Z), front toward the room (+Z), bottom edge at Y = 0.
   if (product.category === 'Wall art') return <group>
     <RoundedBox args={[width, height, depth]} radius={0.006} smoothness={2} position={[0, height / 2, 0]} castShadow receiveShadow><meshStandardMaterial color={product.accent} roughness={0.55} /></RoundedBox>
@@ -444,7 +458,7 @@ function FurnitureObject({
   onDragCancel: () => void
 }) {
   const item = roomItemShape(object)!
-  const wallMounted = isWallMounted(object), elevation = object.elevation ?? 0
+  const wallMounted = isWallMounted(object), ceilingHung = isCeilingHung(object), elevation = object.elevation ?? 0
   // With "lower front walls" on, a wall item whose wall stands between the camera and the item would float in mid-air, so hide it.
   const groupRef = useRef<Group>(null)
   useFrame(({ camera }) => {
@@ -484,7 +498,8 @@ function FurnitureObject({
         tapToSelect.current = touch && !selected
         // Touch: the first tap only selects, and a finger on an unselected item moves the camera instead.
         if (touch && (!selected || activeTouchCount() > 1)) return
-        const plane = wallMounted && viewMode === '3d' ? new Plane().setFromNormalAndCoplanarPoint(new Vector3(Math.sin(object.rotation), 0, Math.cos(object.rotation)), new Vector3(object.x, 0, object.z)) : FLOOR
+        // Ceiling items drag on their own horizontal plane so they track the pointer in perspective.
+        const plane = viewMode !== '3d' ? FLOOR : wallMounted ? new Plane().setFromNormalAndCoplanarPoint(new Vector3(Math.sin(object.rotation), 0, Math.cos(object.rotation)), new Vector3(object.x, 0, object.z)) : ceilingHung ? new Plane(new Vector3(0, 1, 0), -elevation) : FLOOR
         const point = event.ray.intersectPlane(plane, new Vector3())
         if (!point) return
         event.stopPropagation()
@@ -507,11 +522,11 @@ function FurnitureObject({
         event.stopPropagation()
         if (!drag.current.moved && !(drag.current.moved = beyondSlop(drag.current.start, { x: event.clientX, y: event.clientY }))) return
         const point = event.ray.intersectPlane(drag.current.plane, new Vector3())
-        if (point) onDragMove(point.x - drag.current.x, point.z - drag.current.z, drag.current.plane === FLOOR ? undefined : point.y - drag.current.y)
+        if (point) onDragMove(point.x - drag.current.x, point.z - drag.current.z, wallMounted && drag.current.plane !== FLOOR ? point.y - drag.current.y : undefined)
       }}
       onPointerUp={finish} onPointerCancel={finish}
     >
-      {viewMode === '2d' ? <mesh position={[0, item.category === 'Rug' ? 0.015 : wallMounted ? 0.13 : 0.06, wallMounted ? Math.max(0, 0.08 - depth) / 2 : 0]}><boxGeometry args={[width, 0.02, wallMounted ? Math.max(depth, 0.08) : depth]} /><meshBasicMaterial color={item.tone} transparent opacity={item.category === 'Rug' ? 0.4 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : product ? <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={item.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense> : <RoundedBox position={[0, height / 2, 0]} args={[width, height, depth]} radius={Math.min(0.035, height / 4)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={item.tone} roughness={0.9} /></RoundedBox>}
+      {viewMode === '2d' ? <mesh position={[0, item.category === 'Rug' ? 0.015 : wallMounted || ceilingHung ? 0.13 : 0.06, wallMounted ? Math.max(0, 0.08 - depth) / 2 : 0]}><boxGeometry args={[width, 0.02, wallMounted ? Math.max(depth, 0.08) : depth]} /><meshBasicMaterial color={item.tone} transparent opacity={item.category === 'Rug' ? 0.4 : ceilingHung ? 0.5 : 0.9} /><Edges color={selected ? '#507759' : '#8f9788'} lineWidth={1} /></mesh> : product ? <Suspense fallback={<FurnitureLoading width={width} depth={depth} color={item.tone} />}><ProductModel product={product} variantId={object.variantId} /></Suspense> : <RoundedBox position={[0, height / 2, 0]} args={[width, height, depth]} radius={Math.min(0.035, height / 4)} smoothness={2} castShadow receiveShadow><meshStandardMaterial color={item.tone} roughness={0.9} /></RoundedBox>}
       {object.inBasket && <Html position={[0, (viewMode === '3d' ? height : 0.1) + 0.14, 0]} center zIndexRange={[4, 0]} style={{ pointerEvents: 'none' }}><span className="basket-badge" title="In basket"><Icon name="shopping" size={13} /></span></Html>}
       {selected && <>
         <Line points={[[-width / 2 - 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, -depth / 2 - 0.04], [width / 2 + 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, depth / 2 + 0.04], [-width / 2 - 0.04, 0.045, -depth / 2 - 0.04]]} color="#517e68" lineWidth={2} raycast={() => null} />
@@ -551,7 +566,7 @@ function RoomScene({
   snap: boolean
   wallSnap: boolean
   lightingMode: LightingMode
-  onDropProduct: (id: string, x: number, z: number) => void
+  onDropProduct: (id: string, x: number, z: number, wall?: WallHit) => void
   onBuild: (action: BuildAction) => void
   sketch: Point[][]
   onErase: (id: string) => void
@@ -567,7 +582,7 @@ function RoomScene({
   cameraVersion: number
   onClearSelection: () => void
   onSelectObject: (id: string, extend: boolean) => void
-  onSelectFeature: (id: string, point?: Point) => void
+  onSelectFeature: (id: string, point?: Point, face?: 1 | -1) => void
   onPlaceFeature: (type: FeatureType, x: number, z: number) => void
   onMoveObject: (id: string, x: number, z: number, y?: number) => void
   onDragStart: (id: string) => void
@@ -746,6 +761,10 @@ function WallHeight({ object, onPatch }: { object: RoomObject; onPatch: (patch: 
   </section>
 }
 
+function CeilingNote({ object }: { object: RoomObject }) {
+  return isCeilingHung(object) ? <p className="muted">Hangs from the ceiling · bottom edge {Math.round((object.elevation ?? 0) * 100)} cm above the floor.</p> : null
+}
+
 function ObjectProperties({ object, product, actions, similar, onPatch, onClose }: {
   onClose: () => void
   object: RoomObject
@@ -779,6 +798,7 @@ function ObjectProperties({ object, product, actions, similar, onPatch, onClose 
           <label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label>
           <label><span>Rotation</span><NumberInput step="15" value={Math.round((object.rotation * 180) / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label>
         </div>
+        <CeilingNote object={object} />
       </section>}
       <section className="inspector-section">
         <div className="section-label-row"><span>Size</span><span className="verified-label">{product.status.includes('Verified') ? 'Verified' : 'Check status'}</span></div>
@@ -797,8 +817,8 @@ function CustomObjectProperties({ object, actions, onPatch, onClose }: { object:
     <div className="inspector-heading"><div><span className="eyebrow">Your own item · not for sale</span><h2>{object.custom.name}</h2></div><button className="icon-button" title="Close selection" aria-label="Close selection" onClick={onClose}><Icon name="close" /></button></div>
     {actions}
     <section className="inspector-section"><div className="section-label-row"><span>Measured size</span><span className="muted">cm</span></div><div className="dimension-grid"><label><span>Width</span><NumberInput min="1" max="2000" step="1" value={object.custom.width} onCommit={(width) => patch({ width })} /></label><label><span>Depth</span><NumberInput min="1" max="2000" step="1" value={object.custom.depth} onCommit={(depth) => patch({ depth })} /></label><label><span>Height</span><NumberInput min="1" max="600" step="1" value={object.custom.height} onCommit={(height) => patch({ height })} /></label></div></section>
-    <section className="inspector-section"><div className="section-label-row"><span>Appearance</span></div><label className="field-label">Name<input value={name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim()) patch({ name: name.trim() }); else setName(object.custom.name) }} maxLength={80} /></label><div className="form-grid"><label className="field-label">Colour<input type="color" value={object.custom.color} onChange={(event) => patch({ color: event.target.value })} /></label>{object.custom.kind !== 'wall' && <label className="field-label">Type<select value={object.custom.kind} onChange={(event) => patch({ kind: event.target.value as CustomRoomItem['kind'] })}><option value="furniture">Furniture</option><option value="rug">Rug</option></select></label>}</div></section>
-    {object.custom.kind === 'wall' ? <WallHeight object={object} onPatch={onPatch} /> : <section className="inspector-section"><div className="section-label-row"><span>Exact position</span><span className="muted">metres · degrees</span></div><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={object.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round(object.rotation * 180 / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label></div></section>}
+    <section className="inspector-section"><div className="section-label-row"><span>Appearance</span></div><label className="field-label">Name<input value={name} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim()) patch({ name: name.trim() }); else setName(object.custom.name) }} maxLength={80} /></label><div className="form-grid"><label className="field-label">Colour<input type="color" value={object.custom.color} onChange={(event) => patch({ color: event.target.value })} /></label>{object.custom.kind !== 'wall' && <label className="field-label">Type<select value={object.custom.kind} onChange={(event) => patch({ kind: event.target.value as CustomRoomItem['kind'] })}><option value="furniture">Furniture</option><option value="rug">Rug</option><option value="ceiling">Ceiling item</option></select></label>}</div></section>
+    {object.custom.kind === 'wall' ? <WallHeight object={object} onPatch={onPatch} /> : <section className="inspector-section"><div className="section-label-row"><span>Exact position</span><span className="muted">metres · degrees</span></div><div className="dimension-grid placement-grid"><label><span>X</span><NumberInput step="0.05" value={object.x.toFixed(2)} onCommit={(x) => onPatch({ x })} /></label><label><span>Z</span><NumberInput step="0.05" value={object.z.toFixed(2)} onCommit={(z) => onPatch({ z })} /></label><label><span>Rotation</span><NumberInput step="15" value={Math.round(object.rotation * 180 / Math.PI)} onCommit={(rotation) => onPatch({ rotation: rotation * Math.PI / 180 })} /></label></div><CeilingNote object={object} /></section>}
     <p className="muted">This item stays in your room plan but is never added to the shopping basket.</p>
   </>
 }
@@ -1042,7 +1062,7 @@ function ExistingItemModal({ onClose, onCreate }: { onClose: () => void; onCreat
   const [width, setWidth] = useState('100'), [depth, setDepth] = useState('100'), [height, setHeight] = useState('100')
   const [color, setColor] = useState('#bca58a'), [kind, setKind] = useState<CustomRoomItem['kind']>('furniture')
   const submit = (event: FormEvent) => { event.preventDefault(); onCreate({ name: name.trim() || 'Existing furniture', width: clamp(Number(width), 1, 2000), depth: clamp(Number(depth), 1, 2000), height: clamp(Number(height), 1, 600), color, kind }) }
-  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close existing furniture dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Add existing furniture" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Your furniture</span><h2>Add an existing item</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><p className="catalog-intro">Create an editable measured placeholder. It remains outside the shopping basket.</p><label className="field-label">Name<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Type<select value={kind} onChange={(event) => setKind(event.target.value as CustomRoomItem['kind'])}><option value="furniture">Furniture</option><option value="rug">Rug</option><option value="wall">Wall item (picture, shelf, TV)</option></select></label><div className="form-grid"><label className="field-label">Width (cm)<input required type="number" min="1" max="2000" step="1" value={width} onChange={(event) => setWidth(event.target.value)} /></label><label className="field-label">Depth (cm)<input required type="number" min="1" max="2000" step="1" value={depth} onChange={(event) => setDepth(event.target.value)} /></label><label className="field-label">Height (cm)<input required type="number" min="1" max="600" step="1" value={height} onChange={(event) => setHeight(event.target.value)} /></label><label className="field-label">Color<input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Place in room <Icon name="arrow" /></button></div></form></div>
+  return <div className="modal-layer"><button className="modal-backdrop" onClick={onClose} aria-label="Close existing furniture dialog" /><form className="modal-card" role="dialog" aria-modal="true" aria-label="Add existing furniture" onSubmit={submit}><div className="modal-header"><div><span className="eyebrow">Your furniture</span><h2>Add an existing item</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><Icon name="close" /></button></div><p className="catalog-intro">Create an editable measured placeholder. It remains outside the shopping basket.</p><label className="field-label">Name<input required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field-label">Type<select value={kind} onChange={(event) => setKind(event.target.value as CustomRoomItem['kind'])}><option value="furniture">Furniture</option><option value="rug">Rug</option><option value="wall">Wall item (picture, shelf, TV)</option><option value="ceiling">Ceiling item (light, fan)</option></select></label><div className="form-grid"><label className="field-label">Width (cm)<input required type="number" min="1" max="2000" step="1" value={width} onChange={(event) => setWidth(event.target.value)} /></label><label className="field-label">Depth (cm)<input required type="number" min="1" max="2000" step="1" value={depth} onChange={(event) => setDepth(event.target.value)} /></label><label className="field-label">Height (cm)<input required type="number" min="1" max="600" step="1" value={height} onChange={(event) => setHeight(event.target.value)} /></label><label className="field-label">Color<input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Place in room <Icon name="arrow" /></button></div></form></div>
 }
 
 function App() {
@@ -1345,29 +1365,29 @@ function App() {
     return refreshOpenings(next)
   })
 
-  const hangNewItem = (object: RoomObject, wallId?: string, point?: Point) => {
+  const hangNewItem = (object: RoomObject, wallId?: string, point?: Point, face?: 1 | -1) => {
     const current = projectRef.current, name = roomItemShape(object)?.name || 'Item'
-    const hung = hangOnWall({ ...object, wallId }, current, point, Boolean(point))
+    const hung = hangOnWall({ ...object, wallId }, current, point, face ?? (point ? 'floor' : undefined))
     setHangItem(null); setTargetWallId(null); setAddOpen(false); setDragProduct(null); setAddPoint(null)
     if (!hung || (point && !wallId && Math.hypot(hung.x - point.x, hung.z - point.z) > 1.6)) { setNotice(hung ? `${compact ? 'Tap' : 'Click'} closer to a wall to hang the ${name}.` : `No wall is wide enough for the ${name}.`); return }
     setProject({ ...current, objects: [...current.objects, hung] })
     selectObject(hung.id)
     setNotice(`${name} hung on the wall. Drag it along the wall, or set its height in ${compact ? 'Details' : 'the panel'}.`)
   }
-  // Wall items go on the chosen or selected wall, near a given point, or wait for the user to tap a wall.
-  const placeWallItem = (object: RoomObject, point?: Point) => {
-    const wallId = targetWallId ?? (selectedFeature?.type === 'wall' ? selectedFeature.id : undefined)
-    if (wallId || point) { hangNewItem(object, wallId, point); return }
+  // Wall items go on the wall they were dropped on, the chosen or selected wall, near a given point, or wait for the user to tap a wall.
+  const placeWallItem = (object: RoomObject, point?: Point, hit?: WallHit) => {
+    const wallId = hit?.wallId ?? targetWallId ?? (!point && selectedFeature?.type === 'wall' ? selectedFeature.id : undefined)
+    if (wallId || point) { hangNewItem(object, wallId, point, hit?.face); return }
     clearSelection(); setAddOpen(false); setPanelOpen(!compact && panelOpen); setActiveTool('select'); setHangItem(object)
     setNotice(`${compact ? 'Tap' : 'Click'} a wall to hang the ${roomItemShape(object)?.name || 'item'}.`)
   }
-  const tapFeature = (id: string, point?: Point) => {
+  const tapFeature = (id: string, point?: Point, face?: 1 | -1) => {
     const feature = projectRef.current.features.find((candidate) => candidate.id === id)
-    if (hangItem && feature) { hangNewItem(hangItem, feature.type === 'wall' ? feature.id : feature.wallId, point); return }
+    if (hangItem && feature) { hangNewItem(hangItem, feature.type === 'wall' ? feature.id : feature.wallId, point, face); return }
     selectFeature(id)
   }
 
-  const addProduct = (productId: string, x?: number, z?: number, nearest = x === undefined) => {
+  const addProduct = (productId: string, x?: number, z?: number, nearest = x === undefined, wallHit?: WallHit) => {
     const product = productById.get(productId)
     if (!product) return
     const current = projectRef.current, regions = getFloorRegions(current.features)
@@ -1375,7 +1395,7 @@ function App() {
     setAddPoint(null)
     if (!regions.length) { setNotice('Close a loop of walls first. The floor will fill automatically.'); return }
     const defaultVariantId = product.variants?.[0]?.id, target = { x: x ?? 0, z: z ?? 0 }
-    if (product.mount === 'wall') { placeWallItem({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), x: 0, z: 0, rotation: 0, inBasket: false }, x === undefined ? undefined : target); return }
+    if (product.mount === 'wall') { placeWallItem({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), x: 0, z: 0, rotation: 0, inBasket: false }, x === undefined ? undefined : target, wallHit); return }
     let object = placeObject({ id: makeId('object'), productId, ...(defaultVariantId ? { variantId: defaultVariantId } : {}), ...target, rotation: 0, inBasket: false }, current, snap, wallSnap)
     if (nearest) {
       const candidates: RoomObject[] = [object]
@@ -1388,7 +1408,7 @@ function App() {
     setAddOpen(false)
     selectObject(object.id)
     setDragProduct(null)
-    setNotice(`${product.name} added to your room`)
+    setNotice(`${product.name} ${product.mount === 'ceiling' ? 'hung from the ceiling' : 'added to your room'}`)
   }
 
   const addAt = (x: number, z: number) => {
@@ -1411,7 +1431,7 @@ function App() {
     const candidates: RoomObject[] = [object]
     for (let x = -current.width / 2; x <= current.width / 2; x += 0.25) for (let z = -current.length / 2; z <= current.length / 2; z += 0.25) candidates.push(placeObject({ ...object, x, z }, current, snap, wallSnap))
     const valid = candidates.filter((candidate) => fitsFloor(candidate, current, regions)).sort((a, b) => a.x ** 2 + a.z ** 2 - b.x ** 2 - b.z ** 2)
-    object = valid.find((candidate) => current.objects.every((existing) => !overlaps(candidate, existing))) || valid[0] || object
+    object = placeObject(valid.find((candidate) => current.objects.every((existing) => !overlaps(candidate, existing))) || valid[0] || object, current)
     if (!fitsFloor(object, current, regions)) { setNotice('This item must fit inside an enclosed room.'); return }
     setProject({ ...current, objects: [...current.objects, object] })
     selectObject(object.id)
@@ -1832,6 +1852,7 @@ function App() {
     : activeTool === 'sketch' ? 'Draw the outline of your room · lift and keep going · then press Make walls'
     : activeTool !== 'select' ? `${tap} any wall to place a ${activeTool}`
       : selectedObject && isWallMounted(selectedObject) ? 'Drag to slide it along the wall · set its height in the panel · Delete removes'
+      : selectedObject && isCeilingHung(selectedObject) && !compact ? 'Hangs from the ceiling · drag to move · R rotates · Delete removes'
       : selectedObject ? compact ? 'Drag to move · use the toolbar to rotate or remove' : 'Drag to move · R rotates · arrow keys nudge · Delete removes'
         : selectedFeature?.type === 'wall' ? 'Drag the round handles to reshape this wall'
           : selectedFeature ? 'Drag the opening along its wall'
@@ -1975,7 +1996,7 @@ function App() {
 
         <main className="workspace">
           <div className={`canvas-frame ${dragProduct ? 'drop-active' : ''}`} data-drag-product={dragProduct || ''} data-room-count={floors.length} data-floor-area={floorArea.toFixed(2)} data-wall-count={wallCount}>
-            <RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={tapEmptyCanvas} onSelectObject={selectObject} onSelectFeature={tapFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} onDragCancel={cancelDrag} addPoint={addPoint} onAddAt={addAt} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={addProduct} onBuild={buildAction} sketch={sketchStrokes} onErase={eraseFeature} onEditLength={setLengthWallId} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} />
+            <RoomScene project={project} viewMode={viewMode} gridVisible={gridVisible} wallsTransparent={wallsTransparent} selectedIds={selectedIds} selectedFeatureId={selectedFeatureId} activeTool={activeTool} draggingId={draggingId} cameraVersion={cameraVersion} onClearSelection={tapEmptyCanvas} onSelectObject={selectObject} onSelectFeature={tapFeature} onPlaceFeature={addFeature} onMoveObject={moveObject} onDragStart={(id) => { dragSnapshot.current = projectRef.current; setDraggingId(id) }} onDragEnd={endDrag} onDragCancel={cancelDrag} addPoint={addPoint} onAddAt={addAt} snap={snap} wallSnap={wallSnap} lightingMode={lightingMode} onDropProduct={(id, x, z, wall) => addProduct(id, x, z, false, wall)} onBuild={buildAction} sketch={sketchStrokes} onErase={eraseFeature} onEditLength={setLengthWallId} onMoveEndpoint={(id, previous, next) => setProject((current) => moveWallEndpoint(current, id, previous, next))} onMoveOpening={moveOpening} />
             <div className="canvas-label">{viewMode === '3d' ? '3D view' : 'Floor plan'} · {activeTool === 'wall' ? 'Build grid · 25 cm' : 'Real dimensions · metres'}</div>
           </div>
 

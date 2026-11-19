@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { addWallSegment, attachOpening, emptyProject, eraseWallSegment, getFloorRegions, fitsFloor, hangOnWall, setWallLength, snapWallDrag, isProject, migrateProject, moveWallEndpoint, openingSizes, openingStyle, overlaps, placeObject, placementWarnings, refreshOpenings, rotateObjects, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState, type RoomFeature } from './src/editor'
+import { addWallSegment, attachOpening, emptyProject, eraseWallSegment, getFloorRegions, fitsFloor, hangOnWall, isCeilingHung, setWallLength, snapWallDrag, isProject, migrateProject, moveWallEndpoint, openingSizes, openingStyle, overlaps, placeObject, placementWarnings, refreshOpenings, rotateObjects, snapBuildPoint, wallFromPoints, wallEndpoints, wallThickness, type Point, type ProjectState, type RoomFeature } from './src/editor'
 
 import { analyzePlanPixels, createProjectFromPlan, type PlanAnalysis } from './src/planImport'
 import { normalizePlanVisionResult } from './scripts/plan-vision'
@@ -337,6 +337,49 @@ test('partner records need a company and reject malformed contact fields', () =>
   expect(partnerFields({ company: 'x'.repeat(121) })).toMatchObject({ error: expect.stringContaining('120') })
 })
 
+test('wall items never land on the outside of a room wall they were dropped on', () => {
+  const project = room(), art = { id: 'art', productId: 'art-horizon', x: 0, z: 0, rotation: 0 }
+  // A floor point just past an exterior wall (3D ray through the wall, or a plan drop a few cm outside) stays on the room side.
+  expect(hangOnWall(art, project, { x: 0, z: -2.2 }, 'floor')).toMatchObject({ wallId: 'wall-0', wallSide: 1 })
+  expect(hangOnWall(art, project, { x: 0, z: -2.03 }, 'floor')!.z).toBeGreaterThan(-2)
+  // The hit outer face of a room's wall also falls back to the room side; the inner face is kept.
+  expect(hangOnWall({ ...art, wallId: 'wall-0' }, project, { x: 0, z: -2.06 }, -1)!.wallSide).toBe(1)
+  expect(hangOnWall({ ...art, wallId: 'wall-0' }, project, { x: 0, z: -1.94 }, 1)!.wallSide).toBe(1)
+  // A wall between two rooms hangs on the side the point or face is on.
+  const split = addWallSegment(project, { x: -2, z: 0 }, { x: 2, z: 0 }, 'mid')
+  expect(getFloorRegions(split.features)).toHaveLength(2)
+  const mid = split.features.find((f) => f.id === 'mid')!
+  expect(hangOnWall({ ...art, wallId: mid.id }, split, { x: 0.5, z: -0.3 }, 'floor')!.z).toBeLessThan(0)
+  expect(hangOnWall({ ...art, wallId: mid.id }, split, { x: 0.5, z: 0.3 }, 'floor')!.z).toBeGreaterThan(0)
+  expect(Math.sign(hangOnWall({ ...art, wallId: mid.id }, split, undefined, 1)!.z)).toBe(-Math.sign(hangOnWall({ ...art, wallId: mid.id }, split, undefined, -1)!.z))
+  // A free-standing wall has no room side, so the point decides.
+  const lone = { ...emptyProject(), features: [wallFromPoints('lone', { x: -2, z: 0 }, { x: 2, z: 0 }, 2.8)] }
+  expect(hangOnWall(art, lone, { x: 0, z: -0.3 }, 'floor')!.z).toBeLessThan(0)
+  expect(hangOnWall(art, lone, { x: 0, z: 0.3 }, 'floor')!.z).toBeGreaterThan(0)
+})
+
+test('ceiling items hang from the ceiling, move like floor items, and only clash with tall floor items', () => {
+  const project = room(), pendant = placeObject({ id: 'pendant', productId: 'pendant-dome', x: 0.5, z: 0.5, rotation: 0 }, room())
+  expect(isCeilingHung(pendant)).toBe(true)
+  expect(pendant.elevation).toBeCloseTo(2.8 - 0.7)
+  const withPendant = { ...project, objects: [pendant, sofa] }
+  expect(isProject(withPendant)).toBe(true)
+  expect(fitsFloor(pendant, withPendant)).toBe(true)
+  expect(fitsFloor({ ...pendant, x: 3 }, withPendant)).toBe(false)
+  expect(overlaps(pendant, sofa)).toBe(false)
+  expect(overlaps(pendant, { ...pendant, id: 'other' })).toBe(true)
+  expect(rotateObjects(withPendant, ['pendant'], 0.3)).not.toBeNull()
+  expect(placementWarnings(withPendant).some((w) => w.id === 'pendant')).toBe(false)
+  const tall = { id: 'tall', custom: { name: 'Tall cabinet', width: 60, depth: 60, height: 230, color: '#aabbcc', kind: 'furniture' as const }, x: 0.5, z: 0.5, rotation: 0 }
+  expect(placementWarnings({ ...project, objects: [pendant, tall] }).map((w) => w.message)).toContain('Dome pendant light, 40 cm may hit Tall cabinet.')
+  expect(placementWarnings({ ...project, objects: [pendant, tall] }).some((w) => w.message.includes('door'))).toBe(false)
+  expect(refreshOpenings({ ...withPendant, ceilingHeight: 3.2 }).objects[0].elevation).toBeCloseTo(2.5)
+  const custom = placeObject({ id: 'lamp', custom: { name: 'Old lamp', width: 30, depth: 30, height: 50, color: '#aabbcc', kind: 'ceiling' }, x: 0, z: 0, rotation: 0 }, project)
+  expect(custom.elevation).toBeCloseTo(2.3)
+  expect(isProject({ ...project, objects: [custom] })).toBe(true)
+  expect(placeObject({ ...custom, custom: { ...custom.custom!, kind: 'furniture' } }, project).elevation).toBeUndefined()
+})
+
 test('wall items hang flush on the room side, follow their wall, and warn about clashes', () => {
   const project = room()
   const hung = hangOnWall({ id: 'art', productId: 'art-horizon', x: 0, z: 0, rotation: 0, wallId: 'wall-0' }, project)!
@@ -346,7 +389,7 @@ test('wall items hang flush on the room side, follow their wall, and warn about 
   expect(hung.elevation).toBeCloseTo(1.2)
   expect(hangOnWall(hung, project, { x: 5, z: -1.9 })!.wallOffset).toBeCloseTo(1.55)
   expect(hangOnWall({ ...hung, elevation: 5 }, project)!.elevation).toBeCloseTo(2.8 - 0.6)
-  expect(hangOnWall({ ...hung, wallId: undefined }, project, { x: 0, z: -2.2 }, true)!.wallSide).toBe(-1)
+  expect(hangOnWall({ ...hung, wallId: undefined }, project, { x: 0, z: -1.8 }, 'floor')!.wallSide).toBe(1)
   const withArt = { ...project, objects: [hung] }
   expect(isProject(withArt)).toBe(true)
   expect(isProject({ ...withArt, objects: [{ ...hung, wallSide: 2 as 1 }] })).toBe(false)

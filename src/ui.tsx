@@ -107,6 +107,10 @@ export function ProductThumb({ product, compact = false }: { product: Product; c
               : product.category === 'Wall TV' ? <><rect x="34" y="26" width="112" height="64" rx="3" fill={product.accent} /><rect x="38" y="30" width="104" height="56" fill={product.tone} /><path d="M44 80 140 36" stroke="#4a5258" opacity=".5" /></>
                 : product.category === 'Wall cabinet' ? <><rect x="46" y="20" width="88" height="70" rx="3" fill={product.tone} /><path d="M90 20v70M84 80v-9m12 9v-9" fill="none" strokeWidth="2" /></>
                   : <><rect x="40" y="24" width="100" height="66" rx="2" fill={product.accent} /><rect x="47" y="31" width="86" height="52" fill="#f4efe4" stroke="none" /><rect x="53" y="58" width="74" height="20" fill={product.tone} stroke="none" /><rect x="53" y="37" width="74" height="19" fill="#c9d3cf" stroke="none" /></>}
+        </g> : product.mount === 'ceiling' ? <g>
+          <path d="M30 10h120" strokeWidth="3" />
+          {product.category === 'Ceiling fan' ? <><path d="M90 10v22" strokeWidth="3" /><rect x="78" y="32" width="24" height="12" rx="4" fill={product.accent} /><path d="M78 40 20 52l4 8 56-12Zm24 0 58 12-4 8-56-12Z" fill={product.tone} /></>
+            : <><path d="M90 10v44" /><path d="M58 88q0-34 32-34t32 34Z" fill={product.tone} /><ellipse cx="90" cy="90" rx="10" ry="4" fill="#ffe7b0" stroke="none" /></>}
         </g> : seating ? <g>
           <path d="M38 91v17m92-18v18m-75-5v9m87-22v12" strokeWidth="4" />
           <path d={(product.category === 'Sofa' || product.category === 'Corner sofa') ? 'M28 55 Q28 43 40 45 L135 35 Q145 35 145 48 L145 84 L30 94Z' : 'M64 30 L116 25 L119 76 L67 84Z'} fill={product.tone} />

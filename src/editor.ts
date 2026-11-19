@@ -1,8 +1,8 @@
 import { products, type Product } from './catalog'
 
 export type Point = { x: number; z: number }
-export type CustomRoomItem = { name: string; width: number; depth: number; height: number; color: string; kind: 'furniture' | 'rug' | 'wall' }
-/** Wall-mounted items also carry `wallId`/`wallOffset` (metres from the wall centre), `wallSide` (+1 = along the wall normal) and `elevation` (metres from floor to the item's bottom). Their x/z/rotation are derived from the wall. */
+export type CustomRoomItem = { name: string; width: number; depth: number; height: number; color: string; kind: 'furniture' | 'rug' | 'wall' | 'ceiling' }
+/** Wall-mounted items also carry `wallId`/`wallOffset` (metres from the wall centre), `wallSide` (+1 = along the wall normal) and `elevation` (metres from floor to the item's bottom). Their x/z/rotation are derived from the wall. Ceiling items are placed like floor items; their `elevation` is derived so the top touches the ceiling. */
 export type RoomObject = { id: string; productId?: string; variantId?: string; custom?: CustomRoomItem; x: number; z: number; rotation: number; inBasket?: boolean; mirrored?: boolean; wallId?: string; wallOffset?: number; wallSide?: 1 | -1; elevation?: number }
 export type DoorStyle = 'hinged' | 'double' | 'sliding' | 'opening'
 export type WindowStyle = 'casement' | 'fixed' | 'balcony'
@@ -36,7 +36,7 @@ export function roomItemShape(object: RoomObject): RoomItemShape | null {
 function isCustomRoomItem(value: unknown): value is CustomRoomItem {
   if (!value || typeof value !== 'object') return false
   const item = value as CustomRoomItem
-  return typeof item.name === 'string' && item.name.trim().length > 0 && item.name.length <= 80 && [item.width, item.depth].every((dimension) => Number.isFinite(dimension) && dimension >= 1 && dimension <= 2000) && Number.isFinite(item.height) && item.height >= 1 && item.height <= 600 && /^#[\da-f]{6}$/i.test(item.color) && ['furniture', 'rug', 'wall'].includes(item.kind)
+  return typeof item.name === 'string' && item.name.trim().length > 0 && item.name.length <= 80 && [item.width, item.depth].every((dimension) => Number.isFinite(dimension) && dimension >= 1 && dimension <= 2000) && Number.isFinite(item.height) && item.height >= 1 && item.height <= 600 && /^#[\da-f]{6}$/i.test(item.color) && ['furniture', 'rug', 'wall', 'ceiling'].includes(item.kind)
 }
 function isRoomObject(value: unknown): value is RoomObject {
   if (!value || typeof value !== 'object') return false
@@ -179,6 +179,9 @@ export function placeObject(object: RoomObject, room: ProjectState, snap = false
   const product = roomItemShape(object)
   if (!product) return object
   let result = { ...object, x: snap ? Math.round(object.x * 10) / 10 : object.x, z: snap ? Math.round(object.z * 10) / 10 : object.z }
+  if (isCeilingHung(object)) return { ...result, elevation: ceilingElevation(product, room) }
+  // A custom item switched from ceiling to floor drops back to the floor.
+  if (result.elevation !== undefined) delete result.elevation
   if (wallSnap) {
     for (const wall of room.features.filter((f) => f.type === 'wall')) {
       const [a, b] = wallEndpoints(wall), hit = projection(result, a, b)
@@ -207,16 +210,29 @@ export function rotateObjects(project: ProjectState, ids: string[], angle: numbe
   const regions = getFloorRegions(project.features)
   return objects.every((object) => !ids.includes(object.id) || fitsFloor(object, project, regions)) ? { ...project, objects } : null
 }
-export function isWallMounted(object: RoomObject) {
-  return object.custom ? object.custom.kind === 'wall' : productById.get(object.productId ?? '')?.mount === 'wall'
+export function mountOf(object: RoomObject): 'floor' | 'wall' | 'ceiling' {
+  const mount = object.custom ? object.custom.kind : productById.get(object.productId ?? '')?.mount
+  return mount === 'wall' || mount === 'ceiling' ? mount : 'floor'
+}
+export const isWallMounted = (object: RoomObject) => mountOf(object) === 'wall'
+export const isCeilingHung = (object: RoomObject) => mountOf(object) === 'ceiling'
+/** Ceiling items hang with their top at the ceiling; items taller than the room stand on the floor. */
+const ceilingElevation = (shape: RoomItemShape, project: ProjectState) => Math.max(0, project.ceilingHeight - shape.height / 100)
+/** Whether the given face of a wall (+1/−1, see `wallInsideSign`) looks into a room. */
+function faceIsRoom(wall: RoomFeature, side: number, regions: FloorRegion[]) {
+  const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
+  return regions.some((region) => pointInPolygon({ x: wall.x + nx * side * 0.15, z: wall.z + nz * side * 0.15 }, region.points))
 }
 const defaultElevation = (object: RoomObject, shape: RoomItemShape) => object.custom ? Math.max(0, 1.5 - shape.height / 200) : (productById.get(object.productId ?? '')?.mountHeight ?? 120) / 100
 /**
  * Hangs a wall item on its wall (or the wall nearest `point`), flush with the wall face.
- * `point` picks the position along the wall and, when `pickSide` is set, which face it hangs on.
+ * `point` picks the position along the wall. `face` picks the face: ±1 is a face the user hit in 3D;
+ * 'floor' means `point` is a floor or plan point, whose side is used only if that side looks into a room
+ * (a drop or tap just outside an exterior wall must not hang the item on the outside).
+ * Without `face` the item keeps its face on the same wall, else takes the room side.
  * Returns null when there is no wall long enough.
  */
-export function hangOnWall(object: RoomObject, project: ProjectState, point?: Point, pickSide = false): RoomObject | null {
+export function hangOnWall(object: RoomObject, project: ProjectState, point?: Point, face?: 1 | -1 | 'floor'): RoomObject | null {
   const shape = roomItemShape(object)
   if (!shape) return null
   const width = shape.width / 100, depth = shape.depth / 100, height = shape.height / 100
@@ -225,9 +241,13 @@ export function hangOnWall(object: RoomObject, project: ProjectState, point?: Po
   const wall = project.features.find((f) => f.type === 'wall' && f.id === object.wallId) ?? walls.sort((a, b) => distance(target, projection(target, ...wallEndpoints(a)).point) - distance(target, projection(target, ...wallEndpoints(b)).point))[0]
   if (!wall) return null
   const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
-  // A tap on a wall's face picks that face; a tap on its top (plan view) is ambiguous and falls back to the room side.
+  const regions = getFloorRegions(project.features)
+  // A hit face, or the side of a floor point beside the wall, is used unless it is the outside of a room's wall.
+  // A point on the wall's top (plan view) is ambiguous and keeps the current face or takes the room side.
   const across = point ? (point.x - wall.x) * nx + (point.z - wall.z) * nz : 0
-  const side = pickSide && point && Math.abs(across) > wallThickness(wall) / 4 ? (across > 0 ? 1 : -1) : object.wallId === wall.id && object.wallSide ? object.wallSide : wallInsideSign(wall, getFloorRegions(project.features)) as 1 | -1
+  const wanted: 1 | -1 | null = typeof face === 'number' ? face : face === 'floor' && point && Math.abs(across) > wallThickness(wall) / 2 ? (across > 0 ? 1 : -1) : null
+  const side = wanted && (faceIsRoom(wall, wanted, regions) || !faceIsRoom(wall, -wanted, regions)) ? wanted
+    : object.wallId === wall.id && object.wallSide ? object.wallSide : wallInsideSign(wall, regions) as 1 | -1
   const along = point ? (point.x - wall.x) * Math.cos(wall.rotation) - (point.z - wall.z) * Math.sin(wall.rotation) : object.wallId === wall.id ? object.wallOffset ?? 0 : 0
   const slack = Math.max(0, (wall.width - width) / 2), wallOffset = clamp(along, -slack, slack)
   const elevation = clamp(object.elevation ?? defaultElevation(object, shape), 0, Math.max(0, wall.height - height))
@@ -254,7 +274,7 @@ function footprintsOverlap(a: RoomObject, b: RoomObject, pa: RoomItemShape, pb: 
 }
 export function overlaps(a: RoomObject, b: RoomObject) {
   const pa = roomItemShape(a), pb = roomItemShape(b)
-  if (!pa || !pb || pa.category === 'Rug' || pb.category === 'Rug' || isWallMounted(a) || isWallMounted(b)) return false
+  if (!pa || !pb || pa.category === 'Rug' || pb.category === 'Rug' || isWallMounted(a) || isWallMounted(b) || isCeilingHung(a) !== isCeilingHung(b)) return false
   return footprintsOverlap(a, b, pa, pb)
 }
 export function placementWarnings(project: ProjectState) {
@@ -266,11 +286,16 @@ export function placementWarnings(project: ProjectState) {
       if (!fitsFloor(object, project, regions)) warnings.push({ id: object.id, message: `${item.name} is no longer on a wall. Drag it onto a wall or remove it.` })
       wallItemClashes(object, project).forEach((name) => warnings.push({ id: object.id, message: `${item.name} overlaps ${name}.` }))
       // Floor items standing in front of a wall item only matter if they reach up to it.
-      project.objects.forEach((other) => { const shape = roomItemShape(other); if (shape && other.id !== object.id && !isWallMounted(other) && shape.category !== 'Rug' && shape.height / 100 > (object.elevation ?? 0) + 0.02 && footprintsOverlap(object, other, item, shape)) warnings.push({ id: object.id, message: `${item.name} may hit ${shape.name}.` }) })
+      project.objects.forEach((other) => { const shape = roomItemShape(other); if (shape && other.id !== object.id && mountOf(other) === 'floor' && shape.category !== 'Rug' && shape.height / 100 > (object.elevation ?? 0) + 0.02 && footprintsOverlap(object, other, item, shape)) warnings.push({ id: object.id, message: `${item.name} may hit ${shape.name}.` }) })
       return
     }
     if (!fitsFloor(object, project, regions)) warnings.push({ id: object.id, message: `${item.name} is outside an enclosed room or crosses a wall.` })
     project.objects.slice(index + 1).forEach((other) => { if (overlaps(object, other)) warnings.push({ id: object.id, message: `${item.name} overlaps ${roomItemShape(other)?.name || 'another item'}.` }) })
+    if (isCeilingHung(object)) {
+      // Ceiling items only clash with floor items tall enough to reach them; doors swing below them.
+      project.objects.forEach((other) => { const shape = roomItemShape(other); if (shape && mountOf(other) === 'floor' && shape.category !== 'Rug' && shape.height / 100 > (object.elevation ?? 0) + 0.02 && footprintsOverlap(object, other, item, shape)) warnings.push({ id: object.id, message: `${item.name} may hit ${shape.name}.` }) })
+      return
+    }
     project.features.filter((f) => f.type === 'door' || (f.type === 'window' && openingStyle(f) === 'balcony')).forEach((door) => {
       const dx = object.x - door.x, dz = object.z - door.z, extent = footprint(item, object.rotation - door.rotation)
       const along = dx * Math.cos(door.rotation) - dz * Math.sin(door.rotation)
@@ -297,9 +322,7 @@ export const openingSizes: Record<DoorStyle | WindowStyle, OpeningSize[]> = {
 }
 /** Which side of a wall (+1 = along its normal (sin r, cos r), −1 = against it) faces into a room; +1 when both or neither side does. */
 export function wallInsideSign(wall: RoomFeature, regions: FloorRegion[]) {
-  const nx = Math.sin(wall.rotation), nz = Math.cos(wall.rotation)
-  const inside = (side: number) => regions.some((region) => pointInPolygon({ x: wall.x + nx * side * 0.15, z: wall.z + nz * side * 0.15 }, region.points))
-  return inside(-1) && !inside(1) ? -1 : 1
+  return faceIsRoom(wall, -1, regions) && !faceIsRoom(wall, 1, regions) ? -1 : 1
 }
 /** Side of the wall a door leaf swings into (same sign convention as `wallInsideSign`). */
 export const doorSwingSign = (door: RoomFeature, wall: RoomFeature | undefined, regions: FloorRegion[]) => (wall ? wallInsideSign(wall, regions) : 1) * (door.swing === 'out' ? -1 : 1)
@@ -322,8 +345,8 @@ export function attachOpening(feature: RoomFeature, room: ProjectState): RoomFea
 export function refreshOpenings(project: ProjectState): ProjectState {
   const walls = new Set(project.features.filter((f) => f.type === 'wall').map((f) => f.id))
   const refreshed = { ...project, features: project.features.filter((f) => f.type === 'wall' || !f.wallId || walls.has(f.wallId)).map((f) => attachOpening(f, project)) }
-  // Wall items follow their wall; if the wall is gone they stay put, detached, and get a warning.
-  return { ...refreshed, objects: project.objects.map((object) => !object.wallId ? object : walls.has(object.wallId) ? hangOnWall(object, refreshed) ?? object : { ...object, wallId: undefined }) }
+  // Wall items follow their wall; if the wall is gone they stay put, detached, and get a warning. Ceiling items follow the ceiling height.
+  return { ...refreshed, objects: project.objects.map((object) => isCeilingHung(object) ? placeObject(object, refreshed) : !object.wallId ? object : walls.has(object.wallId) ? hangOnWall(object, refreshed) ?? object : { ...object, wallId: undefined }) }
 }
 export function moveWallEndpoint(project: ProjectState, id: string, previous: Point, next: Point): ProjectState {
   const bounded = { x: clamp(next.x, -project.width / 2, project.width / 2), z: clamp(next.z, -project.length / 2, project.length / 2) }

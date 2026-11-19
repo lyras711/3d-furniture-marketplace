@@ -21,3 +21,9 @@ Get a mobile user from an empty project to their own walls in 3D as fast as poss
 - No ceiling-height measurement in AR (entered on review; default from project).
 - No doors/windows capture during the scan; no multi-room sessions (tracking drift).
 - Measuring replaces the current plan rather than adding a room next to existing ones (same wall de-duplication limitation as the rectangle quick start, see [[2026-10-03-editor-ux-redesign]]).
+
+## Update 2026-11-19 — continuous corner chain, floor-plane aim
+- User request: AR wall drawing must be one continuous chain (start, then mark, mark, mark), and must track only floor height so corners behind obstacles can be marked.
+- Marks are now corners. Each mark ends the current wall and starts the next. Near the first corner (25 cm, with ≥3 corners) the aim snaps to it and the tap closes the room; Finish room also closes back to the start.
+- Floor height = lowest upward-facing hit-test result seen before the first mark; locked afterwards. The reticle is the viewer's centre ray intersected with that plane, so furniture and other surfaces are ignored. This replaces the earlier "two points per wall + 12 cm floor tolerance" rule.
+- Still not verified on a real ARCore device.

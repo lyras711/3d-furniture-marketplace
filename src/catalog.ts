@@ -66,8 +66,8 @@ export interface Product {
   accent: string
   status: string
   sourceUrl?: string
-  /** Wall-mounted products hang on a wall; `mountHeight` is the default height of the item's bottom edge in cm. */
-  mount?: 'floor' | 'wall'
+  /** Wall-mounted products hang on a wall; `mountHeight` is the default height of the item's bottom edge in cm. Ceiling products hang with their top at the room's ceiling height. */
+  mount?: 'floor' | 'wall' | 'ceiling'
   mountHeight?: number
   localizedNames?: Record<string, string>
   modelPath?: string | null
@@ -476,6 +476,40 @@ export const products: Product[] = [
     price: null,
     tone: '#e9e4da',
     accent: '#a8a294',
+    status: 'Temporary model · illustrative dimensions',
+  },
+  {
+    id: 'pendant-dome',
+    name: 'Dome pendant light, 40 cm',
+    brand: 'Formivo sample',
+    retailer: 'Formivo temporary',
+    sku: 'TMP-CEIL-001',
+    group: 'Lighting',
+    category: 'Pendant light',
+    width: 40,
+    depth: 40,
+    height: 70,
+    mount: 'ceiling',
+    price: null,
+    tone: '#2f4a3e',
+    accent: '#b08d5b',
+    status: 'Temporary model · illustrative dimensions',
+  },
+  {
+    id: 'fan-ceiling',
+    name: 'Five-blade ceiling fan, 132 cm',
+    brand: 'Formivo sample',
+    retailer: 'Formivo temporary',
+    sku: 'TMP-CEIL-002',
+    group: 'Lighting',
+    category: 'Ceiling fan',
+    width: 132,
+    depth: 132,
+    height: 40,
+    mount: 'ceiling',
+    price: null,
+    tone: '#c9a37a',
+    accent: '#3a3f44',
     status: 'Temporary model · illustrative dimensions',
   },
   ...generatedProducts,

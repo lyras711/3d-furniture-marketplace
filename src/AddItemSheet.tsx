@@ -2,10 +2,10 @@ import { useMemo, useState } from 'react'
 import type { Product } from './catalog'
 import { formatPrice, Icon, ProductThumb } from './ui'
 
-export type AddRoom = 'living' | 'bedroom' | 'dining' | 'kitchen' | 'bathroom' | 'wall' | 'own'
+export type AddRoom = 'living' | 'bedroom' | 'dining' | 'kitchen' | 'bathroom' | 'wall' | 'ceiling' | 'own'
 const rooms: { id: AddRoom; label: string }[] = [
   { id: 'living', label: 'Living room' }, { id: 'bedroom', label: 'Bedroom' }, { id: 'dining', label: 'Dining' },
-  { id: 'kitchen', label: 'Kitchen' }, { id: 'bathroom', label: 'Bathroom' }, { id: 'wall', label: 'Wall decor' }, { id: 'own', label: 'Your own' },
+  { id: 'kitchen', label: 'Kitchen' }, { id: 'bathroom', label: 'Bathroom' }, { id: 'wall', label: 'Wall decor' }, { id: 'ceiling', label: 'Ceiling' }, { id: 'own', label: 'Your own' },
 ]
 const roomByCategory: Record<string, AddRoom> = {
   Bed: 'bedroom', Nightstand: 'bedroom', Wardrobe: 'bedroom',
@@ -14,7 +14,7 @@ const roomByCategory: Record<string, AddRoom> = {
   Toilet: 'bathroom', Shower: 'bathroom', Bathtub: 'bathroom', 'Bathroom vanity': 'bathroom',
 }
 const roomByGroup: Partial<Record<Product['group'], AddRoom>> = { Bedroom: 'bedroom', Kitchen: 'kitchen', Bathroom: 'bathroom' }
-export const productRoom = (product: Product): AddRoom => roomByCategory[product.category] ?? (product.mount === 'wall' ? 'wall' : roomByGroup[product.group] ?? 'living')
+export const productRoom = (product: Product): AddRoom => roomByCategory[product.category] ?? (product.mount === 'wall' || product.mount === 'ceiling' ? product.mount : roomByGroup[product.group] ?? 'living')
 
 export default function AddItemSheet({ products, placedCounts, onAdd, onOwnItem, onClose, initialRoom = 'living' }: {
   products: Product[]; placedCounts: Map<string, number>

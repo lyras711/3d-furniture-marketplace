@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { getFloorRegions, wallEndpoints, type Point } from './src/editor'
-import { cornersFromEntries, cornersFromMeasuredWalls, projectFromCorners, wallLengths, type MeasuredWall } from './src/roomCapture'
+import { cornersFromEntries, cornersFromMeasuredWalls, floorPointFromRay, projectFromCorners, wallLengths, wallsFromCorners, type MeasuredWall } from './src/roomCapture'
 
 const area = (corners: Point[]) => getFloorRegions(projectFromCorners(corners).features)[0].area
 const close = (a: number[], b: number[], digits = 2) => a.forEach((value, i) => expect(value).toBeCloseTo(b[i], digits))
@@ -67,4 +67,23 @@ test('AR straightening can be turned off for angled walls', () => {
   expect(raw[2].x).not.toBeCloseTo(raw[1].x, 2)
   expect(() => cornersFromMeasuredWalls(walls.slice(0, 2))).toThrow('between 3')
   expect(() => cornersFromMeasuredWalls([...walls.slice(0, 3), { a: { x: 0, z: 1 }, b: { x: 0.05, z: 1 } }])).toThrow('20 cm')
+})
+
+test('AR corners marked in a chain close back to the first corner', () => {
+  const marked = [{ x: 1, z: 1 }, { x: 5.02, z: 0.98 }, { x: 5, z: 4.01 }, { x: 0.99, z: 4 }]
+  const walls = wallsFromCorners(marked)
+  expect(walls).toHaveLength(4)
+  expect(walls[3]).toEqual({ a: marked[3], b: marked[0] })
+  const { corners } = cornersFromMeasuredWalls(walls)
+  close(wallLengths(corners), [4.02, 3.02, 4.02, 3.02], 1)
+  expect(area(corners)).toBeCloseTo(12.1, 0)
+})
+
+test('AR aim projects onto the floor plane regardless of obstacles', () => {
+  const eye = { x: 0, y: 1.5, z: 0 }
+  const point = floorPointFromRay(eye, { x: 0, y: -Math.SQRT1_2, z: -Math.SQRT1_2 }, 0)!
+  expect(point.x).toBeCloseTo(0, 6)
+  expect(point.z).toBeCloseTo(-1.5, 6)
+  expect(floorPointFromRay(eye, { x: 0, y: 0, z: -1 }, 0)).toBeNull()
+  expect(floorPointFromRay(eye, { x: 0, y: -0.05, z: -1 }, 0)).toBeNull()
 })
